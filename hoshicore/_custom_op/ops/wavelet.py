@@ -15,13 +15,17 @@ from numpy.typing import NDArray
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
+from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
+from hoshicore._custom_op.backend_registry import select_backend as _select_backend
 
 
 _debug_log = partial(debug_log, "wavelet")
 # 小图上 PyWavelets 更快；只在大图热点路径启用 compiled core。
 MIN_COMPILED_WAVELET_PIXELS = 4_000_000
+# CUDA host-IO core 在中等 resize 后图像上已快于 PyWavelets；更小图保留 numpy。
+MIN_CUDA_WAVELET_PIXELS = 1_000_000
 
 
 def _wavelet_level(resize_factor: float) -> int:
@@ -69,20 +73,70 @@ def wavelet_dec_rec_core_compiled(
     return module.wavelet_dec_rec_cpu(image_arr, int(level))
 
 
+def wavelet_dec_rec_core_cuda(
+    image: np.ndarray,
+    level: int,
+) -> NDArray[np.float64]:
+    module, _ = _load_compiled_module_result()
+    if module is None or not hasattr(module, "wavelet_dec_rec_cuda_core"):
+        raise RuntimeError("compiled CUDA custom op backend is unavailable")
+    image_arr = _as_float64_2d(image)
+    return module.wavelet_dec_rec_cuda_core(image_arr, int(level))
+
+
 @lru_cache(maxsize=2)
-def _select_wavelet_dec_rec_backend(
+def _select_wavelet_dec_rec_cuda_core_backend(
     preference: str,
 ) -> tuple[str, Callable[[np.ndarray, int], NDArray[np.float64]]]:
     available, compiled_error = _native_backend_available(
-        "wavelet_dec_rec",
+        "wavelet_dec_rec_cuda_core",
         preference,
         load_module=_load_compiled_module_result,
     )
     if available:
-        return "compiled", wavelet_dec_rec_core_compiled
+        return "compiled", wavelet_dec_rec_core_cuda
 
     if compiled_error:
-        _debug_log(f"compiled backend unavailable, reason: {compiled_error}")
+        _debug_log(f"CUDA backend unavailable, reason: {compiled_error}")
+
+    return "numpy", wavelet_dec_rec_core_numpy
+
+
+def wavelet_dec_rec_core_cuda_or_numpy(
+    image: np.ndarray,
+    level: int,
+) -> NDArray[np.float64]:
+    backend_name, backend = _select_wavelet_dec_rec_cuda_core_backend(
+        _fallback_preference())
+    if backend_name != "compiled":
+        return backend(image, level)
+    try:
+        return backend(image, level)
+    except RuntimeError as exc:
+        if not is_cuda_runtime_unavailable_error(exc):
+            raise
+        _debug_log(
+            f"compiled CUDA backend unavailable at runtime, falling back to numpy: {exc}"
+        )
+        return wavelet_dec_rec_core_numpy(image, level)
+
+
+@lru_cache(maxsize=2)
+def _select_wavelet_dec_rec_backend(
+    preference: str,
+) -> tuple[str, Callable[[np.ndarray, int], NDArray[np.float64]]]:
+    selection = _select_backend(
+        "wavelet_dec_rec",
+        preference,
+        load_module=_load_compiled_module_result,
+    )
+    if selection.native and selection.candidate is not None:
+        if selection.candidate.kernel_name == "wavelet_dec_rec_cuda_core":
+            return "cuda", wavelet_dec_rec_core_cuda
+        return "compiled", wavelet_dec_rec_core_compiled
+
+    if selection.reason:
+        _debug_log(f"compiled backend unavailable, reason: {selection.reason}")
 
     return "numpy", wavelet_dec_rec_core_numpy
 
@@ -91,8 +145,25 @@ def wavelet_dec_rec_core(
     image: np.ndarray,
     level: int,
 ) -> NDArray[np.float64]:
-    _, backend = _select_wavelet_dec_rec_backend(_fallback_preference())
-    return backend(image, level)
+    backend_name, backend = _select_wavelet_dec_rec_backend(_fallback_preference())
+    if backend_name != "cuda":
+        return backend(image, level)
+    try:
+        return backend(image, level)
+    except RuntimeError as exc:
+        if not is_cuda_runtime_unavailable_error(exc):
+            raise
+        _debug_log(
+            f"compiled CUDA backend unavailable at runtime, falling back to CPU: {exc}"
+        )
+        try:
+            return wavelet_dec_rec_core_compiled(image, level)
+        except RuntimeError as cpu_exc:
+            _debug_log(
+                f"compiled CPU backend unavailable after CUDA fallback, "
+                f"falling back to numpy: {cpu_exc}"
+            )
+            return wavelet_dec_rec_core_numpy(image, level)
 
 
 def wavelet_dec_rec(
@@ -104,8 +175,11 @@ def wavelet_dec_rec(
     small = cv2.resize(image_arr, None, fx=resize_factor, fy=resize_factor)
     if not small.flags.c_contiguous:
         small = np.ascontiguousarray(small)
-    if small.size < MIN_COMPILED_WAVELET_PIXELS:
+    if small.size < MIN_CUDA_WAVELET_PIXELS:
         reconstructed = wavelet_dec_rec_core_numpy(small, level)
+        return cv2.resize(reconstructed, (image_arr.shape[1], image_arr.shape[0]))
+    if small.size < MIN_COMPILED_WAVELET_PIXELS:
+        reconstructed = wavelet_dec_rec_core_cuda_or_numpy(small, level)
     else:
         reconstructed = wavelet_dec_rec_core(small, level)
     return cv2.resize(reconstructed, (image_arr.shape[1], image_arr.shape[0]))

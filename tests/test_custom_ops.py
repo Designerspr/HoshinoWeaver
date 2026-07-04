@@ -991,6 +991,25 @@ class TestCustomOpsFallback(unittest.TestCase):
         self.assertEqual(selection.backend, "numpy")
         self.assertEqual(selection.reason, "compiled backend missing build flag: cuda")
 
+    def test_backend_registry_continues_after_build_flag_miss(self) -> None:
+        class Module:
+            wavelet_dec_rec_cuda_core = lambda self: None
+            wavelet_dec_rec_cpu = lambda self: None
+
+            def build_info(self):
+                return {"cuda": False}
+
+        module = Module()
+
+        selection = backend_registry.select_backend(
+            "wavelet_dec_rec",
+            load_module=lambda: (module, None),
+        )
+
+        self.assertTrue(selection.native)
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(selection.candidate.kernel_name, "wavelet_dec_rec_cpu")
+
     def test_fgp_masked_mean_merge_can_force_numpy_fallback(self) -> None:
         img = np.array(
             [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],

@@ -2,6 +2,7 @@
 
 #include "common/backend_info.h"
 #include "ops/alignment/alignment_ops.h"
+#include "ops/detection/detection_ops.h"
 #include "ops/filter/filter_ops.h"
 #include "ops/fgp/fgp_ops.h"
 #include "ops/max/max_ops.h"
@@ -11,6 +12,7 @@
 #include "ops/wavelet/wavelet_ops.h"
 #if HNW_ENABLE_CUDA
 #include "ops/cuda/camera_model_remap_fused_ops.h"
+#include "ops/cuda/wavelet_cuda_ops.h"
 #endif
 
 namespace py = pybind11;
@@ -20,6 +22,7 @@ PYBIND11_MODULE(_C, m) {
 
     bind_backend_info(m);
     bind_alignment_ops(m);
+    bind_detection_ops(m);
     bind_filter_ops(m);
     bind_fgp_ops(m);
     bind_max_ops(m);
@@ -29,5 +32,6 @@ PYBIND11_MODULE(_C, m) {
     bind_wavelet_ops(m);
 #if HNW_ENABLE_CUDA
     bind_camera_model_remap_fused_ops(m);
+    bind_wavelet_cuda_ops(m);
 #endif
 }

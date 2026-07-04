@@ -4,6 +4,7 @@ from hoshicore._custom_op.ops.alignment import (
     extract_point_features,
     find_initial_match,
 )
+from hoshicore._custom_op.ops.detection import star_detect_full_connected_components
 from hoshicore._custom_op.ops.fgp import (
     fgp_add,
     fgp_accumulate,
@@ -46,6 +47,7 @@ __all__ = [
     "sigma_clip_fused_masked_merge",
     "sigma_clip_fused_merge",
     "sigma_clip_iterative_chunk",
+    "star_detect_full_connected_components",
     "threshold_max_merge",
     "wavelet_dec_rec",
 ]

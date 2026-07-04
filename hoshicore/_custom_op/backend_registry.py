@@ -61,7 +61,32 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
     BackendCandidate("equalize_noise_correct", "openmp_cpu", "equalize_noise_correct"),
     BackendCandidate("sigma_clip_iterative_chunk", "openmp_cpu", "sigma_clip_iterative_chunk"),
     BackendCandidate("sigma_clip_fused_chunk", "openmp_cpu", "sigma_clip_fused_chunk"),
+    # Experimental norma detector path; production fallback remains OpenCV contour.
+    BackendCandidate(
+        "star_detect_connected_components_candidates",
+        "openmp_cpu",
+        "star_detect_connected_components_candidates",
+    ),
+    BackendCandidate(
+        "wavelet_dec_rec",
+        "cuda_host_io",
+        "wavelet_dec_rec_cuda_core",
+        priority=10,
+        build_flag="cuda",
+    ),
     BackendCandidate("wavelet_dec_rec", "openmp_cpu", "wavelet_dec_rec_cpu"),
+    BackendCandidate(
+        "wavelet_dec_rec_cuda_core",
+        "cuda_host_io",
+        "wavelet_dec_rec_cuda_core",
+        build_flag="cuda",
+    ),
+    BackendCandidate(
+        "star_detect_full_connected_components",
+        "cuda_host_io",
+        "star_detect_full_connected_components_core",
+        build_flag="cuda",
+    ),
     BackendCandidate(
         "camera_model_remap",
         "cuda_host_io",
@@ -101,6 +126,7 @@ def select_backend(
         return BackendSelection(None, None, module_error or "compiled backend unavailable")
 
     missing_kernel: str | None = None
+    missing_build_flag: str | None = None
     for candidate in sorted(candidates, key=lambda item: item.priority, reverse=True):
         if not _has_static_attr(module, candidate.kernel_name):
             missing_kernel = candidate.kernel_name
@@ -108,15 +134,18 @@ def select_backend(
         if candidate.build_flag is not None:
             info = build_info if build_info is not None else _module_build_info(module)
             if info and not info.get(candidate.build_flag):
-                return BackendSelection(
-                    None,
-                    module,
-                    f"compiled backend missing build flag: {candidate.build_flag}",
-                )
+                missing_build_flag = candidate.build_flag
+                continue
         return BackendSelection(candidate, module, None)
 
     if missing_kernel is not None:
         return BackendSelection(None, module, f"compiled backend missing kernel: {missing_kernel}")
+    if missing_build_flag is not None:
+        return BackendSelection(
+            None,
+            module,
+            f"compiled backend missing build flag: {missing_build_flag}",
+        )
     return BackendSelection(None, module, f"no available backend candidate for {logical_op}")
 
 
