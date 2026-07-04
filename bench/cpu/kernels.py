@@ -45,6 +45,7 @@ from bench.common import (
 )
 from hoshicore._custom_op import build_info as custom_ops_build_info
 import hoshicore._custom_op.ops.alignment as alignment_ops
+import hoshicore._custom_op.ops.detection as detection_ops
 import hoshicore._custom_op.ops.fgp as fgp_ops
 import hoshicore._custom_op.ops.filter as filter_ops
 import hoshicore._custom_op.ops.max as max_ops
@@ -491,6 +492,37 @@ def bench_median_filter_2d_backend(
     _ = median_filter(image, ksize)
 
 
+def build_cc_candidate_input(
+    height: int,
+    width: int,
+    *,
+    seed: int,
+    components: int = 1200,
+) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    image = rng.normal(scale=0.01, size=(height, width)).astype(np.float64)
+    bw = np.zeros((height, width), dtype=np.uint8)
+    margin = 8
+    max_y = max(margin + 1, height - margin)
+    max_x = max(margin + 1, width - margin)
+    for _ in range(components):
+        cy = int(rng.integers(margin, max_y))
+        cx = int(rng.integers(margin, max_x))
+        radius = int(rng.integers(2, 5))
+        value = float(rng.uniform(1.0, 10.0))
+        cv2.circle(bw, (cx, cy), radius, 255, -1)
+        cv2.circle(image, (cx, cy), radius, value, -1)
+    return image, bw
+
+
+def bench_star_detect_connected_components_backend(
+    image: np.ndarray,
+    bw: np.ndarray,
+) -> None:
+    _ = detection_ops.star_detect_connected_components_candidates_compiled(
+        image, bw)
+
+
 def build_alignment_match_inputs(
     n_points: int,
     *,
@@ -557,6 +589,7 @@ def bench_wavelet_dec_rec_core_backend(
     fn = {
         "numpy": wavelet_ops.wavelet_dec_rec_core_numpy,
         "compiled": wavelet_ops.wavelet_dec_rec_core_compiled,
+        "cuda": wavelet_ops.wavelet_dec_rec_core_cuda,
     }[backend]
     _ = fn(image, level)
 
@@ -678,6 +711,7 @@ def main() -> None:
     wavelet_registry_names = {
         "wavelet_dec_rec_core_numpy",
         "wavelet_dec_rec_core_compiled",
+        "wavelet_dec_rec_core_cuda",
         "wavelet_dec_rec_numpy",
         "wavelet_dec_rec_auto",
     }
@@ -709,6 +743,11 @@ def main() -> None:
                 wavelet_input,
                 args.wavelet_level,
                 backend="compiled",
+            ),
+            "wavelet_dec_rec_core_cuda": lambda: bench_wavelet_dec_rec_core_backend(
+                wavelet_input,
+                args.wavelet_level,
+                backend="cuda",
             ),
             "wavelet_dec_rec_numpy": lambda: bench_wavelet_dec_rec_backend(
                 wavelet_input,
@@ -800,6 +839,11 @@ def main() -> None:
         )
 
     wavelet_input = build_wavelet_input(frames[0])
+    cc_candidate_image, cc_candidate_bw = build_cc_candidate_input(
+        args.height,
+        args.width,
+        seed=args.seed,
+    )
     sc_chunk_stack, sc_chunk_sum, sc_chunk_sq, sc_chunk_n = build_sigma_clip_chunk_stack(
         frames, args.chunk_rows)
     equalize_noise_payloads = build_equalize_noise_inputs(frames)
@@ -932,6 +976,11 @@ def main() -> None:
             args.wavelet_level,
             backend="compiled",
         ),
+        "wavelet_dec_rec_core_cuda": lambda: bench_wavelet_dec_rec_core_backend(
+            wavelet_input,
+            args.wavelet_level,
+            backend="cuda",
+        ),
         "wavelet_dec_rec_numpy": lambda: bench_wavelet_dec_rec_backend(
             wavelet_input,
             args.wavelet_resize_factor,
@@ -941,6 +990,10 @@ def main() -> None:
             wavelet_input,
             args.wavelet_resize_factor,
             backend="auto",
+        ),
+        "star_detect_connected_components_compiled": lambda: bench_star_detect_connected_components_backend(
+            cc_candidate_image,
+            cc_candidate_bw,
         ),
         "sigma_clip_chunk_numpy": lambda: bench_sigma_clip_chunk_backend(
             sc_chunk_stack, sc_chunk_sum, sc_chunk_sq, sc_chunk_n,

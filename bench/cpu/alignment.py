@@ -18,26 +18,43 @@ from bench.common import (
     run_benchmark,
 )
 from bench.data_tools.starfield import generate_starfield_frames
+from hoshicore._custom_op.ops.detection import star_detect_threshold_morph_numpy
 from hoshicore.component.norma.alignment import match_star_pairs, optimize_alignment
 from hoshicore.component.norma.cache import GeometryView, StarDetectionCache
-from hoshicore.component.norma.detection import _wavelet_dec_rec
+from hoshicore.component.norma.detection import (
+    _detect_star_points_full_gpu,
+    _detect_star_points_opencv,
+    _wavelet_dec_rec,
+    detect_star_points,
+)
+from hoshicore.component.norma.fast_detection import (
+    detect_star_points_connected_components,
+    detect_stars_connected_components,
+)
 from hoshicore.component.norma.frame_align import (
     align_frame_camera_model,
     align_frame_homography,
     make_geometry,
     to_gray_f64,
 )
-from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
+from hoshicore.component.norma.types import (
+    CameraModel,
+    Distortion,
+    FlatCameraModel,
+    Intrinsics,
+)
 
 
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-CASE_NAMES = [
+DEFAULT_CASE_NAMES = [
     "detect_stream",
+    "detect_cc_stream",
     "detect_prepare_stream",
     "detect_wavelet_stream",
     "detect_extract_stream",
     "detect_bandpass_stream",
     "detect_threshold_morph_stream",
+    "detect_cc_postprocess_stream",
     "detect_contour_stream",
     "detect_ellipse_intensity_stream",
     "features_stream",
@@ -49,6 +66,26 @@ CASE_NAMES = [
     "remap_stream",
     "camera_model_pipeline",
 ]
+GPU_CASE_NAMES = [
+    "detect_full_gpu_stream",
+]
+BASELINE_CASE_NAMES = [
+    "detect_opencv_stream",
+]
+QUALITY_CASE_NAME = "detect_full_gpu_vs_contour_quality"
+CASE_NAMES = [
+    *DEFAULT_CASE_NAMES,
+    *GPU_CASE_NAMES,
+    *BASELINE_CASE_NAMES,
+    QUALITY_CASE_NAME,
+]
+FULL_GPU_QUALITY_THRESHOLDS = {
+    "max_count_diff_ratio": 0.15,
+    "min_contour_to_full_gpu_recall_1px": 0.95,
+    "max_contour_to_full_gpu_p95_px": 0.1,
+    "max_pair_diff_ratio": 0.20,
+    "max_homography_p95_px": 0.30,
+}
 
 
 @dataclasses.dataclass
@@ -126,9 +163,7 @@ def _prepare_detect_bandpass_payload(payload: DetectPayload) -> DetectBandpassPa
 
 
 def _threshold_morph_detect_image(payload: DetectBandpassPayload) -> np.ndarray:
-    bw = ((payload.img_rec > np.percentile(payload.img_rec[payload.mask], 99.5)) *
-          payload.mask).astype(np.uint8) * 255
-    return cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return star_detect_threshold_morph_numpy(payload.img_rec, payload.mask)
 
 
 def _prepare_detect_threshold_payload(
@@ -272,6 +307,24 @@ def bench_detect_stream(frames: list[np.ndarray]) -> None:
         _ = cache.detected_stars
 
 
+def bench_detect_opencv_stream(frames: list[np.ndarray]) -> None:
+    for frame in frames:
+        gray = to_gray_f64(frame)
+        _ = _detect_star_points_opencv(gray)
+
+
+def bench_detect_full_gpu_stream(frames: list[np.ndarray]) -> None:
+    for frame in frames:
+        gray = to_gray_f64(frame)
+        _ = _detect_star_points_full_gpu(gray)
+
+
+def bench_detect_cc_stream(frames: list[np.ndarray]) -> None:
+    for frame in frames:
+        gray = to_gray_f64(frame)
+        _ = detect_star_points_connected_components(gray)
+
+
 def bench_detect_prepare_stream(frames: list[np.ndarray]) -> None:
     for frame in frames:
         _ = _prepare_detect_payload(frame)
@@ -299,6 +352,12 @@ def bench_detect_threshold_morph_stream(
         _ = _threshold_morph_detect_image(payload)
 
 
+def bench_detect_cc_postprocess_stream(
+        payloads: list[DetectThresholdPayload]) -> None:
+    for payload in payloads:
+        _ = detect_stars_connected_components(payload.img_rec, payload.bw)
+
+
 def bench_detect_contour_stream(payloads: list[DetectThresholdPayload]) -> None:
     for payload in payloads:
         _ = _find_detect_contours(payload.bw)
@@ -308,6 +367,203 @@ def bench_detect_ellipse_intensity_stream(
         payloads: list[DetectContourPayload]) -> None:
     for payload in payloads:
         _measure_detect_ellipse_intensity(payload)
+
+
+def _nearest_stats(source: np.ndarray, target: np.ndarray) -> dict[str, Any]:
+    if len(source) == 0 or len(target) == 0:
+        return {
+            "source_count": len(source),
+            "target_count": len(target),
+            "recall_1px": 0.0,
+            "recall_2px": 0.0,
+            "median_px": None,
+            "p95_px": None,
+            "max_px": None,
+        }
+    diff = source[:, None, :] - target[None, :, :]
+    dist = np.sqrt(np.sum(diff * diff, axis=2))
+    nearest = np.min(dist, axis=1)
+    return {
+        "source_count": len(source),
+        "target_count": len(target),
+        "recall_1px": float(np.mean(nearest <= 1.0)),
+        "recall_2px": float(np.mean(nearest <= 2.0)),
+        "median_px": float(np.median(nearest)),
+        "p95_px": float(np.percentile(nearest, 95)),
+        "max_px": float(np.max(nearest)),
+    }
+
+
+def _project_homography(homography: np.ndarray, points: np.ndarray) -> np.ndarray:
+    points_h = np.concatenate([points, np.ones((len(points), 1))], axis=1)
+    projected = points_h @ homography.T
+    return projected[:, :2] / projected[:, 2:3]
+
+
+def _homography_delta(
+    h1: np.ndarray,
+    h2: np.ndarray,
+    shape: tuple[int, int],
+) -> dict[str, float]:
+    h1 = h1 / h1[2, 2]
+    h2 = h2 / h2[2, 2]
+    height, width = shape
+    grid_x = np.linspace(0, width - 1, 16)
+    grid_y = np.linspace(0, height - 1, 12)
+    xx, yy = np.meshgrid(grid_x, grid_y)
+    points = np.stack([xx.ravel(), yy.ravel()], axis=1)
+    delta = np.linalg.norm(
+        _project_homography(h1, points) - _project_homography(h2, points),
+        axis=1,
+    )
+    return {
+        "median_px": float(np.median(delta)),
+        "p95_px": float(np.percentile(delta, 95)),
+        "max_px": float(np.max(delta)),
+    }
+
+
+def _match_detected_stars(ref, src, shape: tuple[int, int]):
+    camera = FlatCameraModel(shape)
+    ref_vectors = camera.unproject(ref.positions)
+    src_vectors = camera.unproject(src.positions)
+    return match_star_pairs(
+        ref_vectors,
+        src_vectors,
+        ref.volumes,
+        src.volumes,
+        ref.positions,
+        src.positions,
+    )
+
+
+def compare_detect_quality(frames: list[np.ndarray]) -> dict[str, Any]:
+    contour_results = []
+    full_gpu_results = []
+    per_frame = []
+    for frame in frames:
+        gray = to_gray_f64(frame)
+        contour = _detect_star_points_opencv(gray)
+        full_gpu = _detect_star_points_full_gpu(gray)
+        contour_results.append(contour)
+        full_gpu_results.append(full_gpu)
+        contour_to_full_gpu = _nearest_stats(contour.positions,
+                                             full_gpu.positions)
+        full_gpu_to_contour = _nearest_stats(full_gpu.positions,
+                                             contour.positions)
+        count_diff_ratio = 0.0
+        if len(contour.positions) > 0:
+            count_diff_ratio = (
+                len(full_gpu.positions) -
+                len(contour.positions)) / len(contour.positions)
+        per_frame.append({
+            "contour_count": len(contour.positions),
+            "full_gpu_count": len(full_gpu.positions),
+            "count_diff_ratio": float(count_diff_ratio),
+            "contour_to_full_gpu": contour_to_full_gpu,
+            "full_gpu_to_contour": full_gpu_to_contour,
+        })
+
+    shape = frames[0].shape[:2]
+    pair_reports = []
+    for idx in range(1, len(frames)):
+        try:
+            contour_match = _match_detected_stars(
+                contour_results[0], contour_results[idx], shape)
+            full_gpu_match = _match_detected_stars(
+                full_gpu_results[0], full_gpu_results[idx], shape)
+        except Exception as exc:
+            pair_reports.append({"index": idx, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        pair_diff_ratio = 0.0
+        if len(contour_match.pair_idx) > 0:
+            pair_diff_ratio = (
+                len(full_gpu_match.pair_idx) -
+                len(contour_match.pair_idx)) / len(contour_match.pair_idx)
+        pair_reports.append({
+            "index": idx,
+            "contour_pairs": len(contour_match.pair_idx),
+            "full_gpu_pairs": len(full_gpu_match.pair_idx),
+            "pair_diff_ratio": float(pair_diff_ratio),
+            "homography_delta": _homography_delta(
+                contour_match.init_homography,
+                full_gpu_match.init_homography,
+                shape,
+            ),
+        })
+
+    return {
+        "per_frame": per_frame,
+        "pairs": pair_reports,
+    }
+
+
+def summarize_detect_quality(quality: dict[str, Any]) -> dict[str, Any]:
+    per_frame = quality.get("per_frame", [])
+    pairs = quality.get("pairs", [])
+    failed_pairs = [pair for pair in pairs if "error" in pair]
+    successful_pairs = [pair for pair in pairs if "error" not in pair]
+
+    max_count_diff_ratio = 0.0
+    min_contour_to_full_gpu_recall_1px = 1.0
+    max_contour_to_full_gpu_p95_px = 0.0
+    for frame in per_frame:
+        max_count_diff_ratio = max(
+            max_count_diff_ratio,
+            abs(float(frame.get("count_diff_ratio", 0.0))),
+        )
+        contour_to_full_gpu = frame.get("contour_to_full_gpu", {})
+        min_contour_to_full_gpu_recall_1px = min(
+            min_contour_to_full_gpu_recall_1px,
+            float(contour_to_full_gpu.get("recall_1px", 0.0)),
+        )
+        p95_px = contour_to_full_gpu.get("p95_px")
+        if p95_px is not None:
+            max_contour_to_full_gpu_p95_px = max(
+                max_contour_to_full_gpu_p95_px,
+                float(p95_px),
+            )
+
+    max_pair_diff_ratio = 0.0
+    max_homography_p95_px = 0.0
+    for pair in successful_pairs:
+        max_pair_diff_ratio = max(
+            max_pair_diff_ratio,
+            abs(float(pair.get("pair_diff_ratio", 0.0))),
+        )
+        homography_delta = pair.get("homography_delta", {})
+        max_homography_p95_px = max(
+            max_homography_p95_px,
+            float(homography_delta.get("p95_px", 0.0)),
+        )
+
+    metrics = {
+        "max_count_diff_ratio": max_count_diff_ratio,
+        "min_contour_to_full_gpu_recall_1px":
+            min_contour_to_full_gpu_recall_1px,
+        "max_contour_to_full_gpu_p95_px": max_contour_to_full_gpu_p95_px,
+        "max_pair_diff_ratio": max_pair_diff_ratio,
+        "max_homography_p95_px": max_homography_p95_px,
+        "failed_pair_count": len(failed_pairs),
+    }
+    passed = (
+        len(failed_pairs) == 0
+        and max_count_diff_ratio <= FULL_GPU_QUALITY_THRESHOLDS[
+            "max_count_diff_ratio"]
+        and min_contour_to_full_gpu_recall_1px >= FULL_GPU_QUALITY_THRESHOLDS[
+            "min_contour_to_full_gpu_recall_1px"]
+        and max_contour_to_full_gpu_p95_px <= FULL_GPU_QUALITY_THRESHOLDS[
+            "max_contour_to_full_gpu_p95_px"]
+        and max_pair_diff_ratio <= FULL_GPU_QUALITY_THRESHOLDS[
+            "max_pair_diff_ratio"]
+        and max_homography_p95_px <= FULL_GPU_QUALITY_THRESHOLDS[
+            "max_homography_p95_px"]
+    )
+    return {
+        "passed": passed,
+        "thresholds": FULL_GPU_QUALITY_THRESHOLDS,
+        "metrics": metrics,
+    }
 
 
 def bench_features_stream(frames: list[np.ndarray]) -> None:
@@ -461,7 +717,7 @@ def main() -> None:
     parser.add_argument("--log-level", type=str, default="WARNING")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=5)
-    parser.add_argument("--cases", nargs="+", default=list(CASE_NAMES))
+    parser.add_argument("--cases", nargs="+", default=list(DEFAULT_CASE_NAMES))
     parser.add_argument("--output-json", type=str, default=None)
     args = parser.parse_args()
 
@@ -488,21 +744,28 @@ def main() -> None:
             f"Unknown alignment benchmark case(s): {unknown_cases}. "
             f"Available: {list(CASE_NAMES)}")
 
+    quality_requested = QUALITY_CASE_NAME in args.cases
+    benchmark_case_names = [
+        case for case in args.cases if case != QUALITY_CASE_NAME
+    ]
+
     detect_payload_cases = {
         "detect_wavelet_stream",
         "detect_extract_stream",
         "detect_bandpass_stream",
         "detect_threshold_morph_stream",
+        "detect_cc_postprocess_stream",
         "detect_contour_stream",
         "detect_ellipse_intensity_stream",
     }
     detect_payloads = None
-    if any(case in args.cases for case in detect_payload_cases):
+    if any(case in benchmark_case_names for case in detect_payload_cases):
         detect_payloads = [_prepare_detect_payload(frame) for frame in frames]
 
     bandpass_payloads = None
-    if any(case in args.cases for case in (
+    if any(case in benchmark_case_names for case in (
             "detect_threshold_morph_stream",
+            "detect_cc_postprocess_stream",
             "detect_contour_stream",
             "detect_ellipse_intensity_stream",
     )):
@@ -512,7 +775,8 @@ def main() -> None:
         ]
 
     threshold_payloads = None
-    if any(case in args.cases for case in (
+    if any(case in benchmark_case_names for case in (
+            "detect_cc_postprocess_stream",
             "detect_contour_stream",
             "detect_ellipse_intensity_stream",
     )):
@@ -522,18 +786,21 @@ def main() -> None:
         ]
 
     contour_payloads = None
-    if "detect_ellipse_intensity_stream" in args.cases:
+    if "detect_ellipse_intensity_stream" in benchmark_case_names:
         contour_payloads = [
             _prepare_detect_contour_payload(payload)
             for payload in threshold_payloads
         ]
 
     remap_payloads = None
-    if "remap_stream" in args.cases:
+    if "remap_stream" in benchmark_case_names:
         remap_payloads = _prepare_remap_payloads(frames)
 
     runners: dict[str, Any] = {
         "detect_stream": lambda: bench_detect_stream(frames),
+        "detect_opencv_stream": lambda: bench_detect_opencv_stream(frames),
+        "detect_full_gpu_stream": lambda: bench_detect_full_gpu_stream(frames),
+        "detect_cc_stream": lambda: bench_detect_cc_stream(frames),
         "detect_prepare_stream": lambda: bench_detect_prepare_stream(frames),
         "detect_wavelet_stream": lambda: bench_detect_wavelet_stream(
             detect_payloads),
@@ -543,6 +810,8 @@ def main() -> None:
             detect_payloads),
         "detect_threshold_morph_stream": lambda: bench_detect_threshold_morph_stream(
             bandpass_payloads),
+        "detect_cc_postprocess_stream": lambda: bench_detect_cc_postprocess_stream(
+            threshold_payloads),
         "detect_contour_stream": lambda: bench_detect_contour_stream(
             threshold_payloads),
         "detect_ellipse_intensity_stream": lambda: bench_detect_ellipse_intensity_stream(
@@ -563,7 +832,7 @@ def main() -> None:
             warmup=args.warmup,
             repeat=args.repeat,
         )
-        for case_name in args.cases
+        for case_name in benchmark_case_names
     }
 
     report = {
@@ -589,6 +858,10 @@ def main() -> None:
         "input_source": input_source,
         "results": cases,
     }
+    if quality_requested:
+        quality = compare_detect_quality(frames)
+        report["quality"] = quality
+        report["quality_summary"] = summarize_detect_quality(quality)
     print_or_save_report(report, args.output_json)
 
 
