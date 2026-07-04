@@ -12,11 +12,13 @@ import numpy as np
 from hoshicore._custom_op._dispatch import debug_enabled as _debug_enabled
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
+from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
 
 
 _debug_log = partial(debug_log, "remap")
+_is_cuda_runtime_unavailable_error = is_cuda_runtime_unavailable_error
 _CUDA_SUPPORTED_DTYPES = (
     np.dtype(np.uint8),
     np.dtype(np.uint16),
@@ -103,26 +105,6 @@ def _validate_dist_coeffs(dist_coeffs: np.ndarray | None,
     if not dist_arr.flags.c_contiguous:
         dist_arr = np.ascontiguousarray(dist_arr)
     return dist_arr
-
-
-def _is_cuda_runtime_unavailable_error(exc: RuntimeError) -> bool:
-    message = str(exc).lower()
-    return (
-        "no cuda-capable device is detected" in message
-        or "cuda driver version is insufficient" in message
-        or "cuda initialization error" in message
-        or "cudaunknown" in message
-        or "cuda unknown" in message
-        or "invalid device" in message
-        or "device is busy" in message
-        or "device unavailable" in message
-        or "no kernel image is available" in message
-        or "no binary for gpu" in message
-        or "out of memory" in message
-        or "memory allocation" in message
-        or "cudamalloc" in message
-        or "cudamallochost" in message
-    )
 
 
 def _make_camera_matrix(fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
@@ -385,7 +367,7 @@ def camera_model_remap(
     try:
         return backend(**kwargs)
     except RuntimeError as exc:
-        if not _is_cuda_runtime_unavailable_error(exc):
+        if not is_cuda_runtime_unavailable_error(exc):
             raise
         _debug_log(
             f"compiled CUDA backend unavailable at runtime, falling back to numpy: {exc}"

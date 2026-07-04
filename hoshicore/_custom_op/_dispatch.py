@@ -31,6 +31,26 @@ def fallback_preference() -> str:
     return "auto"
 
 
+def is_cuda_runtime_unavailable_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return (
+        "no cuda-capable device is detected" in message
+        or "cuda driver version is insufficient" in message
+        or "cuda initialization error" in message
+        or "cudaunknown" in message
+        or "cuda unknown" in message
+        or "invalid device" in message
+        or "device is busy" in message
+        or "device unavailable" in message
+        or "no kernel image is available" in message
+        or "no binary for gpu" in message
+        or "out of memory" in message
+        or "memory allocation" in message
+        or "cudamalloc" in message
+        or "cudamallochost" in message
+    )
+
+
 @lru_cache(maxsize=1)
 def load_compiled_module() -> tuple[Any | None, str | None]:
     try:
