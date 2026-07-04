@@ -90,10 +90,14 @@ pybind11_add_module(_C MODULE
 
 if(HNW_ENABLE_CUDA)
     target_sources(_C PRIVATE
-        ops/cuda/camera_model_remap_fused_ops.cpp
-        ops/cuda/camera_model_remap_fused_ops.cu
-        ops/cuda/wavelet_cuda_ops.cpp
-        ops/cuda/wavelet_cuda_ops.cu
+        # Fused camera-model remap.
+        ops/cuda/remap/camera_model_remap_fused_ops.cpp
+        ops/cuda/remap/camera_model_remap_fused_ops.cu
+        # Wavelet CUDA backend and shared full-GPU star detection path.
+        ops/cuda/wavelet/wavelet_cuda_ops.cpp
+        ops/cuda/wavelet/wavelet_cuda_ops.cu
+        ops/cuda/detection/star_detect_full_ops.cpp
+        ops/cuda/detection/star_detect_full_ops.cu
     )
 endif()
 
