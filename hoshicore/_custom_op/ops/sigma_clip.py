@@ -7,6 +7,7 @@ from functools import partial
 import numpy as np
 
 from hoshicore._custom_op._dispatch import debug_log
+from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
 
@@ -20,7 +21,7 @@ _SUPPORTED_DTYPES = (np.uint8, np.uint16)
 def _compiled_backend_available(logical_op: str) -> tuple[bool, str | None]:
     return _native_backend_available(
         logical_op,
-        "auto",
+        _fallback_preference(),
         load_module=_load_compiled_module_result,
     )
 

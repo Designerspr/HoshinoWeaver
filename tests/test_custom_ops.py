@@ -947,6 +947,14 @@ class TestCustomOpsFallback(unittest.TestCase):
         self.assertEqual(match_candidates[0].backend, "openmp_cpu")
         self.assertEqual(match_candidates[0].kernel_name, "find_initial_match")
 
+        remap_candidates = backend_registry.registered_backend_candidates("camera_model_remap")
+        self.assertTrue(
+            any(candidate.backend == "cuda_host_io" and candidate.kernel_name == "camera_model_remap"
+                for candidate in remap_candidates))
+        self.assertTrue(
+            any(candidate.backend == "openmp_cpu" and candidate.kernel_name == "camera_model_remap_cpu"
+                for candidate in remap_candidates))
+
     def test_backend_registry_reports_missing_compiled_module(self) -> None:
         selection = backend_registry.select_backend(
             "median_reduce_chunk",
@@ -975,7 +983,26 @@ class TestCustomOpsFallback(unittest.TestCase):
 
     def test_backend_registry_respects_build_flag(self) -> None:
         class Module:
+            wavelet_dec_rec_cuda_core = lambda self: None
+
+            def build_info(self):
+                return {"cuda": False}
+
+        module = Module()
+
+        selection = backend_registry.select_backend(
+            "wavelet_dec_rec_cuda_core",
+            load_module=lambda: (module, None),
+        )
+
+        self.assertFalse(selection.native)
+        self.assertEqual(selection.backend, "numpy")
+        self.assertEqual(selection.reason, "compiled backend missing build flag: cuda")
+
+    def test_backend_registry_selects_remap_cpu_after_cuda_build_flag_miss(self) -> None:
+        class Module:
             camera_model_remap = lambda self: None
+            camera_model_remap_cpu = lambda self: None
 
             def build_info(self):
                 return {"cuda": False}
@@ -987,9 +1014,9 @@ class TestCustomOpsFallback(unittest.TestCase):
             load_module=lambda: (module, None),
         )
 
-        self.assertFalse(selection.native)
-        self.assertEqual(selection.backend, "numpy")
-        self.assertEqual(selection.reason, "compiled backend missing build flag: cuda")
+        self.assertTrue(selection.native)
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(selection.candidate.kernel_name, "camera_model_remap_cpu")
 
     def test_backend_registry_continues_after_build_flag_miss(self) -> None:
         class Module:
