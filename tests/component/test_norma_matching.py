@@ -2,6 +2,7 @@
 import numpy as np
 import pytest
 
+import hoshicore.component.norma.matching as matching
 from hoshicore.component.norma.matching import (find_initial_match,
                                                 fine_tune_transform,
                                                 validate_homography)
@@ -123,6 +124,60 @@ def test_fine_tune_transform_rejects_when_unique_pairs_below_four():
 
     with pytest.raises(ValueError, match="at least 4 unique"):
         fine_tune_transform(pts1, pts2, init_pair_idx)
+
+
+def test_fine_tune_transform_selects_best_accepted_candidate(monkeypatch):
+    pts = np.column_stack((
+        np.arange(20, dtype=np.float64),
+        np.arange(20, dtype=np.float64) * 2.0,
+    ))
+    init_pair_idx = np.column_stack((
+        np.arange(len(pts), dtype=np.int32),
+        np.arange(len(pts), dtype=np.int32),
+    ))
+    inlier_counts = [8, 12, 9, 16, 11, 10, 14, 13, 7, 15]
+    calls = []
+
+    def fake_sample(pair_idx, sample_size, rng):
+        return pair_idx[:sample_size], "fake_sample"
+
+    def fake_build(pts1, pts2, all_pair_idx, sampled_pair_idx, *,
+                   iteration, sample_size, sampling_mode, config):
+        calls.append(iteration)
+        inliers = inlier_counts[iteration - 1]
+        diagnostics = matching.HomographyDiagnostics(
+            inlier_count=inliers,
+            median_reproj_error=1.0 / inliers,
+            p90_reproj_error=2.0 / inliers,
+            coverage_ratio=0.5,
+            area_ratio=1.0,
+            projective_magnitude=0.0,
+            is_flipped=False,
+        )
+        homography = np.array([
+            [1.0, 0.0, float(iteration)],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+        return matching.HomographyCandidate(
+            homography=homography,
+            pair_idx=all_pair_idx[:inliers],
+            diagnostics=diagnostics,
+            accepted=True,
+            rejection_reason=None,
+            iteration=iteration,
+            sample_size=sample_size,
+            sampling_mode=sampling_mode,
+        )
+
+    monkeypatch.setattr(matching, "_sample_pair_subset", fake_sample)
+    monkeypatch.setattr(matching, "_build_homography_candidate", fake_build)
+
+    H, pair_idx = fine_tune_transform(pts, pts, init_pair_idx)
+
+    assert calls == list(range(1, matching.MAX_HOMOGRAPHY_TRIALS + 1))
+    assert H[0, 2] == 4.0
+    assert len(pair_idx) == 16
 
 
 def test_find_initial_match_fallbacks_when_filtered_unique_pairs_below_four():

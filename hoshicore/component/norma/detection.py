@@ -19,6 +19,9 @@ class DetectedStars:
     volumes: NDArray[np.float64]
 
 
+FULL_GPU_COMPONENT_FILTER_PERCENTILE = 27.5
+
+
 def _wavelet_dec_rec(img_blr, resize_factor=0.25):
     return wavelet_dec_rec(img_blr, resize_factor=resize_factor)
 
@@ -91,9 +94,12 @@ def _component_candidates_to_detected(
     if len(positions) == 0:
         return _empty_detected_stars()
     valid_stars = np.logical_and(areas > 20, eccentricities < .8)
+    # GPU CC 会比 contour 路径多保留少量弱候选；略收紧分位过滤可稳定下游匹配。
+    filter_percentile = FULL_GPU_COMPONENT_FILTER_PERCENTILE
     valid_stars = np.logical_and(
-        np.logical_and(valid_stars, areas > np.percentile(areas, 20)),
-        intensities > np.percentile(intensities, 20)
+        np.logical_and(
+            valid_stars, areas > np.percentile(areas, filter_percentile)),
+        intensities > np.percentile(intensities, filter_percentile),
     )
     return DetectedStars(
         positions=positions[valid_stars],

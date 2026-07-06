@@ -4,6 +4,7 @@ from unittest import mock
 import cv2
 import numpy as np
 
+from hoshicore._custom_op import build_info
 from hoshicore._custom_op.backend_registry import registered_backend_candidates
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op.ops import detection as detection_ops
@@ -260,6 +261,54 @@ class TestStarDetectCustomOps(unittest.TestCase):
         self.assertEqual(args[3], 7)
         self.assertEqual(args[4], 1.5)
         self.assertIs(got, expected)
+
+    def test_star_detect_full_connected_components_compiled_matches_opencv_on_synthetic(
+            self) -> None:
+        if not build_info().get("cuda"):
+            self.skipTest("CUDA full detector backend is not built")
+
+        image = np.zeros((384, 384), dtype=np.float64)
+        stars = [
+            (80, 90, 7.0),
+            (140, 260, 9.0),
+            (220, 130, 8.0),
+            (300, 300, 10.0),
+        ]
+        for x, y, value in stars:
+            cv2.circle(image, (x, y), 5, value, -1)
+            cv2.circle(image, (x, y), 9, value * 0.35, 1)
+        image += np.linspace(0.0, 0.05, image.shape[1], dtype=np.float64)[None, :]
+
+        try:
+            candidates = detection_ops.star_detect_full_connected_components_compiled(
+                image,
+                None,
+                1.0,
+                gaussian_ksize=9,
+                sigma=2.0,
+            )
+        except RuntimeError as exc:
+            if _is_compiled_backend_unavailable(exc):
+                self.skipTest(f"CUDA full detector runtime unavailable: {exc}")
+            raise
+
+        got = star_detection._component_candidates_to_detected(*candidates)
+        expected = star_detection._detect_star_points_opencv(
+            image,
+            min_star_points=0,
+            resize_length=10000,
+            gaussian_ksize=9,
+            sigma=2,
+        )
+        self.assertGreaterEqual(len(got.positions), 3)
+        self.assertGreaterEqual(len(expected.positions), 3)
+
+        distances = np.linalg.norm(
+            expected.positions[:, None, :] - got.positions[None, :, :],
+            axis=2,
+        )
+        nearest = np.min(distances, axis=1)
+        self.assertLess(float(np.percentile(nearest, 95)), 1.5)
 
     def test_detect_star_points_uses_gpu_fused_path_by_default(self) -> None:
         image = np.zeros((16, 16), dtype=np.float64)

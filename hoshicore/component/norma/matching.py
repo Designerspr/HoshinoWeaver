@@ -1,5 +1,6 @@
 """Star point feature extraction and matching."""
 import dataclasses
+import hashlib
 
 import cv2
 import numpy as np
@@ -90,6 +91,9 @@ MAX_HOMOGRAPHY_TRIALS = 10
 MIN_FILTERED_UNIQUE_PAIRS = 4
 LOW_PAIR_COUNT_THRESHOLD = 10
 MIN_FILTER_KEEP_RATIO = 0.5
+GOOD_ENOUGH_INLIER_RATIO = 0.995
+GOOD_ENOUGH_MEDIAN_REPROJ_RATIO = 0.15
+GOOD_ENOUGH_P90_REPROJ_RATIO = 0.20
 
 
 def _perspective_transform(pts: NDArray[np.float64],
@@ -214,6 +218,13 @@ def _sample_pair_subset(
     return pair_idx[selected], "random_no_replacement"
 
 
+def _deterministic_pair_seed(pair_idx: NDArray[np.int32]) -> int:
+    """Derive a stable RNG seed from the candidate pair set."""
+    pair_bytes = np.asarray(pair_idx, dtype="<i4").tobytes()
+    digest = hashlib.blake2b(pair_bytes, digest_size=8).digest()
+    return int.from_bytes(digest, "little", signed=False)
+
+
 def _build_homography_candidate(
     pts1: NDArray[np.float64],
     pts2: NDArray[np.float64],
@@ -283,14 +294,34 @@ def _build_homography_candidate(
 
 
 def _candidate_rank(candidate: HomographyCandidate) -> tuple[float, ...]:
-    """Ranking for diagnostics-only best-candidate tracking."""
+    """Ranking used to select the final accepted homography candidate."""
+    diagnostics = candidate.diagnostics
     return (
         1.0 if candidate.accepted else 0.0,
-        float(candidate.diagnostics.inlier_count),
-        -candidate.diagnostics.median_reproj_error,
-        candidate.diagnostics.coverage_ratio,
-        -candidate.diagnostics.p90_reproj_error,
-        -candidate.diagnostics.projective_magnitude,
+        -diagnostics.median_reproj_error,
+        -diagnostics.p90_reproj_error,
+        float(diagnostics.inlier_count),
+        diagnostics.coverage_ratio,
+        -diagnostics.projective_magnitude,
+    )
+
+
+def _is_good_enough_candidate(
+    candidate: HomographyCandidate,
+    unique_pair_count: int,
+    config: HomographyValidationConfig,
+) -> bool:
+    """Accept very clean candidates early; otherwise keep searching deterministically."""
+    if not candidate.accepted:
+        return False
+    diagnostics = candidate.diagnostics
+    inlier_ratio = diagnostics.inlier_count / unique_pair_count
+    return (
+        inlier_ratio >= GOOD_ENOUGH_INLIER_RATIO
+        and diagnostics.median_reproj_error <=
+        config.max_reproj_median_px * GOOD_ENOUGH_MEDIAN_REPROJ_RATIO
+        and diagnostics.p90_reproj_error <=
+        config.max_reproj_p90_px * GOOD_ENOUGH_P90_REPROJ_RATIO
     )
 
 
@@ -416,7 +447,7 @@ def fine_tune_transform(
         len(init_pair_idx), unique_pair_count, sample_size,
         max_iterations)
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(_deterministic_pair_seed(unique_pair_idx))
     best_candidate: HomographyCandidate | None = None
 
     for iteration in range(1, max_iterations + 1):
@@ -439,6 +470,14 @@ def fine_tune_transform(
                 "Fine-tune iteration {} rejected before validation: {}",
                 iteration, exc)
             continue
+        except cv2.error as exc:
+            if best_candidate is not None and best_candidate.accepted:
+                logger.warning(
+                    "Fine-tune iteration {} failed after an accepted candidate; "
+                    "keeping previous candidate: {}",
+                    iteration, exc)
+                continue
+            raise
 
         if best_candidate is None or _candidate_rank(candidate) > _candidate_rank(best_candidate):
             best_candidate = candidate
@@ -460,12 +499,25 @@ def fine_tune_transform(
             candidate.accepted,
             candidate.rejection_reason)
 
-        if candidate.accepted:
+        if candidate.accepted and (
+                max_iterations == 1 or _is_good_enough_candidate(
+                    candidate, unique_pair_count, config)):
             logger.debug(
                 "Fine-tune early stop: accepted_iteration={}, early_stop_triggered={}, "
                 "sample_size={}, sampling_mode={}",
                 iteration, True, candidate.sample_size, candidate.sampling_mode)
             return candidate.homography, candidate.pair_idx
+
+    if best_candidate is not None and best_candidate.accepted:
+        logger.debug(
+            "Fine-tune selected best accepted candidate: iteration={}, "
+            "sample_size={}, sampling_mode={}, inliers={}, median_reproj={:.3f}px",
+            best_candidate.iteration,
+            best_candidate.sample_size,
+            best_candidate.sampling_mode,
+            best_candidate.diagnostics.inlier_count,
+            best_candidate.diagnostics.median_reproj_error)
+        return best_candidate.homography, best_candidate.pair_idx
 
     if best_candidate is not None:
         raise ValueError(

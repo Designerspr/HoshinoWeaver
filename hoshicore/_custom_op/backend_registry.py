@@ -91,8 +91,10 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "camera_model_remap",
         "cuda_host_io",
         "camera_model_remap",
+        priority=10,
         build_flag="cuda",
     ),
+    BackendCandidate("camera_model_remap", "openmp_cpu", "camera_model_remap_cpu"),
 )
 
 _CANDIDATES_BY_OP: dict[str, tuple[BackendCandidate, ...]] = {}
