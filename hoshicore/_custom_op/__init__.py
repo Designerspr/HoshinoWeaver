@@ -11,6 +11,8 @@ if sys.platform == "win32":
 
 from hoshicore._custom_op.api import (
     build_info,
+    calibration_divide,
+    calibration_subtract,
     camera_model_remap,
     custom_ops_available,
     equalize_noise_correct,
@@ -34,6 +36,8 @@ from hoshicore._custom_op.api import (
 
 __all__ = [
     "build_info",
+    "calibration_divide",
+    "calibration_subtract",
     "camera_model_remap",
     "custom_ops_available",
     "equalize_noise_correct",

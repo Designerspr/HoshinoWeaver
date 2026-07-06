@@ -2,6 +2,7 @@
 
 #include "common/backend_info.h"
 #include "ops/alignment/alignment_ops.h"
+#include "ops/calibration/calibration_ops.h"
 #include "ops/detection/detection_ops.h"
 #include "ops/filter/filter_ops.h"
 #include "ops/fgp/fgp_ops.h"
@@ -24,6 +25,7 @@ PYBIND11_MODULE(_C, m) {
 
     bind_backend_info(m);
     bind_alignment_ops(m);
+    bind_calibration_ops(m);
     bind_detection_ops(m);
     bind_filter_ops(m);
     bind_fgp_ops(m);

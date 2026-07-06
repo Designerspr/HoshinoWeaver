@@ -4,6 +4,10 @@ from hoshicore._custom_op.ops.alignment import (
     extract_point_features,
     find_initial_match,
 )
+from hoshicore._custom_op.ops.calibration import (
+    calibration_divide,
+    calibration_subtract,
+)
 from hoshicore._custom_op.ops.detection import star_detect_full_connected_components
 from hoshicore._custom_op.ops.fgp import (
     fgp_add,
@@ -31,6 +35,8 @@ from hoshicore._custom_op.ops.wavelet import wavelet_dec_rec
 
 __all__ = [
     "build_info",
+    "calibration_divide",
+    "calibration_subtract",
     "camera_model_remap",
     "custom_ops_available",
     "equalize_noise_correct",

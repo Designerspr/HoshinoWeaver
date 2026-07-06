@@ -11,15 +11,6 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .data_container import DTYPE_MAX_VALUE, align_dtype_pair
-
-# 整数减法的最小安全有符号 dtype 映射
-_SIGNED_DTYPE = {
-    np.dtype("uint8"):  np.dtype("int16"),
-    np.dtype("uint16"): np.dtype("int32"),
-    np.dtype("uint32"): np.dtype("int64"),
-}
-
 # resize 插值方法映射
 INTERPOLATION_METHODS: dict[str, int] = {
     "nearest":  cv2.INTER_NEAREST,
@@ -51,21 +42,9 @@ def calibration_subtract(
     Returns:
         (result_array, output_dtype)
     """
-    frame_aligned, ref_aligned, output_dtype = align_dtype_pair(
-        frame, frame_dtype, reference, ref_dtype)
+    from .._custom_op.ops.calibration import calibration_subtract as custom_calibration_subtract
 
-    # 选择最小安全计算 dtype
-    calc_dtype = _SIGNED_DTYPE.get(output_dtype)
-    if calc_dtype is not None:
-        # 整数路径：提升到有符号类型，做减法，clip 后转回
-        result = frame_aligned.astype(calc_dtype) - ref_aligned.astype(calc_dtype)
-        np.clip(result, 0, DTYPE_MAX_VALUE[output_dtype], out=result)
-        return result.astype(output_dtype), output_dtype
-    else:
-        # 浮点路径：直接减，clip 到 0
-        result = frame_aligned - ref_aligned
-        np.maximum(result, 0, out=result)
-        return result, output_dtype
+    return custom_calibration_subtract(frame, reference, frame_dtype, ref_dtype)
 
 
 def calibration_divide(
@@ -88,21 +67,9 @@ def calibration_divide(
     Returns:
         (result_array, output_dtype)
     """
-    frame_aligned, ref_aligned, output_dtype = align_dtype_pair(
-        frame, frame_dtype, reference, ref_dtype)
+    from .._custom_op.ops.calibration import calibration_divide as custom_calibration_divide
 
-    ref_f = ref_aligned.astype(np.float64)
-    ref_mean = np.mean(ref_f)
-
-    # 避免除零
-    ref_safe = np.where(ref_f > 0, ref_f, 1.0)
-
-    result = frame_aligned.astype(np.float64) / ref_safe * ref_mean
-
-    if output_dtype in DTYPE_MAX_VALUE:
-        np.clip(result, 0, DTYPE_MAX_VALUE[output_dtype], out=result)
-
-    return result.astype(output_dtype), output_dtype
+    return custom_calibration_divide(frame, reference, frame_dtype, ref_dtype)
 
 
 def resize_image(

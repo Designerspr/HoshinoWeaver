@@ -21,6 +21,10 @@ add_library(hnw_ops_common STATIC
     common/backend_info.cpp
 )
 
+add_library(hnw_ops_cpu_calibration STATIC
+    ops/calibration/calibration_ops.cpp
+)
+
 add_library(hnw_ops_cpu_alignment STATIC
     ops/alignment/alignment_ops.cpp
 )
@@ -63,6 +67,7 @@ add_library(hnw_ops_cpu_wavelet STATIC
 
 set(hnw_cpu_targets
     hnw_ops_common
+    hnw_ops_cpu_calibration
     hnw_ops_cpu_alignment
     hnw_ops_cpu_detection
     hnw_ops_cpu_fgp
@@ -114,6 +119,7 @@ target_include_directories(
 )
 target_link_libraries(_C PRIVATE
     hnw_ops_common
+    hnw_ops_cpu_calibration
     hnw_ops_cpu_alignment
     hnw_ops_cpu_detection
     hnw_ops_cpu_fgp

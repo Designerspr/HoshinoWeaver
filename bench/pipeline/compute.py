@@ -38,6 +38,8 @@ from hoshicore.component.merger import (
     MinMerger,
 )
 from hoshicore.component.noise_equalization import equalize_noise
+from hoshicore.component.calibration import calibration_divide
+from hoshicore.component.calibration import calibration_subtract
 from hoshicore.component.star_detect import (
     detect_starmask_by_dog,
     detect_starmask_by_threshold,
@@ -58,6 +60,7 @@ CASE_NAMES = [
     "stack_median",
     "stack_sigma_clip_fused",
     "stack_huber",
+    "calibration_full",
     "noise_equalization",
     "star_mask_threshold",
     "star_mask_dog",
@@ -235,6 +238,36 @@ def _run_huber_stack_once(frames: list[np.ndarray]) -> dict[str, Any]:
     return _output_payload(
         _require_float_image(merger.merged_image, "HuberWeightedMerger")
     )
+
+
+def _run_calibration_full_once(frames: list[np.ndarray]) -> dict[str, Any]:
+    source_dtype = frames[0].dtype
+    bias_ref = (frames[0] // 16).astype(source_dtype, copy=False)
+    dark_ref = (frames[min(1, len(frames) - 1)] // 32).astype(source_dtype, copy=False)
+    flat_ref = np.maximum(frames[-1], 1).astype(source_dtype, copy=False)
+    last = None
+    for frame in frames:
+        bias_corrected, bias_dtype = calibration_subtract(
+            frame,
+            bias_ref,
+            source_dtype,
+            source_dtype,
+        )
+        dark_corrected, dark_dtype = calibration_subtract(
+            bias_corrected,
+            dark_ref,
+            bias_dtype,
+            source_dtype,
+        )
+        last, _ = calibration_divide(
+            dark_corrected,
+            flat_ref,
+            dark_dtype,
+            source_dtype,
+        )
+    if last is None:
+        raise RuntimeError("calibration full path did not process any frame")
+    return _output_payload(last)
 
 
 def _run_noise_equalization_once(frames: list[np.ndarray]) -> dict[str, Any]:
@@ -482,6 +515,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "stack_median": lambda: _run_median_stack_once(frames),
             "stack_sigma_clip_fused": lambda: _run_sigma_clip_fused_stack_once(frames),
             "stack_huber": lambda: _run_huber_stack_once(frames),
+            "calibration_full": lambda: _run_calibration_full_once(frames),
             "noise_equalization": lambda: _run_noise_equalization_once(frames),
             "star_mask_threshold": lambda: _run_star_mask_threshold_once(frames),
             "star_mask_dog": lambda: _run_star_mask_dog_once(frames),

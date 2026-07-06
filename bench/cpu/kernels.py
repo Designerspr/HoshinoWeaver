@@ -46,6 +46,7 @@ from bench.common import (
 )
 from hoshicore._custom_op import build_info as custom_ops_build_info
 import hoshicore._custom_op.ops.alignment as alignment_ops
+import hoshicore._custom_op.ops.calibration as calibration_ops
 import hoshicore._custom_op.ops.detection as detection_ops
 import hoshicore._custom_op.ops.fgp as fgp_ops
 import hoshicore._custom_op.ops.filter as filter_ops
@@ -65,6 +66,10 @@ FRAME_STREAM_CASE_NAMES = {
     "max_combine_stream_compiled",
     "threshold_max_merge_stream_numpy",
     "threshold_max_merge_stream_compiled",
+    "calibration_subtract_stream_numpy",
+    "calibration_subtract_stream_compiled",
+    "calibration_divide_stream_numpy",
+    "calibration_divide_stream_compiled",
     "equalize_noise_correct_stream_numpy",
     "equalize_noise_correct_stream_compiled",
     "fgp_accumulate_stream_numpy",
@@ -113,6 +118,10 @@ CASE_NAMES = [
     "max_combine_stream_compiled",
     "threshold_max_merge_stream_numpy",
     "threshold_max_merge_stream_compiled",
+    "calibration_subtract_stream_numpy",
+    "calibration_subtract_stream_compiled",
+    "calibration_divide_stream_numpy",
+    "calibration_divide_stream_compiled",
     "equalize_noise_correct_stream_numpy",
     "equalize_noise_correct_stream_compiled",
     "fgp_accumulate_stream_numpy",
@@ -268,6 +277,34 @@ def bench_threshold_max_merge_stream_backend(
     result = np.array(mean_img, copy=True)
     for frame, weight in zip(frames, weights):
         merge(frame, mean_img, std_img, result, n_sigma, weight)
+
+
+def bench_calibration_subtract_stream_backend(
+    frames: list[np.ndarray],
+    reference: np.ndarray,
+    *,
+    backend: str,
+) -> None:
+    subtract = {
+        "numpy": calibration_ops.calibration_subtract_numpy,
+        "compiled": calibration_ops.calibration_subtract_compiled,
+    }[backend]
+    for frame in frames:
+        subtract(frame, reference, frame.dtype, reference.dtype)
+
+
+def bench_calibration_divide_stream_backend(
+    frames: list[np.ndarray],
+    reference: np.ndarray,
+    *,
+    backend: str,
+) -> None:
+    divide = {
+        "numpy": calibration_ops.calibration_divide_numpy,
+        "compiled": calibration_ops.calibration_divide_compiled,
+    }[backend]
+    for frame in frames:
+        divide(frame, reference, frame.dtype, reference.dtype)
 
 
 def build_equalize_noise_inputs(
@@ -968,6 +1005,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     sc_chunk_stack, sc_chunk_sum, sc_chunk_sq, sc_chunk_n = build_sigma_clip_chunk_stack(
         frames, args.chunk_rows)
+    calibration_subtract_ref = (frames[0] // 8).astype(frames[0].dtype, copy=False)
+    calibration_divide_ref = np.maximum(frames[0], 1).astype(frames[0].dtype, copy=False)
     equalize_noise_payloads = build_equalize_noise_inputs(frames)
     sigma_stats = build_mean_stats(frames, weights, True)
     huber_ref_mean = sigma_stats.mu.astype(np.float32)
@@ -996,6 +1035,26 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             threshold_mean_img,
             threshold_std_img,
             weights,
+            backend="compiled",
+        ),
+        "calibration_subtract_stream_numpy": lambda: bench_calibration_subtract_stream_backend(
+            frames,
+            calibration_subtract_ref,
+            backend="numpy",
+        ),
+        "calibration_subtract_stream_compiled": lambda: bench_calibration_subtract_stream_backend(
+            frames,
+            calibration_subtract_ref,
+            backend="compiled",
+        ),
+        "calibration_divide_stream_numpy": lambda: bench_calibration_divide_stream_backend(
+            frames,
+            calibration_divide_ref,
+            backend="numpy",
+        ),
+        "calibration_divide_stream_compiled": lambda: bench_calibration_divide_stream_backend(
+            frames,
+            calibration_divide_ref,
             backend="compiled",
         ),
         "equalize_noise_correct_stream_numpy": lambda: bench_equalize_noise_correct_stream_backend(
