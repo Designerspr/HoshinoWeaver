@@ -16,6 +16,7 @@ from typing import Any, Callable
 import numpy as np
 
 from bench.common import (
+    annotate_case_units,
     collect_env_info,
     prepare_batch,
     print_or_save_report,
@@ -32,6 +33,14 @@ _GLOBAL_BATCH: np.ndarray | None = None
 _SHM_NAME: str | None = None
 _SHM_SHAPE: tuple[int, ...] | None = None
 _SHM_DTYPE: str | None = None
+
+SUITE_ID = "cpu.max_stack"
+CASE_NAMES = [
+    "single_numpy_stream",
+    "mp_numpy_local_reduce",
+    "single_openmp_stream",
+]
+DEFAULT_CASES = CASE_NAMES
 
 
 def sequential_numpy_stream(batch: np.ndarray) -> np.ndarray:
@@ -150,7 +159,7 @@ def parse_cases(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--frames", type=int, default=100)
     parser.add_argument("--height", type=int, default=4000)
@@ -165,14 +174,16 @@ def main() -> None:
     parser.add_argument(
         "--cases",
         type=str,
-        default="single_numpy_stream,mp_numpy_local_reduce,single_openmp_stream",
+        default=",".join(DEFAULT_CASES),
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--output-json", type=str, default=None)
-    args = parser.parse_args()
+    return parser
 
+
+def run(args: argparse.Namespace) -> dict[str, object]:
     requested_cases = parse_cases(args.cases)
     start_method = default_start_method() if args.start_method == "auto" else args.start_method
     openmp_threads = resolve_openmp_threads(args.openmp_threads)
@@ -228,6 +239,13 @@ def main() -> None:
             warmup=args.warmup,
             repeat=args.repeat,
         )
+    annotate_case_units(
+        results,
+        {
+            case_name: {"unit": "frame", "count": batch.shape[0]}
+            for case_name in requested_cases
+        },
+    )
 
     report = {
         "suite": "max_stack",
@@ -251,6 +269,13 @@ def main() -> None:
         "input_source": input_source,
         "results": results,
     }
+    return report
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    report = run(args)
     print_or_save_report(report, args.output_json)
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import sys
-from pathlib import Path
 from typing import Any
 
 import cv2
@@ -13,8 +12,10 @@ import numpy as np
 from loguru import logger
 
 from bench.common import (
+    annotate_case_units,
     collect_env_info,
     print_or_save_report,
+    resolve_existing_frames,
     run_benchmark,
 )
 from bench.data_tools.starfield import generate_starfield_frames
@@ -45,7 +46,6 @@ from hoshicore.component.norma.types import (
 )
 
 
-SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 DEFAULT_CASE_NAMES = [
     "detect_stream",
     "detect_cc_stream",
@@ -79,6 +79,32 @@ CASE_NAMES = [
     *BASELINE_CASE_NAMES,
     QUALITY_CASE_NAME,
 ]
+DEFAULT_CASES = DEFAULT_CASE_NAMES
+SUITE_ID = "cpu.alignment"
+ALL_FRAME_CASE_NAMES = {
+    "detect_stream",
+    "detect_cc_stream",
+    "detect_prepare_stream",
+    "detect_wavelet_stream",
+    "detect_extract_stream",
+    "detect_bandpass_stream",
+    "detect_threshold_morph_stream",
+    "detect_cc_postprocess_stream",
+    "detect_contour_stream",
+    "detect_ellipse_intensity_stream",
+    "features_stream",
+    "geometry_stream",
+    "detect_full_gpu_stream",
+    "detect_opencv_stream",
+}
+ALIGNED_FRAME_CASE_NAMES = {
+    "match_stream",
+    "warp_stream",
+    "homography_pipeline",
+    "optimization_stream",
+    "remap_stream",
+    "camera_model_pipeline",
+}
 FULL_GPU_QUALITY_THRESHOLDS = {
     "max_count_diff_ratio": 0.15,
     "min_contour_to_full_gpu_recall_1px": 0.95,
@@ -113,6 +139,22 @@ class DetectContourPayload:
     img_rec: np.ndarray
     bw: np.ndarray
     contours: list[np.ndarray]
+
+
+def alignment_case_units(
+    case_names: list[str],
+    frame_count: int,
+) -> dict[str, dict[str, Any]]:
+    units: dict[str, dict[str, Any]] = {}
+    for case_name in case_names:
+        if case_name in ALL_FRAME_CASE_NAMES:
+            units[case_name] = {"unit": "frame", "count": frame_count}
+        elif case_name in ALIGNED_FRAME_CASE_NAMES:
+            units[case_name] = {
+                "unit": "aligned_frame",
+                "count": max(0, frame_count - 1),
+            }
+    return units
 
 
 def _prepare_detect_payload(frame: np.ndarray,
@@ -226,24 +268,6 @@ def _extract_detect_features(payload: DetectPayload) -> None:
     _measure_detect_ellipse_intensity(contour_payload)
 
 
-def load_frames_from_dir(input_dir: str, frames: int) -> list[np.ndarray]:
-    root = Path(input_dir)
-    files = sorted(
-        path for path in root.iterdir()
-        if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES)
-    if len(files) < frames:
-        raise ValueError(
-            f"Not enough images in {input_dir}: need {frames}, got {len(files)}")
-
-    result: list[np.ndarray] = []
-    for path in files[:frames]:
-        frame = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-        if frame is None:
-            raise RuntimeError(f"Failed to read image: {path}")
-        result.append(frame)
-    return result
-
-
 def prepare_alignment_frames(
     *,
     frames: int,
@@ -258,40 +282,45 @@ def prepare_alignment_frames(
     input_dir: str | None,
     input_mode: str,
 ) -> tuple[list[np.ndarray], dict[str, Any]]:
-    if input_mode == "images":
-        if input_dir is None:
-            raise ValueError("--input-mode images requires --input-dir")
-        loaded = load_frames_from_dir(input_dir, frames)
-        return loaded, {
-            "mode": "images",
-            "input_dir": input_dir,
-            "resolved_frames": len(loaded),
-            "resolved_shape": list(loaded[0].shape),
-            "resolved_dtype": str(loaded[0].dtype),
+    if input_mode not in {"auto", "cache", "images", "synthetic"}:
+        raise ValueError(f"unsupported input_mode: {input_mode}")
+
+    if input_mode in {"auto", "cache", "images"}:
+        existing = resolve_existing_frames(
+            frames=frames,
+            input_dir=input_dir,
+            input_mode=input_mode,
+        )
+        if existing is not None:
+            return existing
+
+    if input_mode == "synthetic" or input_mode == "auto":
+        generated, meta = generate_starfield_frames(
+            frames=frames,
+            height=height,
+            width=width,
+            stars=stars,
+            seed=seed,
+            channels=channels,
+            max_shift=max_shift,
+            max_rotation_deg=max_rotation_deg,
+            noise_sigma=noise_sigma,
+        )
+        return generated, {
+            "mode": "synthetic_starfield",
+            "input_dir": None,
+            "requested_input_mode": input_mode,
+            "resolved_frames": len(generated),
+            "resolved_shape": list(generated[0].shape),
+            "resolved_dtype": str(generated[0].dtype),
+            "stars": stars,
+            "max_shift": max_shift,
+            "max_rotation_deg": max_rotation_deg,
+            "noise_sigma": noise_sigma,
+            "transform_preview": meta[:min(3, len(meta))],
         }
 
-    generated, meta = generate_starfield_frames(
-        frames=frames,
-        height=height,
-        width=width,
-        stars=stars,
-        seed=seed,
-        channels=channels,
-        max_shift=max_shift,
-        max_rotation_deg=max_rotation_deg,
-        noise_sigma=noise_sigma,
-    )
-    return generated, {
-        "mode": "synthetic_starfield",
-        "resolved_frames": len(generated),
-        "resolved_shape": list(generated[0].shape),
-        "resolved_dtype": str(generated[0].dtype),
-        "stars": stars,
-        "max_shift": max_shift,
-        "max_rotation_deg": max_rotation_deg,
-        "noise_sigma": noise_sigma,
-        "transform_preview": meta[:min(3, len(meta))],
-    }
+    raise ValueError(f"unsupported input_mode: {input_mode}")
 
 
 def bench_geometry_stream(frames: list[np.ndarray]) -> None:
@@ -699,7 +728,7 @@ def bench_remap_stream(payloads) -> None:
         _ = dst_camera.project_image_from_camera(src_camera, frame, output_size)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--frames", type=int, default=16)
     parser.add_argument("--height", type=int, default=2048)
@@ -712,15 +741,17 @@ def main() -> None:
     parser.add_argument("--noise-sigma", type=float, default=1.5)
     parser.add_argument("--input-dir", type=str, default=None)
     parser.add_argument("--input-mode",
-                        choices=["synthetic", "images"],
-                        default="synthetic")
+                        choices=["auto", "cache", "images", "synthetic"],
+                        default="auto")
     parser.add_argument("--log-level", type=str, default="WARNING")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=5)
-    parser.add_argument("--cases", nargs="+", default=list(DEFAULT_CASE_NAMES))
+    parser.add_argument("--cases", nargs="+", default=list(DEFAULT_CASES))
     parser.add_argument("--output-json", type=str, default=None)
-    args = parser.parse_args()
+    return parser
 
+
+def run(args: argparse.Namespace) -> dict[str, object]:
     logger.remove()
     logger.add(sys.stderr, level=args.log_level.upper())
 
@@ -834,6 +865,10 @@ def main() -> None:
         )
         for case_name in benchmark_case_names
     }
+    annotate_case_units(cases, alignment_case_units(
+        benchmark_case_names,
+        len(frames),
+    ))
 
     report = {
         "suite": "alignment",
@@ -862,6 +897,13 @@ def main() -> None:
         quality = compare_detect_quality(frames)
         report["quality"] = quality
         report["quality_summary"] = summarize_detect_quality(quality)
+    return report
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    report = run(args)
     print_or_save_report(report, args.output_json)
 
 

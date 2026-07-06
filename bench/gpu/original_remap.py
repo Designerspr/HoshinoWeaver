@@ -7,26 +7,31 @@ benchmark can exercise both zero-distortion and Brown-Conrady distorted remap.
 from __future__ import annotations
 
 import argparse
-import json
 import math
-import os
-import platform
-import time
 from dataclasses import dataclass
-from pathlib import Path
-from statistics import mean, median
-from typing import Any
 
 import cv2
 import numpy as np
 
+from bench.common import (
+    collect_env_info,
+    prepare_frames,
+    print_or_save_report,
+    run_benchmark,
+)
 from hoshicore._custom_op import build_info as custom_op_build_info
 from hoshicore._custom_op.ops import remap as remap_ops
+
+
+DEFAULT_HEIGHT = 2048
+DEFAULT_WIDTH = 3072
 
 
 CASE_NAMES = [
     "numpy_grid",
     "custom_op_fused",
+    "custom_op_auto",
+    "custom_op_cpu_fused",
     "opencv_remap",
     "original_remap",
 ]
@@ -36,56 +41,7 @@ DEFAULT_CASES = [
     "opencv_remap",
     "original_remap",
 ]
-
-
-def collect_env_info() -> dict[str, Any]:
-    return {
-        "platform": platform.platform(),
-        "python": platform.python_version(),
-        "cpu_count": os.cpu_count(),
-        "cwd": str(Path(__file__).resolve().parents[2]),
-    }
-
-
-def summarize_samples(samples: list[float]) -> dict[str, Any]:
-    return {
-        "samples_sec": samples,
-        "min_sec": min(samples),
-        "max_sec": max(samples),
-        "mean_sec": mean(samples),
-        "median_sec": median(samples),
-    }
-
-
-def print_or_save_report(report: dict[str, Any], output_json: str | None) -> None:
-    if output_json:
-        path = Path(output_json)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(report, indent=2, sort_keys=True),
-                        encoding="utf-8")
-
-    print("[original_remap]")
-    print(
-        " ".join([
-            f"input={report['input_source']['mode']}",
-            f"shape={report['input_source']['resolved_shape']}",
-            f"dtype={report['input_source']['resolved_dtype']}",
-        ]))
-    for case_name in report["config"]["cases"]:
-        payload = report["results"][case_name]
-        print(
-            f"{case_name}: mean={payload['mean_sec']:.6f}s "
-            f"min={payload['min_sec']:.6f}s max={payload['max_sec']:.6f}s")
-    for case_name, backend_name in report.get("custom_backends", {}).items():
-        print(f"{case_name}_backend: {backend_name}")
-    if "accuracy" in report:
-        accuracy = report["accuracy"]
-        print(
-            "accuracy: "
-            f"max_abs_err={accuracy['max_abs_err']:.6e} "
-            f"mean_abs_err={accuracy['mean_abs_err']:.6e}")
-    if output_json:
-        print(f"json={output_json}")
+SUITE_ID = "gpu.original_remap"
 
 
 @dataclass(frozen=True)
@@ -139,18 +95,40 @@ def _make_rotation_matrix(yaw_deg: float,
     return rz @ ry @ rx
 
 
-def _build_config(args: argparse.Namespace) -> RemapConfig:
-    src_height = args.height if args.src_height is None else args.src_height
-    src_width = args.width if args.src_width is None else args.src_width
+def _build_config(
+    args: argparse.Namespace,
+    image_shape: tuple[int, ...] | None,
+) -> RemapConfig:
+    if image_shape is not None:
+        input_height = int(image_shape[0])
+        input_width = int(image_shape[1])
+    else:
+        input_height = DEFAULT_HEIGHT if args.height is None else args.height
+        input_width = DEFAULT_WIDTH if args.width is None else args.width
+
+    if image_shape is not None:
+        if args.src_height is not None and args.src_height != input_height:
+            raise ValueError(
+                f"--src-height={args.src_height} does not match input image height={input_height}"
+            )
+        if args.src_width is not None and args.src_width != input_width:
+            raise ValueError(
+                f"--src-width={args.src_width} does not match input image width={input_width}"
+            )
+
+    height = input_height if args.height is None else args.height
+    width = input_width if args.width is None else args.width
+    src_height = input_height if args.src_height is None else args.src_height
+    src_width = input_width if args.src_width is None else args.src_width
 
     cx_src = (src_width - 1) * 0.5
     cy_src = (src_height - 1) * 0.5
-    cx_dst = (args.width - 1) * 0.5
-    cy_dst = (args.height - 1) * 0.5
+    cx_dst = (width - 1) * 0.5
+    cy_dst = (height - 1) * 0.5
 
     return RemapConfig(
-        height=args.height,
-        width=args.width,
+        height=height,
+        width=width,
         src_height=src_height,
         src_width=src_width,
         fx_src=args.src_focal_px,
@@ -175,14 +153,6 @@ def _make_dist_coeffs(scale: float) -> np.ndarray | None:
         [0.01 * scale, -0.0015 * scale, 0.0008 * scale, -0.0004 * scale, 0.0001 * scale],
         dtype=np.float32,
     )
-
-
-def _make_input_image(args: argparse.Namespace,
-                      cfg: RemapConfig) -> np.ndarray:
-    rng = np.random.default_rng(args.seed)
-    image = rng.random((cfg.src_height, cfg.src_width, args.channels),
-                       dtype=np.float32)
-    return image
 
 
 def build_grid_numpy(cfg: RemapConfig) -> tuple[np.ndarray, np.ndarray]:
@@ -291,25 +261,48 @@ def remap_with_custom_op(image: np.ndarray, cfg: RemapConfig) -> np.ndarray:
     )
 
 
-def run_cpu_benchmark(func,
-                      *,
-                      warmup: int,
-                      repeat: int) -> dict[str, Any]:
-    for _ in range(warmup):
-        func()
+def remap_with_auto_custom_op(image: np.ndarray, cfg: RemapConfig) -> np.ndarray:
+    return remap_ops.camera_model_remap(
+        image=image,
+        out_height=cfg.height,
+        out_width=cfg.width,
+        fx_src=cfg.fx_src,
+        fy_src=cfg.fy_src,
+        cx_src=cfg.cx_src,
+        cy_src=cfg.cy_src,
+        fx_dst=cfg.fx_dst,
+        fy_dst=cfg.fy_dst,
+        cx_dst=cfg.cx_dst,
+        cy_dst=cfg.cy_dst,
+        rotation_dst_to_src=cfg.rotation_dst_to_src,
+        src_dist_coeffs=cfg.src_dist_coeffs,
+        dst_dist_coeffs=cfg.dst_dist_coeffs,
+    )
 
-    samples: list[float] = []
-    for _ in range(repeat):
-        t0 = time.perf_counter()
-        func()
-        samples.append(time.perf_counter() - t0)
-    return summarize_samples(samples)
+
+def remap_with_cpu_custom_op(image: np.ndarray, cfg: RemapConfig) -> np.ndarray:
+    return remap_ops.camera_model_remap_cpu_compiled(
+        image=image,
+        out_height=cfg.height,
+        out_width=cfg.width,
+        fx_src=cfg.fx_src,
+        fy_src=cfg.fy_src,
+        cx_src=cfg.cx_src,
+        cy_src=cfg.cy_src,
+        fx_dst=cfg.fx_dst,
+        fy_dst=cfg.fy_dst,
+        cx_dst=cfg.cx_dst,
+        cy_dst=cfg.cy_dst,
+        rotation_dst_to_src=cfg.rotation_dst_to_src,
+        src_dist_coeffs=cfg.src_dist_coeffs,
+        dst_dist_coeffs=cfg.dst_dist_coeffs,
+    )
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--height", type=int, default=2048)
-    parser.add_argument("--width", type=int, default=3072)
+    parser.add_argument("--height", type=int, default=None)
+    parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--src-height", type=int, default=None)
     parser.add_argument("--src-width", type=int, default=None)
     parser.add_argument("--channels", type=int, default=3)
@@ -320,6 +313,12 @@ def main() -> None:
     parser.add_argument("--roll-deg", type=float, default=0.05)
     parser.add_argument("--distortion-scale", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--input-dir", type=str, default=None)
+    parser.add_argument(
+        "--input-mode",
+        choices=["auto", "cache", "images", "synthetic"],
+        default="auto",
+    )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeat", type=int, default=30)
     parser.add_argument("--cases", nargs="+", default=list(DEFAULT_CASES))
@@ -329,16 +328,41 @@ def main() -> None:
         action="store_true",
         help="Skip CPU reference accuracy check for large custom-op benchmarks.",
     )
-    args = parser.parse_args()
+    return parser
 
+
+def run(args: argparse.Namespace) -> dict[str, object]:
     unknown_cases = [case for case in args.cases if case not in CASE_NAMES]
     if unknown_cases:
         raise ValueError(
             f"Unknown original remap benchmark case(s): {unknown_cases}. "
             f"Available: {list(CASE_NAMES)}")
 
-    cfg = _build_config(args)
-    image = _make_input_image(args, cfg)
+    input_height = args.src_height
+    if input_height is None:
+        input_height = DEFAULT_HEIGHT if args.height is None else args.height
+    input_width = args.src_width
+    if input_width is None:
+        input_width = DEFAULT_WIDTH if args.width is None else args.width
+    frames, input_source = prepare_frames(
+        frames=1,
+        height=input_height,
+        width=input_width,
+        dtype=np.float32,
+        channels=args.channels,
+        seed=args.seed,
+        input_dir=args.input_dir,
+        input_mode=args.input_mode,
+    )
+    image = frames[0]
+    if input_source.get("mode") == "synthetic" and args.channels == 1 and image.ndim == 2:
+        image = image[:, :, None]
+        input_source = {
+            **input_source,
+            "resolved_shape": list(image.shape),
+        }
+    cfg = _build_config(args, image.shape)
+    channel_count = int(image.shape[2]) if image.ndim == 3 else 1
     map_cache: tuple[np.ndarray, np.ndarray] | None = None
 
     def get_cached_maps() -> tuple[np.ndarray, np.ndarray]:
@@ -350,12 +374,14 @@ def main() -> None:
     runners = {
         "numpy_grid": lambda: build_grid_numpy(cfg),
         "custom_op_fused": lambda: remap_with_custom_op(image, cfg),
+        "custom_op_auto": lambda: remap_with_auto_custom_op(image, cfg),
+        "custom_op_cpu_fused": lambda: remap_with_cpu_custom_op(image, cfg),
         "opencv_remap": lambda: remap_with_cv2(image, *get_cached_maps()),
         "original_remap": lambda: remap_with_cv2(image, *build_grid_numpy(cfg)),
     }
 
     results = {
-        case_name: run_cpu_benchmark(
+        case_name: run_benchmark(
             runners[case_name],
             warmup=args.warmup,
             repeat=args.repeat,
@@ -370,43 +396,75 @@ def main() -> None:
             "custom_op_build": custom_op_build_info(),
         },
         "config": {
-            "height": args.height,
-            "width": args.width,
+            "height": cfg.height,
+            "width": cfg.width,
             "src_height": cfg.src_height,
             "src_width": cfg.src_width,
-            "channels": args.channels,
+            "requested_height": args.height,
+            "requested_width": args.width,
+            "channels": channel_count,
+            "requested_channels": args.channels,
             "src_focal_px": args.src_focal_px,
             "dst_focal_px": args.dst_focal_px,
             "yaw_deg": args.yaw_deg,
             "pitch_deg": args.pitch_deg,
             "roll_deg": args.roll_deg,
             "distortion_scale": args.distortion_scale,
+            "input_dir": args.input_dir,
+            "input_mode": args.input_mode,
             "warmup": args.warmup,
             "repeat": args.repeat,
             "cases": args.cases,
             "skip_accuracy": args.skip_accuracy,
         },
-        "input_source": {
-            "mode": "synthetic_numpy",
-            "resolved_frames": 1,
-            "resolved_shape": [cfg.src_height, cfg.src_width, args.channels],
-            "resolved_dtype": "fp32",
-        },
+        "input_source": input_source,
         "results": results,
     }
     custom_backends = {}
+    accuracy_by_case = {}
     if "custom_op_fused" in args.cases:
         custom_backends["custom_op_fused"] = "compiled_cuda_host_io"
         if not args.skip_accuracy:
             reference = remap_with_cv2(image, *get_cached_maps()).astype(np.float64)
             custom = remap_with_custom_op(image, cfg).astype(np.float64)
             abs_err = np.abs(custom - reference)
-            report["accuracy"] = {
+            accuracy_by_case["custom_op_fused"] = {
+                "max_abs_err": float(np.max(abs_err)),
+                "mean_abs_err": float(np.mean(abs_err)),
+            }
+    if "custom_op_auto" in args.cases:
+        custom_backends["custom_op_auto"] = "auto_dispatch"
+        if not args.skip_accuracy:
+            reference = remap_with_cv2(image, *get_cached_maps()).astype(np.float64)
+            custom = remap_with_auto_custom_op(image, cfg).astype(np.float64)
+            abs_err = np.abs(custom - reference)
+            accuracy_by_case["custom_op_auto"] = {
+                "max_abs_err": float(np.max(abs_err)),
+                "mean_abs_err": float(np.mean(abs_err)),
+            }
+    if "custom_op_cpu_fused" in args.cases:
+        custom_backends["custom_op_cpu_fused"] = "compiled_openmp_cpu"
+        if not args.skip_accuracy:
+            reference = remap_with_cv2(image, *get_cached_maps()).astype(np.float64)
+            custom = remap_with_cpu_custom_op(image, cfg).astype(np.float64)
+            abs_err = np.abs(custom - reference)
+            accuracy_by_case["custom_op_cpu_fused"] = {
                 "max_abs_err": float(np.max(abs_err)),
                 "mean_abs_err": float(np.mean(abs_err)),
             }
     if custom_backends:
         report["custom_backends"] = custom_backends
+    if accuracy_by_case:
+        report["accuracy_by_case"] = accuracy_by_case
+        if "custom_op_fused" in accuracy_by_case:
+            report["accuracy"] = accuracy_by_case["custom_op_fused"]
+    return report
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    report = run(args)
     print_or_save_report(report, args.output_json)
 
 

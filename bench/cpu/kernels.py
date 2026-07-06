@@ -37,6 +37,7 @@ from typing import Any
 import numpy as np
 
 from bench.common import (
+    annotate_case_units,
     collect_env_info,
     make_weights,
     prepare_frames,
@@ -56,11 +57,138 @@ import hoshicore._custom_op.ops.wavelet as wavelet_ops
 from hoshicore.component.data_container import DTYPE_MAX_VALUE
 
 
+FRAME_STREAM_CASE_NAMES = {
+    "max_combine_int_weight",
+    "mean_merge_int_weight",
+    "fast_gaussian_add",
+    "max_combine_stream_numpy",
+    "max_combine_stream_compiled",
+    "threshold_max_merge_stream_numpy",
+    "threshold_max_merge_stream_compiled",
+    "equalize_noise_correct_stream_numpy",
+    "equalize_noise_correct_stream_compiled",
+    "fgp_accumulate_stream_numpy",
+    "fgp_accumulate_stream_compiled",
+    "fgp_add_partial_reduce_numpy",
+    "fgp_add_partial_reduce_compiled",
+    "huber_weighted_accumulate_stream_numpy",
+    "huber_weighted_accumulate_stream_compiled",
+    "fgp_masked_mean_merge_stream_numpy",
+    "fgp_masked_mean_merge_stream_compiled",
+    "sigma_clip_fused_merge_stream_numpy",
+    "sigma_clip_fused_merge_stream_compiled",
+    "sigma_clip_fused_masked_merge_stream_numpy",
+    "sigma_clip_fused_masked_merge_stream_compiled",
+}
+FRAME_PASS_CASE_NAMES = {
+    "sigma_clip_pass",
+    "huber_pass",
+}
+MEDIAN_CHUNK_CASE_NAMES = {
+    "median_reduce_chunk_numpy",
+    "median_reduce_chunk_compiled",
+}
+SIGMA_CHUNK_CASE_NAMES = {
+    "sigma_clip_chunk_numpy",
+    "sigma_clip_chunk_compiled",
+    "sigma_clip_iterative_chunk_numpy",
+    "sigma_clip_iterative_chunk_compiled",
+    "sigma_clip_chunk_full_numpy",
+    "sigma_clip_chunk_full_compiled",
+    "sigma_clip_fused_chunk_numpy",
+    "sigma_clip_fused_chunk_compiled",
+}
+WAVELET_CASE_NAMES = {
+    "wavelet_dec_rec_core_numpy",
+    "wavelet_dec_rec_core_compiled",
+    "wavelet_dec_rec_core_cuda",
+    "wavelet_dec_rec_numpy",
+    "wavelet_dec_rec_auto",
+}
+CASE_NAMES = [
+    "max_combine_int_weight",
+    "mean_merge_int_weight",
+    "fast_gaussian_add",
+    "max_combine_stream_numpy",
+    "max_combine_stream_compiled",
+    "threshold_max_merge_stream_numpy",
+    "threshold_max_merge_stream_compiled",
+    "equalize_noise_correct_stream_numpy",
+    "equalize_noise_correct_stream_compiled",
+    "fgp_accumulate_stream_numpy",
+    "fgp_accumulate_stream_compiled",
+    "fgp_add_partial_reduce_numpy",
+    "fgp_add_partial_reduce_compiled",
+    "huber_weighted_accumulate_stream_numpy",
+    "huber_weighted_accumulate_stream_compiled",
+    "fgp_masked_mean_merge_stream_numpy",
+    "fgp_masked_mean_merge_stream_compiled",
+    "sigma_clip_fused_merge_stream_numpy",
+    "sigma_clip_fused_merge_stream_compiled",
+    "sigma_clip_fused_masked_merge_stream_numpy",
+    "sigma_clip_fused_masked_merge_stream_compiled",
+    "sigma_clip_pass",
+    "huber_pass",
+    "median_reduce_chunk_numpy",
+    "median_reduce_chunk_compiled",
+    "median_filter_2d_numpy",
+    "median_filter_2d_compiled",
+    "extract_point_features_numpy",
+    "extract_point_features_compiled",
+    "find_initial_match_numpy",
+    "find_initial_match_compiled",
+    "wavelet_dec_rec_core_numpy",
+    "wavelet_dec_rec_core_compiled",
+    "wavelet_dec_rec_core_cuda",
+    "wavelet_dec_rec_numpy",
+    "wavelet_dec_rec_auto",
+    "star_detect_connected_components_compiled",
+    "sigma_clip_chunk_numpy",
+    "sigma_clip_chunk_compiled",
+    "sigma_clip_iterative_chunk_numpy",
+    "sigma_clip_iterative_chunk_compiled",
+    "sigma_clip_chunk_full_numpy",
+    "sigma_clip_chunk_full_compiled",
+    "sigma_clip_fused_chunk_numpy",
+    "sigma_clip_fused_chunk_compiled",
+]
+DEFAULT_CASES = CASE_NAMES
+SUITE_ID = "cpu.kernels"
+
+
 def parse_cases(raw: str | None) -> list[str] | None:
     if raw is None:
         return None
     values = [item.strip() for item in raw.split(",") if item.strip()]
     return values or None
+
+
+def kernel_case_units(
+    case_names: list[str],
+    *,
+    frame_count: int,
+    median_chunk_count: int,
+) -> dict[str, dict[str, Any]]:
+    units: dict[str, dict[str, Any]] = {}
+    for case_name in case_names:
+        if case_name in FRAME_STREAM_CASE_NAMES:
+            units[case_name] = {"unit": "frame", "count": frame_count}
+        elif case_name in FRAME_PASS_CASE_NAMES:
+            units[case_name] = {
+                "unit": "frame_pass",
+                "count": frame_count * 2,
+            }
+        elif case_name in MEDIAN_CHUNK_CASE_NAMES:
+            units[case_name] = {
+                "unit": "chunk",
+                "count": median_chunk_count,
+            }
+        elif case_name in SIGMA_CHUNK_CASE_NAMES:
+            units[case_name] = {
+                "unit": "input_frame",
+                "count": frame_count,
+            }
+    return units
 
 
 def bench_max_combine(frames: list[np.ndarray], weights: list[float], int_weight: bool) -> None:
@@ -681,7 +809,7 @@ def bench_sigma_clip_fused_chunk_backend(
     _ = fn(stack_2d, 3.0, 3.0, 5)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--frames", type=int, default=64)
     parser.add_argument("--height", type=int, default=1080)
@@ -704,20 +832,15 @@ def main() -> None:
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--cases", type=str, default=None)
     parser.add_argument("--output-json", type=str, default=None)
-    args = parser.parse_args()
+    return parser
 
+
+def run(args: argparse.Namespace) -> dict[str, object]:
     requested_cases = parse_cases(args.cases)
     dtype = np.dtype(args.dtype)
-    wavelet_registry_names = {
-        "wavelet_dec_rec_core_numpy",
-        "wavelet_dec_rec_core_compiled",
-        "wavelet_dec_rec_core_cuda",
-        "wavelet_dec_rec_numpy",
-        "wavelet_dec_rec_auto",
-    }
     wavelet_only = (
         requested_cases is not None
-        and set(requested_cases).issubset(wavelet_registry_names)
+        and set(requested_cases).issubset(WAVELET_CASE_NAMES)
     )
     frame_count = 1 if wavelet_only else args.frames
     frames, input_source = prepare_frames(
@@ -790,8 +913,7 @@ def main() -> None:
             "input_source": input_source,
             "results": cases,
         }
-        print_or_save_report(report, args.output_json)
-        return
+        return report
 
     weights = make_weights(frame_count)
     spatial_mask = build_spatial_mask(frames[0], args.mask_density)
@@ -1040,6 +1162,11 @@ def main() -> None:
             warmup=args.warmup,
             repeat=args.repeat,
         )
+    annotate_case_units(cases, kernel_case_units(
+        selected_cases,
+        frame_count=frame_count,
+        median_chunk_count=len(median_chunk_stacks),
+    ))
 
     report = {
         "suite": "kernels",
@@ -1069,6 +1196,13 @@ def main() -> None:
         "input_source": input_source,
         "results": cases,
     }
+    return report
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    report = run(args)
     print_or_save_report(report, args.output_json)
 
 
