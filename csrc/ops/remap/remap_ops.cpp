@@ -131,8 +131,6 @@ void camera_model_remap_cpu_kernel(
     const float* HNW_RESTRICT src_dist_coeffs,
     const bool dst_has_dist,
     const float* HNW_RESTRICT dst_dist_coeffs) {
-    const ssize_t total =
-        static_cast<ssize_t>(out_height) * static_cast<ssize_t>(out_width);
     const float r00 = rotation_dst_to_src[0];
     const float r01 = rotation_dst_to_src[1];
     const float r02 = rotation_dst_to_src[2];
@@ -152,104 +150,131 @@ void camera_model_remap_cpu_kernel(
     const float dst_p1 = dst_dist_coeffs[2];
     const float dst_p2 = dst_dist_coeffs[3];
     const float dst_k3 = dst_dist_coeffs[4];
+    const float inv_fx_dst = 1.0f / fx_dst;
+    const float inv_fy_dst = 1.0f / fy_dst;
+    const ssize_t src_row_stride =
+        static_cast<ssize_t>(src_width) * static_cast<ssize_t>(channels);
+    const ssize_t out_row_stride =
+        static_cast<ssize_t>(out_width) * static_cast<ssize_t>(channels);
 
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
-    for (ssize_t idx = 0; idx < total; ++idx) {
-        const int row = static_cast<int>(idx / out_width);
-        const int col = static_cast<int>(idx - static_cast<ssize_t>(row) * out_width);
-        const float xd = (static_cast<float>(col) - cx_dst) / fx_dst;
-        const float yd = (static_cast<float>(row) - cy_dst) / fy_dst;
-        float x = xd;
-        float y = yd;
-        if (dst_has_dist) {
-            for (int iter = 0; iter < 5; ++iter) {
-                const float r2 = x * x + y * y;
+    for (int row = 0; row < out_height; ++row) {
+        const float yd = (static_cast<float>(row) - cy_dst) * inv_fy_dst;
+        const ssize_t out_row_base = static_cast<ssize_t>(row) * out_row_stride;
+        for (int col = 0; col < out_width; ++col) {
+            const float xd = (static_cast<float>(col) - cx_dst) * inv_fx_dst;
+            float x = xd;
+            float y = yd;
+            if (dst_has_dist) {
+                for (int iter = 0; iter < 5; ++iter) {
+                    const float r2 = x * x + y * y;
+                    const float r4 = r2 * r2;
+                    const float r6 = r4 * r2;
+                    const float radial = 1.0f + dst_k1 * r2 + dst_k2 * r4 + dst_k3 * r6;
+                    const float xy2 = 2.0f * x * y;
+                    const float delta_x =
+                        dst_p1 * xy2 + dst_p2 * (r2 + 2.0f * x * x);
+                    const float delta_y =
+                        dst_p1 * (r2 + 2.0f * y * y) + dst_p2 * xy2;
+                    x = (xd - delta_x) / radial;
+                    y = (yd - delta_y) / radial;
+                }
+            }
+
+            const float proj_x = r00 * x + r01 * y + r02;
+            const float proj_y = r10 * x + r11 * y + r12;
+            const float proj_z = r20 * x + r21 * y + r22;
+            const ssize_t out_base =
+                out_row_base + static_cast<ssize_t>(col) * static_cast<ssize_t>(channels);
+            if (!(proj_z > 0.0f)) {
+                for (int c = 0; c < channels; ++c) {
+                    out[out_base + c] = static_cast<T>(0);
+                }
+                continue;
+            }
+
+            const float inv_z = 1.0f / proj_z;
+            float src_x_norm = proj_x * inv_z;
+            float src_y_norm = proj_y * inv_z;
+            if (src_has_dist) {
+                const float r2 = src_x_norm * src_x_norm + src_y_norm * src_y_norm;
                 const float r4 = r2 * r2;
                 const float r6 = r4 * r2;
-                const float radial = 1.0f + dst_k1 * r2 + dst_k2 * r4 + dst_k3 * r6;
-                const float xy2 = 2.0f * x * y;
-                const float delta_x =
-                    dst_p1 * xy2 + dst_p2 * (r2 + 2.0f * x * x);
-                const float delta_y =
-                    dst_p1 * (r2 + 2.0f * y * y) + dst_p2 * xy2;
-                x = (xd - delta_x) / radial;
-                y = (yd - delta_y) / radial;
+                const float radial = 1.0f + src_k1 * r2 + src_k2 * r4 + src_k3 * r6;
+                const float xy2 = 2.0f * src_x_norm * src_y_norm;
+                const float x_dist = src_x_norm * radial +
+                                     src_p1 * xy2 +
+                                     src_p2 * (r2 + 2.0f * src_x_norm * src_x_norm);
+                const float y_dist =
+                    src_y_norm * radial +
+                    src_p1 * (r2 + 2.0f * src_y_norm * src_y_norm) +
+                    src_p2 * xy2;
+                src_x_norm = x_dist;
+                src_y_norm = y_dist;
             }
-        }
 
-        const float proj_x = r00 * x + r01 * y + r02;
-        const float proj_y = r10 * x + r11 * y + r12;
-        const float proj_z = r20 * x + r21 * y + r22;
-        const ssize_t out_base = idx * static_cast<ssize_t>(channels);
-        if (!(proj_z > 0.0f)) {
+            const float src_x = fx_src * src_x_norm + cx_src;
+            const float src_y = fy_src * src_y_norm + cy_src;
+            if (!std::isfinite(src_x) || !std::isfinite(src_y)) {
+                for (int c = 0; c < channels; ++c) {
+                    out[out_base + c] = static_cast<T>(0);
+                }
+                continue;
+            }
+
+            const int x0 = static_cast<int>(std::floor(src_x));
+            const int y0 = static_cast<int>(std::floor(src_y));
+            const int x1 = x0 + 1;
+            const int y1 = y0 + 1;
+            const float dx_raw = src_x - static_cast<float>(x0);
+            const float dy_raw = src_y - static_cast<float>(y0);
+            const float dx = std::nearbyint(dx_raw * 32.0f) * (1.0f / 32.0f);
+            const float dy = std::nearbyint(dy_raw * 32.0f) * (1.0f / 32.0f);
+            const float w00 = (1.0f - dx) * (1.0f - dy);
+            const float w01 = dx * (1.0f - dy);
+            const float w10 = (1.0f - dx) * dy;
+            const float w11 = dx * dy;
+
+            if (x0 >= 0 && x1 < src_width && y0 >= 0 && y1 < src_height) {
+                const ssize_t base00 =
+                    static_cast<ssize_t>(y0) * src_row_stride +
+                    static_cast<ssize_t>(x0) * static_cast<ssize_t>(channels);
+                const ssize_t base01 = base00 + static_cast<ssize_t>(channels);
+                const ssize_t base10 = base00 + src_row_stride;
+                const ssize_t base11 = base10 + static_cast<ssize_t>(channels);
+                for (int c = 0; c < channels; ++c) {
+                    const float accum =
+                        w00 * static_cast<float>(image[base00 + c]) +
+                        w01 * static_cast<float>(image[base01 + c]) +
+                        w10 * static_cast<float>(image[base10 + c]) +
+                        w11 * static_cast<float>(image[base11 + c]);
+                    out[out_base + c] = cast_output<T>(accum);
+                }
+                continue;
+            }
+
             for (int c = 0; c < channels; ++c) {
-                out[out_base + c] = static_cast<T>(0);
+                float accum = 0.0f;
+                if (x0 >= 0 && x0 < src_width && y0 >= 0 && y0 < src_height) {
+                    accum += w00 * static_cast<float>(
+                        image[source_offset(y0, x0, src_width, channels, c)]);
+                }
+                if (x1 >= 0 && x1 < src_width && y0 >= 0 && y0 < src_height) {
+                    accum += w01 * static_cast<float>(
+                        image[source_offset(y0, x1, src_width, channels, c)]);
+                }
+                if (x0 >= 0 && x0 < src_width && y1 >= 0 && y1 < src_height) {
+                    accum += w10 * static_cast<float>(
+                        image[source_offset(y1, x0, src_width, channels, c)]);
+                }
+                if (x1 >= 0 && x1 < src_width && y1 >= 0 && y1 < src_height) {
+                    accum += w11 * static_cast<float>(
+                        image[source_offset(y1, x1, src_width, channels, c)]);
+                }
+                out[out_base + c] = cast_output<T>(accum);
             }
-            continue;
-        }
-
-        const float inv_z = 1.0f / proj_z;
-        float src_x_norm = proj_x * inv_z;
-        float src_y_norm = proj_y * inv_z;
-        if (src_has_dist) {
-            const float r2 = src_x_norm * src_x_norm + src_y_norm * src_y_norm;
-            const float r4 = r2 * r2;
-            const float r6 = r4 * r2;
-            const float radial = 1.0f + src_k1 * r2 + src_k2 * r4 + src_k3 * r6;
-            const float xy2 = 2.0f * src_x_norm * src_y_norm;
-            const float x_dist = src_x_norm * radial +
-                                 src_p1 * xy2 +
-                                 src_p2 * (r2 + 2.0f * src_x_norm * src_x_norm);
-            const float y_dist = src_y_norm * radial +
-                                 src_p1 * (r2 + 2.0f * src_y_norm * src_y_norm) +
-                                 src_p2 * xy2;
-            src_x_norm = x_dist;
-            src_y_norm = y_dist;
-        }
-
-        const float src_x = fx_src * src_x_norm + cx_src;
-        const float src_y = fy_src * src_y_norm + cy_src;
-        if (!std::isfinite(src_x) || !std::isfinite(src_y)) {
-            for (int c = 0; c < channels; ++c) {
-                out[out_base + c] = static_cast<T>(0);
-            }
-            continue;
-        }
-
-        const int x0 = static_cast<int>(std::floor(src_x));
-        const int y0 = static_cast<int>(std::floor(src_y));
-        const int x1 = x0 + 1;
-        const int y1 = y0 + 1;
-        const float dx_raw = src_x - static_cast<float>(x0);
-        const float dy_raw = src_y - static_cast<float>(y0);
-        const float dx = std::nearbyint(dx_raw * 32.0f) * (1.0f / 32.0f);
-        const float dy = std::nearbyint(dy_raw * 32.0f) * (1.0f / 32.0f);
-        const float w00 = (1.0f - dx) * (1.0f - dy);
-        const float w01 = dx * (1.0f - dy);
-        const float w10 = (1.0f - dx) * dy;
-        const float w11 = dx * dy;
-
-        for (int c = 0; c < channels; ++c) {
-            float accum = 0.0f;
-            if (x0 >= 0 && x0 < src_width && y0 >= 0 && y0 < src_height) {
-                accum += w00 * static_cast<float>(
-                    image[source_offset(y0, x0, src_width, channels, c)]);
-            }
-            if (x1 >= 0 && x1 < src_width && y0 >= 0 && y0 < src_height) {
-                accum += w01 * static_cast<float>(
-                    image[source_offset(y0, x1, src_width, channels, c)]);
-            }
-            if (x0 >= 0 && x0 < src_width && y1 >= 0 && y1 < src_height) {
-                accum += w10 * static_cast<float>(
-                    image[source_offset(y1, x0, src_width, channels, c)]);
-            }
-            if (x1 >= 0 && x1 < src_width && y1 >= 0 && y1 < src_height) {
-                accum += w11 * static_cast<float>(
-                    image[source_offset(y1, x1, src_width, channels, c)]);
-            }
-            out[out_base + c] = cast_output<T>(accum);
         }
     }
 }
