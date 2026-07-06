@@ -49,6 +49,10 @@ add_library(hnw_ops_cpu_noise STATIC
     ops/noise/noise_ops.cpp
 )
 
+add_library(hnw_ops_cpu_remap STATIC
+    ops/remap/remap_ops.cpp
+)
+
 add_library(hnw_ops_cpu_sigma_clip STATIC
     ops/sigma_clip/sigma_clip_chunk_ops.cpp
 )
@@ -66,6 +70,7 @@ set(hnw_cpu_targets
     hnw_ops_cpu_max
     hnw_ops_cpu_median
     hnw_ops_cpu_noise
+    hnw_ops_cpu_remap
     hnw_ops_cpu_sigma_clip
     hnw_ops_cpu_wavelet
 )
@@ -116,6 +121,7 @@ target_link_libraries(_C PRIVATE
     hnw_ops_cpu_max
     hnw_ops_cpu_median
     hnw_ops_cpu_noise
+    hnw_ops_cpu_remap
     hnw_ops_cpu_sigma_clip
     hnw_ops_cpu_wavelet
 )

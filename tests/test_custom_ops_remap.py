@@ -143,6 +143,112 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
 
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
 
+    def test_camera_model_remap_cpu_compiled_uint16_matches_numpy(self) -> None:
+        image = (np.arange(8 * 9 * 2, dtype=np.uint16).reshape(8, 9, 2) * 19)
+        rotation = np.array([
+            [0.9998, -0.0170, 0.0030],
+            [0.0170, 0.9998, -0.0020],
+            [-0.0030, 0.0020, 1.0000],
+        ], dtype=np.float32)
+        src_dist = np.array([0.012, -0.0015, 0.0008, -0.0004, 0.0001],
+                            dtype=np.float32)
+        dst_dist = np.array([-0.010, 0.0012, -0.0006, 0.0003, -0.00008],
+                            dtype=np.float32)
+        kwargs = {
+            "image": image,
+            "out_height": 7,
+            "out_width": 8,
+            "fx_src": 13.0,
+            "fy_src": 12.5,
+            "cx_src": 4.0,
+            "cy_src": 3.5,
+            "fx_dst": 11.5,
+            "fy_dst": 11.0,
+            "cx_dst": 3.5,
+            "cy_dst": 3.0,
+            "rotation_dst_to_src": rotation,
+            "src_dist_coeffs": src_dist,
+            "dst_dist_coeffs": dst_dist,
+        }
+        expected = remap_ops.camera_model_remap_numpy(**kwargs)
+        got = remap_ops.camera_model_remap_cpu_compiled(**kwargs)
+
+        np.testing.assert_allclose(got, expected, rtol=0, atol=1)
+
+    def test_camera_model_remap_cpu_compiled_uint8_half_pixel_matches_opencv_rounding(
+            self) -> None:
+        image = np.array([[0, 1]], dtype=np.uint8)
+        rotation = np.eye(3, dtype=np.float32)
+        kwargs = {
+            "image": image,
+            "out_height": 1,
+            "out_width": 1,
+            "fx_src": 1.0,
+            "fy_src": 1.0,
+            "cx_src": 0.5,
+            "cy_src": 0.0,
+            "fx_dst": 1.0,
+            "fy_dst": 1.0,
+            "cx_dst": 0.0,
+            "cy_dst": 0.0,
+            "rotation_dst_to_src": rotation,
+        }
+        expected = remap_ops.camera_model_remap_numpy(**kwargs)
+        got = remap_ops.camera_model_remap_cpu_compiled(**kwargs)
+
+        np.testing.assert_array_equal(got, expected)
+        self.assertEqual(int(got[0, 0]), 1)
+
+    def test_camera_model_remap_cpu_compiled_uint16_half_pixel_matches_opencv_rounding(
+            self) -> None:
+        image = np.array([[0, 1]], dtype=np.uint16)
+        rotation = np.eye(3, dtype=np.float32)
+        kwargs = {
+            "image": image,
+            "out_height": 1,
+            "out_width": 1,
+            "fx_src": 1.0,
+            "fy_src": 1.0,
+            "cx_src": 0.5,
+            "cy_src": 0.0,
+            "fx_dst": 1.0,
+            "fy_dst": 1.0,
+            "cx_dst": 0.0,
+            "cy_dst": 0.0,
+            "rotation_dst_to_src": rotation,
+        }
+        expected = remap_ops.camera_model_remap_numpy(**kwargs)
+        got = remap_ops.camera_model_remap_cpu_compiled(**kwargs)
+
+        np.testing.assert_array_equal(got, expected)
+        self.assertEqual(int(got[0, 0]), 0)
+
+    def test_camera_model_remap_cpu_compiled_float32_matches_numpy(self) -> None:
+        image = np.linspace(0.0, 1.0, num=7 * 8 * 3, dtype=np.float32).reshape(7, 8, 3)
+        rotation = np.array([
+            [0.9999, -0.0100, 0.0020],
+            [0.0100, 0.9999, -0.0015],
+            [-0.0020, 0.0015, 1.0000],
+        ], dtype=np.float32)
+        kwargs = {
+            "image": image,
+            "out_height": 6,
+            "out_width": 7,
+            "fx_src": 12.0,
+            "fy_src": 11.5,
+            "cx_src": 3.5,
+            "cy_src": 3.0,
+            "fx_dst": 10.5,
+            "fy_dst": 10.0,
+            "cx_dst": 3.0,
+            "cy_dst": 2.5,
+            "rotation_dst_to_src": rotation,
+        }
+        expected = remap_ops.camera_model_remap_numpy(**kwargs)
+        got = remap_ops.camera_model_remap_cpu_compiled(**kwargs)
+
+        np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)
+
     def test_camera_model_remap_compiled_zero_distortion_matches_numpy(self) -> None:
         if not build_info().get("cuda"):
             self.skipTest("CUDA remap backend is not built")
@@ -363,40 +469,66 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
     def test_camera_model_remap_falls_back_when_cuda_runtime_is_unavailable(self) -> None:
         image = np.arange(18, dtype=np.uint8).reshape(3, 3, 2)
         rotation = np.eye(3, dtype=np.float32)
-        expected = remap_ops.camera_model_remap_numpy(
-            image=image,
-            out_height=2,
-            out_width=2,
-            fx_src=6.0,
-            fy_src=6.0,
-            cx_src=1.0,
-            cy_src=1.0,
-            fx_dst=5.0,
-            fy_dst=5.0,
-            cx_dst=1.0,
-            cy_dst=1.0,
-            rotation_dst_to_src=rotation,
-        )
+        kwargs = {
+            "image": image,
+            "out_height": 2,
+            "out_width": 2,
+            "fx_src": 6.0,
+            "fy_src": 6.0,
+            "cx_src": 1.0,
+            "cy_src": 1.0,
+            "fx_dst": 5.0,
+            "fy_dst": 5.0,
+            "cx_dst": 1.0,
+            "cy_dst": 1.0,
+            "rotation_dst_to_src": rotation,
+        }
+        expected = np.full((2, 2, 2), 7, dtype=np.uint8)
 
         with mock.patch.object(
                 remap_ops,
                 "_select_camera_model_remap_backend",
-                return_value=("compiled", mock.Mock(side_effect=RuntimeError(
+                return_value=("cuda", mock.Mock(side_effect=RuntimeError(
                     "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
-            got = camera_model_remap(
-                image=image,
-                out_height=2,
-                out_width=2,
-                fx_src=6.0,
-                fy_src=6.0,
-                cx_src=1.0,
-                cy_src=1.0,
-                fx_dst=5.0,
-                fy_dst=5.0,
-                cx_dst=1.0,
-                cy_dst=1.0,
-                rotation_dst_to_src=rotation,
-            )
+            with mock.patch.object(
+                    remap_ops,
+                    "camera_model_remap_cpu_compiled",
+                    return_value=expected) as cpu_fallback:
+                got = camera_model_remap(**kwargs)
+
+        np.testing.assert_array_equal(got, expected)
+        cpu_fallback.assert_called_once()
+
+    def test_camera_model_remap_falls_back_to_numpy_when_cuda_and_cpu_unavailable(
+            self) -> None:
+        image = np.arange(18, dtype=np.uint8).reshape(3, 3, 2)
+        rotation = np.eye(3, dtype=np.float32)
+        kwargs = {
+            "image": image,
+            "out_height": 2,
+            "out_width": 2,
+            "fx_src": 6.0,
+            "fy_src": 6.0,
+            "cx_src": 1.0,
+            "cy_src": 1.0,
+            "fx_dst": 5.0,
+            "fy_dst": 5.0,
+            "cx_dst": 1.0,
+            "cy_dst": 1.0,
+            "rotation_dst_to_src": rotation,
+        }
+        expected = remap_ops.camera_model_remap_numpy(**kwargs)
+
+        with mock.patch.object(
+                remap_ops,
+                "_select_camera_model_remap_backend",
+                return_value=("cuda", mock.Mock(side_effect=RuntimeError(
+                    "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
+            with mock.patch.object(
+                    remap_ops,
+                    "camera_model_remap_cpu_compiled",
+                    side_effect=RuntimeError("compiled CPU remap unavailable")):
+                got = camera_model_remap(**kwargs)
 
         np.testing.assert_array_equal(got, expected)
 
@@ -563,5 +695,3 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         )
 
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
-
-

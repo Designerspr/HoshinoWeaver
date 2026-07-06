@@ -11,23 +11,24 @@ import numpy as np
 
 from hoshicore._custom_op._dispatch import debug_enabled as _debug_enabled
 from hoshicore._custom_op._dispatch import debug_log
+from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
-from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
+from hoshicore._custom_op.backend_registry import select_backend as _select_backend
 
 
 _debug_log = partial(debug_log, "remap")
 _is_cuda_runtime_unavailable_error = is_cuda_runtime_unavailable_error
-_CUDA_SUPPORTED_DTYPES = (
+_COMPILED_SUPPORTED_DTYPES = (
     np.dtype(np.uint8),
     np.dtype(np.uint16),
     np.dtype(np.float32),
 )
 
 
-def _cuda_supports_dtype(dtype: np.dtype) -> bool:
-    return np.dtype(dtype) in _CUDA_SUPPORTED_DTYPES
+def _compiled_supports_dtype(dtype: np.dtype) -> bool:
+    return np.dtype(dtype) in _COMPILED_SUPPORTED_DTYPES
 
 
 def _validate_rotation(rotation_dst_to_src: np.ndarray) -> np.ndarray:
@@ -250,7 +251,8 @@ def camera_model_remap_numpy(
     )
 
 
-def camera_model_remap_compiled(
+def _camera_model_remap_compiled_kernel(
+    kernel_name: str,
     *,
     image: np.ndarray,
     out_height: int,
@@ -268,7 +270,7 @@ def camera_model_remap_compiled(
     dst_dist_coeffs: np.ndarray | None = None,
 ) -> np.ndarray:
     module, _ = _load_compiled_module_result()
-    if module is None or not hasattr(module, "camera_model_remap"):
+    if module is None or not hasattr(module, kernel_name):
         raise RuntimeError("compiled custom op backend is unavailable")
     image_arr = _validate_image(image)
     scalars = _validate_camera_scalars(
@@ -284,7 +286,10 @@ def camera_model_remap_compiled(
     rotation_arr = _validate_rotation(rotation_dst_to_src)
     src_dist_arr = _validate_dist_coeffs(src_dist_coeffs, "src_dist_coeffs")
     dst_dist_arr = _validate_dist_coeffs(dst_dist_coeffs, "dst_dist_coeffs")
-    return module.camera_model_remap(
+    if kernel_name == "camera_model_remap_cpu":
+        _apply_compiled_threads("camera_model_remap", image_arr)
+    kernel = getattr(module, kernel_name)
+    return kernel(
         image_arr,
         int(out_height),
         int(out_width),
@@ -302,20 +307,98 @@ def camera_model_remap_compiled(
     )
 
 
+def camera_model_remap_compiled(
+    *,
+    image: np.ndarray,
+    out_height: int,
+    out_width: int,
+    fx_src: float,
+    fy_src: float,
+    cx_src: float,
+    cy_src: float,
+    fx_dst: float,
+    fy_dst: float,
+    cx_dst: float,
+    cy_dst: float,
+    rotation_dst_to_src: np.ndarray,
+    src_dist_coeffs: np.ndarray | None = None,
+    dst_dist_coeffs: np.ndarray | None = None,
+) -> np.ndarray:
+    return _camera_model_remap_compiled_kernel(
+        "camera_model_remap",
+        image=image,
+        out_height=out_height,
+        out_width=out_width,
+        fx_src=fx_src,
+        fy_src=fy_src,
+        cx_src=cx_src,
+        cy_src=cy_src,
+        fx_dst=fx_dst,
+        fy_dst=fy_dst,
+        cx_dst=cx_dst,
+        cy_dst=cy_dst,
+        rotation_dst_to_src=rotation_dst_to_src,
+        src_dist_coeffs=src_dist_coeffs,
+        dst_dist_coeffs=dst_dist_coeffs,
+    )
+
+
+def camera_model_remap_cpu_compiled(
+    *,
+    image: np.ndarray,
+    out_height: int,
+    out_width: int,
+    fx_src: float,
+    fy_src: float,
+    cx_src: float,
+    cy_src: float,
+    fx_dst: float,
+    fy_dst: float,
+    cx_dst: float,
+    cy_dst: float,
+    rotation_dst_to_src: np.ndarray,
+    src_dist_coeffs: np.ndarray | None = None,
+    dst_dist_coeffs: np.ndarray | None = None,
+) -> np.ndarray:
+    return _camera_model_remap_compiled_kernel(
+        "camera_model_remap_cpu",
+        image=image,
+        out_height=out_height,
+        out_width=out_width,
+        fx_src=fx_src,
+        fy_src=fy_src,
+        cx_src=cx_src,
+        cy_src=cy_src,
+        fx_dst=fx_dst,
+        fy_dst=fy_dst,
+        cx_dst=cx_dst,
+        cy_dst=cy_dst,
+        rotation_dst_to_src=rotation_dst_to_src,
+        src_dist_coeffs=src_dist_coeffs,
+        dst_dist_coeffs=dst_dist_coeffs,
+    )
+
+
 @lru_cache(maxsize=2)
 def _select_camera_model_remap_backend(
     preference: str,
 ) -> tuple[str, Callable[..., np.ndarray]]:
-    available, compiled_error = _native_backend_available(
+    selection = _select_backend(
         "camera_model_remap",
         preference,
         load_module=_load_compiled_module_result,
     )
-    if available:
-        return "compiled", camera_model_remap_compiled
+    if selection.native:
+        if selection.candidate and selection.candidate.kernel_name == "camera_model_remap":
+            return "cuda", camera_model_remap_compiled
+        if selection.candidate and selection.candidate.kernel_name == "camera_model_remap_cpu":
+            return "cpu", camera_model_remap_cpu_compiled
+        raise RuntimeError(
+            f"unknown camera_model_remap backend candidate: {selection.candidate}"
+        )
 
-    if compiled_error:
-        _debug_log(f"compiled backend unavailable, reason: {compiled_error}")
+    if selection.reason:
+        _debug_log(f"compiled backend unavailable, reason: {selection.reason}")
 
     return "numpy", camera_model_remap_numpy
 
@@ -356,19 +439,25 @@ def camera_model_remap(
         "src_dist_coeffs": src_dist_coeffs,
         "dst_dist_coeffs": dst_dist_coeffs,
     }
-    if backend_name == "compiled" and not _cuda_supports_dtype(image_arr.dtype):
+    if backend_name != "numpy" and not _compiled_supports_dtype(image_arr.dtype):
         _debug_log(
-            f"compiled CUDA backend does not support dtype {image_arr.dtype}, falling back to numpy"
+            f"compiled backend does not support dtype {image_arr.dtype}, falling back to numpy"
         )
         return camera_model_remap_numpy(**kwargs)
-    if backend_name != "compiled":
+    if backend_name == "numpy":
         return backend(**kwargs)
 
     try:
         return backend(**kwargs)
     except RuntimeError as exc:
-        if not is_cuda_runtime_unavailable_error(exc):
+        if backend_name not in {"cuda", "compiled"} or not is_cuda_runtime_unavailable_error(exc):
             raise
+        try:
+            return camera_model_remap_cpu_compiled(**kwargs)
+        except RuntimeError as cpu_exc:
+            _debug_log(
+                f"compiled CPU backend unavailable after CUDA runtime failure, falling back to numpy: {cpu_exc}"
+            )
         _debug_log(
             f"compiled CUDA backend unavailable at runtime, falling back to numpy: {exc}"
         )

@@ -8,6 +8,7 @@
 #include "ops/max/max_ops.h"
 #include "ops/median/median_ops.h"
 #include "ops/noise/noise_ops.h"
+#include "ops/remap/remap_ops.h"
 #include "ops/sigma_clip/sigma_clip_chunk_ops.h"
 #include "ops/wavelet/wavelet_ops.h"
 #if HNW_ENABLE_CUDA
@@ -29,6 +30,7 @@ PYBIND11_MODULE(_C, m) {
     bind_max_ops(m);
     bind_median_ops(m);
     bind_noise_ops(m);
+    bind_remap_ops(m);
     bind_sigma_clip_chunk_ops(m);
     bind_wavelet_ops(m);
 #if HNW_ENABLE_CUDA
