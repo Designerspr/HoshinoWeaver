@@ -186,7 +186,11 @@ class BaseOp(object):
 
     async def _send_sentinel(self) -> None:
         """发送正常结束信号"""
-        for queue_list in self.outputs.values():
+        for key, queue_list in self.outputs.items():
+            # sentinel 只属于流式 sequence 输出。image/int/object 等单值输出
+            # 已经由 _broadcast_outputs 推送结果，再发送 sentinel 会堵塞 maxsize=1 的收集队列。
+            if self.OUTPUTS[key].get("type") != "sequence":
+                continue
             for queue in queue_list:
                 await queue.put(BaseQueue._SENTINEL)
 
