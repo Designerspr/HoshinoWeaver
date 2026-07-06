@@ -9,6 +9,9 @@ import hoshicore.component.norma.types as norma_types
 from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
 
 
+# OpenCV's float32 INTER_LINEAR path is not bit-exact across builds. Keep this
+# tolerance scoped to float remap-vs-OpenCV checks; integer paths use tighter
+# dtype-scale tolerances below.
 REMAP_FLOAT_RTOL = 1e-5
 REMAP_FLOAT_ATOL = 5e-3
 
@@ -183,6 +186,8 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
 
     def test_camera_model_remap_cpu_compiled_uint8_half_pixel_rounds_to_even(
             self) -> None:
+        # Half-pixel ties are implementation-defined in OpenCV. This test fixes
+        # the CPU kernel's contract and keeps it aligned with the CUDA path.
         image = np.array([[0, 1]], dtype=np.uint8)
         rotation = np.eye(3, dtype=np.float32)
         kwargs = {
@@ -205,6 +210,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
 
     def test_camera_model_remap_cpu_compiled_uint16_half_pixel_rounds_to_even(
             self) -> None:
+        # Keep integer tie handling consistent across uint8/uint16 CPU kernels.
         image = np.array([[0, 1]], dtype=np.uint16)
         rotation = np.eye(3, dtype=np.float32)
         kwargs = {

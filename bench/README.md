@@ -40,7 +40,7 @@
 - `python -m bench.cli run pipeline.compute -- --input-dir <image-dir>`
   跑代表性的独立生产计算路径，包括对齐和叠加；用于看具体计算路径收益。
 - `python -m bench.cli run pipeline.alignment -- --input-dir <image-dir>`
-  只看完整生产对齐链路时使用；终端打印 pipeline 总耗时，阶段明细保留在 JSON。
+  只看完整生产对齐链路时使用；终端打印 pipeline 总耗时，单方法运行时也会打印阶段耗时。
 
 `bench.cli` 是 suite 级调度器，负责发现入口、统一 profile 和聚合 JSON；
 它不是完整 DAG pipeline profiler。真正按 DAG 节点采样的 profiler 后续会单独放在
@@ -78,7 +78,12 @@ python -m bench.cli run pipeline.all -- --input-dir <image-dir> --repeat 3
 
 ```bash
 python -m bench.cli run pipeline.all -- --input-dir <image-dir> --backend numpy
+python -m bench.cli run pipeline.compute -- --input-dir <image-dir> --backend numpy
 ```
+
+`--backend` 是 `pipeline.all` / `pipeline.workflow` / `pipeline.compute` 的参数。
+`pipeline.alignment` 没有这个参数；它直接走生产 wrapper 的默认选择。如果需要临时禁用
+custom-op，可以在命令外设置 `HNW_CUSTOM_OPS_FALLBACK=numpy`。
 
 `pipeline.all` 当前覆盖两类 YAML/DAG workflow：
 
@@ -144,7 +149,8 @@ custom-op wrapper；`stack_*` 不消费对齐输出。终端只打印每条路�
 `cv2.warpPerspective`。custom-op 后端由生产 wrapper 自己选择；如果本机 CUDA
 可用并且当前路径支持 CUDA，就会按生产逻辑使用 CUDA，否则走已有 CPU/OpenCV fallback。
 `--method all` 会顺序跑 `homography` 和 `camera_model` 两条主要对齐路径；
-终端默认只打印每条路径的一次 pipeline 总耗时，阶段明细保留在 JSON `results` 中。
+终端只打印两条 pipeline 的 `mean/min/max`，阶段明细保留在 JSON `results` 中。
+单独运行 `--method homography` 或 `--method camera_model` 时，终端会同时打印阶段耗时。
 输入选择遵循统一 benchmark 规则：显式 `--input-dir` 优先，其次扫描
 `bench/data/cache`、`bench/data/input`、`bench/data/generated`，最后才使用
 synthetic starfield。
@@ -264,20 +270,33 @@ python -m bench.data_tools.generate_starfield_dataset --name align_u16_32f --fra
 
 建议按下面顺序使用：
 
-1. `python -m bench.cpu.kernels`
+1. `python -m bench.cli run pipeline.all -- --input-dir <image-dir>`
+   先看真实 YAML/DAG workflow 在本机的一次端到端耗时。默认后端是 `auto`，
+   会按生产 wrapper 选择 compiled/CUDA/CPU fallback；需要禁用 custom-op
+   时加 `--backend numpy`。
+2. `python -m bench.cli run pipeline.compute -- --input-dir <image-dir>`
+   再看不经过 DAG engine 的代表性生产计算路径，便于区分 engine workflow
+   开销和核心计算路径耗时。
+3. `python -m bench.cli run pipeline.alignment -- --input-dir <image-dir> --method all`
+   单独确认对齐链路的 `homography` 和 `camera_model` 两条路径。
+4. `python -m bench.cpu.kernels`
    先看当前 stack kernel 热点方向，也包含 `fgp_masked_mean_merge`、`sigma_clip_fused_*`、`fgp_add_partial_reduce` 的独立 `numpy / compiled` microbenchmark。
-2. `python -m bench.cpu.max_stack` / `python -m bench.cpu.fgp_accumulate`
+5. `python -m bench.cpu.max_stack` / `python -m bench.cpu.fgp_accumulate`
    跟进 `max / fgp_accumulate` 的 CPU kernel 优化。
-3. `python -m bench.cpu.alignment`
+6. `python -m bench.cpu.alignment`
    先确认对齐链阶段热点，避免直接 GPU 化错对象。
-4. `python -m bench.gpu.original_remap`
+7. `python -m bench.gpu.original_remap`
    测当前正式 camera-model remap 路径，包括 CUDA custom-op、CPU custom-op、OpenCV reference 等口径。
-5. `python -m bench.gpu.original_homography`
+8. `python -m bench.gpu.original_homography`
    单独判断纯 homography warp 的 OpenCV baseline。
 
 示例：
 
 ```bash
+python -m bench.cli run pipeline.all -- --input-dir <image-dir>
+python -m bench.cli run pipeline.all -- --input-dir <image-dir> --backend numpy
+python -m bench.cli run pipeline.compute -- --input-dir <image-dir> --cases alignment_homography,alignment_camera_model,remap_camera_model
+python -m bench.cli run pipeline.alignment -- --input-dir <image-dir> --method all
 python -m bench.cpu.kernels --frames 128 --height 1080 --width 1920 --dtype uint16 --input-mode synthetic
 python -m bench.cpu.kernels --frames 64 --height 2048 --width 3072 --dtype uint16 --input-mode synthetic --cases fgp_masked_mean_merge_stream_numpy,fgp_masked_mean_merge_stream_compiled,sigma_clip_fused_merge_stream_numpy,sigma_clip_fused_merge_stream_compiled,sigma_clip_fused_masked_merge_stream_numpy,sigma_clip_fused_masked_merge_stream_compiled,fgp_add_partial_reduce_numpy,fgp_add_partial_reduce_compiled
 python -m bench.cpu.kernels --frames 16 --height 2048 --width 3072 --dtype uint16 --input-mode synthetic --cases median_reduce_chunk_numpy,median_reduce_chunk_compiled --chunk-rows 32

@@ -90,6 +90,7 @@ inline T cast_output(float value) {
         return value;
     } else if constexpr (std::is_same_v<T, unsigned char>) {
         value = std::min(std::max(value, 0.0f), 255.0f);
+        // Match the CUDA remap kernel's integer tie handling.
         return static_cast<unsigned char>(std::nearbyint(value));
     } else {
         value = std::min(std::max(value, 0.0f), 65535.0f);
