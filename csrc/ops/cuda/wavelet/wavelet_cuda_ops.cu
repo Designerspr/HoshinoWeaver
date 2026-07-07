@@ -1,3 +1,5 @@
+#include "common/compat.h"
+
 #include "wavelet_device.cuh"
 
 void launch_wavelet_dec_rec_cuda_core(const double* image_host,

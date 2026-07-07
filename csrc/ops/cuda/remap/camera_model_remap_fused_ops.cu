@@ -1,3 +1,5 @@
+#include "common/compat.h"
+
 #include <cuda_runtime.h>
 
 #include <cmath>

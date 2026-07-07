@@ -1,3 +1,5 @@
+#include "common/compat.h"
+
 #include "../wavelet/wavelet_device.cuh"
 
 #include <algorithm>
