@@ -263,14 +263,15 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
 
     @classmethod
     def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
-        float64_row = row_bytes // dtype_bytes * 8
+        plane_items_per_row = row_bytes // dtype_bytes
+        float64_row = plane_items_per_row * 8
         # compiled 路径峰值包含 chunk 双缓冲、stack_2d、mask、total_* 与 acc_*。
         stack = 2 * n_frames * row_bytes
         active_stack = n_frames * row_bytes
-        mask = n_frames * row_bytes // dtype_bytes
+        mask_bytes = n_frames * plane_items_per_row
         totals = 3 * float64_row
         acc = 3 * float64_row
-        return stack + active_stack + mask + totals + acc
+        return stack + active_stack + mask_bytes + totals + acc
 
     def _init_chunk_state(self, configs, row_start, row_end, w):
         fgp_total: FastGaussianParam = configs['fgp_total']
@@ -483,6 +484,7 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
     EXECUTOR = "cpu"
     ITERATOR_TYPE = "sigma_clip_fused"
     CHUNK_ROWS = 256
+    BACKEND_LOGICAL_OP = "sigma_clip_fused_chunk"
     CONFIGS: dict[str, dict[str, Any]] = {
         "buffer_handle": {
             "type": "image",
@@ -522,12 +524,13 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
 
     @classmethod
     def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
-        float64_row = row_bytes // dtype_bytes * 8
+        plane_items_per_row = row_bytes // dtype_bytes
+        float64_row = plane_items_per_row * 8
         stack = 2 * n_frames * row_bytes
         active = n_frames * row_bytes
-        mask = n_frames * row_bytes // dtype_bytes
+        mask_bytes = n_frames * plane_items_per_row
         state = 3 * float64_row
-        return stack + active + mask + state
+        return stack + active + mask_bytes + state
 
     def _init_chunk_state(self, configs, row_start, row_end, w):
         # 静态 mask 切片

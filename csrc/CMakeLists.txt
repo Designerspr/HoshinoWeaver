@@ -100,6 +100,7 @@ pybind11_add_module(_C MODULE
 
 if(HNW_ENABLE_CUDA)
     target_sources(_C PRIVATE
+        common/backend_cuda_info.cu
         # Fused camera-model remap.
         ops/cuda/remap/camera_model_remap_fused_ops.cpp
         ops/cuda/remap/camera_model_remap_fused_ops.cu

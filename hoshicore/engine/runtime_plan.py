@@ -8,6 +8,9 @@ from typing import Any, Optional
 import psutil
 from loguru import logger
 
+from .._custom_op._dispatch import cuda_memory_info
+from .._custom_op._dispatch import fallback_preference
+from .._custom_op.backend_registry import select_backend
 from ..component.image_io import peek_shape
 from ..ops.base import BaseOp
 from .build import ValidatedDag
@@ -18,6 +21,7 @@ MEMORY_SAFETY_FACTOR = 0.7
 MEMORY_FIXED_OVERHEAD = 200 * 1024 * 1024
 DEFAULT_MIN_CHUNK_ROWS = 1
 DEFAULT_MAX_CHUNK_ROWS = 1024
+CHUNK_ROW_ALIGNMENT = 16
 
 
 @dataclass(frozen=True)
@@ -59,17 +63,18 @@ def plan_runtime(
     if shape_info is None:
         return RuntimePlan()
     shape, dtype_bytes, n_frames = shape_info
-    chunk_rows = _plan_chunk_rows(
+    chunk_rows, budget_info = _plan_chunk_rows(
         shape, dtype_bytes, n_frames, effective_configs,
         chunk_ops, preflight_report)
     if chunk_rows is None:
         return RuntimePlan()
 
     non_chunk_mem = preflight_report.non_chunk_mem if preflight_report else 0
+    budget_reason = f", budget={budget_info}" if budget_info else ""
     reason = (
         f"planned chunk_rows={chunk_rows} for shape={shape}, "
         f"frames={n_frames}, dtype_bytes={dtype_bytes}, "
-        f"non_chunk_mem={non_chunk_mem}"
+        f"non_chunk_mem={non_chunk_mem}{budget_reason}"
     )
     return RuntimePlan(
         config_overrides={"chunk_rows": chunk_rows},
@@ -128,42 +133,77 @@ def _plan_chunk_rows(
     configs: dict[str, Any],
     chunk_ops: list[type[BaseOp]],
     preflight_report: PreflightReport | None,
-) -> int | None:
+) -> tuple[int | None, str | None]:
     if preflight_report is None:
-        return None
+        return None, None
     if len(shape) < 2 or n_frames <= 0 or dtype_bytes <= 0:
-        return None
+        return None, None
 
     height = int(shape[0])
     width = int(shape[1])
     channels = int(shape[2]) if len(shape) >= 3 else 1
     row_bytes = width * channels * dtype_bytes
     if height <= 0 or row_bytes <= 0:
-        return None
+        return None, None
 
     cost_per_row = sum(
         op_cls.chunk_cost_per_row(n_frames, row_bytes, dtype_bytes)
         for op_cls in chunk_ops
     )
     if cost_per_row <= 0:
-        return None
+        return None, None
 
     # preflight 负责估算非 chunk 常驻内存；planner 只拿剩余预算分配 chunk_rows。
-    chunk_budget = _memory_budget_bytes() - int(preflight_report.non_chunk_mem)
+    cpu_budget = _memory_budget_bytes() - int(preflight_report.non_chunk_mem)
+    gpu_budget = _cuda_chunk_memory_budget_bytes(chunk_ops)
+    chunk_budget = cpu_budget if gpu_budget is None else min(cpu_budget, gpu_budget)
     if chunk_budget <= 0:
         rows = DEFAULT_MIN_CHUNK_ROWS
     else:
         rows = max(DEFAULT_MIN_CHUNK_ROWS, chunk_budget // cost_per_row)
-    rows = _round_down_to_multiple(int(rows), 16)
-    min_rows = _positive_int(configs.get("runtime_planner_min_chunk_rows"), DEFAULT_MIN_CHUNK_ROWS)
-    max_rows = _positive_int(configs.get("runtime_planner_max_chunk_rows"), DEFAULT_MAX_CHUNK_ROWS)
+    rows = _round_down_to_multiple(int(rows), CHUNK_ROW_ALIGNMENT)
+    min_rows = _positive_int(
+        configs.get("runtime_planner_min_chunk_rows"), DEFAULT_MIN_CHUNK_ROWS)
+    max_rows = _positive_int(
+        configs.get("runtime_planner_max_chunk_rows"), DEFAULT_MAX_CHUNK_ROWS)
     rows = max(min_rows, min(rows, max_rows, height))
-    return max(1, int(rows))
+    budget_info = f"cpu={cpu_budget}"
+    if gpu_budget is not None:
+        budget_info += f", gpu={gpu_budget}"
+    return max(1, int(rows)), budget_info
 
 
 def _memory_budget_bytes() -> int:
     avail_mem = psutil.virtual_memory().available
     return int(avail_mem * MEMORY_SAFETY_FACTOR) - MEMORY_FIXED_OVERHEAD
+
+
+def _cuda_chunk_memory_budget_bytes(chunk_ops: list[type[BaseOp]]) -> int | None:
+    if not _uses_cuda_host_io_chunk_backend(chunk_ops):
+        return None
+    info = cuda_memory_info()
+    if not info.get("available"):
+        return None
+    try:
+        free_bytes = int(info["free_bytes"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return int(free_bytes * MEMORY_SAFETY_FACTOR) - MEMORY_FIXED_OVERHEAD
+
+
+def _uses_cuda_host_io_chunk_backend(chunk_ops: list[type[BaseOp]]) -> bool:
+    for op_cls in chunk_ops:
+        logical_op = getattr(op_cls, "BACKEND_LOGICAL_OP", None)
+        if not logical_op:
+            continue
+        selection = select_backend(logical_op, fallback_preference())
+        if (
+            selection.native
+            and selection.candidate is not None
+            and selection.candidate.backend == "cuda_host_io"
+        ):
+            return True
+    return False
 
 
 def _positive_int(value: Any, default: int) -> int:

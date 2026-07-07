@@ -75,6 +75,17 @@ py::dict build_info_dict() {
     return info;
 }
 
+py::dict cuda_memory_info_dict() {
+#if HNW_ENABLE_CUDA
+    return cuda_memory_info_cuda_dict();
+#else
+    py::dict info;
+    info["available"] = false;
+    info["reason"] = "CUDA backend is not built";
+    return info;
+#endif
+}
+
 int get_openmp_max_threads() {
 #ifdef _OPENMP
     return omp_get_max_threads();
@@ -98,6 +109,8 @@ bool set_openmp_threads(int num_threads) {
 
 void bind_backend_info(py::module_& m) {
     m.def("build_info", &build_info_dict, "Return compiled op backend metadata.");
+    m.def("cuda_memory_info", &cuda_memory_info_dict,
+          "Return CUDA device memory metadata when CUDA runtime is available.");
     m.def("get_openmp_max_threads", &get_openmp_max_threads,
           "Return the current OpenMP max thread count.");
     m.def("set_openmp_threads", &set_openmp_threads, py::arg("num_threads"),

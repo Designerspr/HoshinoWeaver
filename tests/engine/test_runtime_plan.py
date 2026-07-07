@@ -5,6 +5,7 @@ from hoshicore.engine.build import ValidatedDag
 from hoshicore.engine.preflight import PreflightReport, ResourceEstimate
 from hoshicore.engine.runtime_plan import apply_runtime_plan, plan_runtime
 import hoshicore.engine.runtime_plan as runtime_plan_module
+import hoshicore._custom_op.backend_registry as backend_registry
 from hoshicore.ops.base import BaseOp
 from hoshicore.ops.sigma_clip_ops import (
     HuberMeanIteratorOp,
@@ -62,6 +63,19 @@ def _make_multi_chunk_dag() -> ValidatedDag:
     )
 
 
+def _make_cuda_chunk_dag() -> ValidatedDag:
+    return ValidatedDag(
+        nodes={
+            "chunk": {"op": "FixedCudaChunkOp", "configs": {}},
+        },
+        global_inputs={},
+        global_configs={},
+        output_links={},
+        node_deps={},
+        exec_order=["chunk"],
+    )
+
+
 def _report(non_chunk_mem: int = 0) -> PreflightReport:
     return PreflightReport(
         estimate=ResourceEstimate(0, 0),
@@ -86,6 +100,49 @@ def _mock_available_memory(monkeypatch, budget: int, non_chunk_mem: int = 0) -> 
         lambda: FakeVMem())
 
 
+def _mock_cuda_memory(monkeypatch, budget: int, available: bool = True) -> None:
+    if not available:
+        monkeypatch.setattr(
+            runtime_plan_module,
+            "cuda_memory_info",
+            lambda: {"available": False, "reason": "mock unavailable"},
+        )
+        return
+    free_bytes = int(
+        (runtime_plan_module.MEMORY_FIXED_OVERHEAD + budget) /
+        runtime_plan_module.MEMORY_SAFETY_FACTOR) + 16
+    monkeypatch.setattr(
+        runtime_plan_module,
+        "cuda_memory_info",
+        lambda: {
+            "available": True,
+            "free_bytes": free_bytes,
+            "total_bytes": free_bytes * 2,
+        },
+    )
+
+
+def _mock_cuda_backend(monkeypatch, logical_op: str) -> None:
+    candidate = backend_registry.BackendCandidate(
+        logical_op,
+        "cuda_host_io",
+        f"{logical_op}_cuda",
+        priority=10,
+        build_flag="cuda",
+    )
+    selection = backend_registry.BackendSelection(candidate, object())
+
+    def select(logical_op_arg: str, preference: str = "auto"):
+        if preference == "numpy":
+            return backend_registry.BackendSelection(
+                None, None, "numpy backend forced by preference")
+        if logical_op_arg == logical_op:
+            return selection
+        return backend_registry.BackendSelection(None, None, "mock unavailable")
+
+    monkeypatch.setattr(runtime_plan_module, "select_backend", select)
+
+
 class NoChunkOp(BaseOp):
     pass
 
@@ -106,6 +163,16 @@ class FixedChunkOpB(BaseOp):
     def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
         _ = n_frames, row_bytes, dtype_bytes
         return 60
+
+
+class FixedCudaChunkOp(BaseOp):
+    CHUNK_PLANNED = True
+    BACKEND_LOGICAL_OP = "fixed_cuda_chunk"
+
+    @classmethod
+    def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
+        _ = n_frames, row_bytes, dtype_bytes
+        return 100
 
 
 def _median_registry() -> dict[str, type[BaseOp]]:
@@ -186,6 +253,64 @@ def test_runtime_planner_sums_multiple_chunk_op_costs(tmp_path, monkeypatch):
     )
 
     assert plan.config_overrides["chunk_rows"] == 128
+
+
+def test_runtime_planner_uses_cuda_budget_for_cuda_chunk_op(tmp_path, monkeypatch):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    _mock_available_memory(monkeypatch, budget=12800)
+    _mock_cuda_memory(monkeypatch, budget=6400)
+    _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
+
+    plan = plan_runtime(
+        _make_cuda_chunk_dag(),
+        {"runtime_planner": True},
+        {"fnames": [str(path)] * 4},
+        op_registry={"FixedCudaChunkOp": FixedCudaChunkOp},
+        preflight_report=_report(),
+    )
+
+    assert plan.config_overrides["chunk_rows"] == 64
+    assert "gpu=" in plan.decisions[0].reason
+
+
+def test_runtime_planner_ignores_unavailable_cuda_budget(tmp_path, monkeypatch):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    _mock_available_memory(monkeypatch, budget=12800)
+    _mock_cuda_memory(monkeypatch, budget=0, available=False)
+    _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
+
+    plan = plan_runtime(
+        _make_cuda_chunk_dag(),
+        {"runtime_planner": True},
+        {"fnames": [str(path)] * 4},
+        op_registry={"FixedCudaChunkOp": FixedCudaChunkOp},
+        preflight_report=_report(),
+    )
+
+    assert plan.config_overrides["chunk_rows"] == 128
+    assert "gpu=" not in plan.decisions[0].reason
+
+
+def test_runtime_planner_ignores_cuda_budget_when_numpy_forced(tmp_path, monkeypatch):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    _mock_available_memory(monkeypatch, budget=12800)
+    _mock_cuda_memory(monkeypatch, budget=6400)
+    _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
+    monkeypatch.setenv("HNW_CUSTOM_OPS_FALLBACK", "numpy")
+
+    plan = plan_runtime(
+        _make_cuda_chunk_dag(),
+        {"runtime_planner": True},
+        {"fnames": [str(path)] * 4},
+        op_registry={"FixedCudaChunkOp": FixedCudaChunkOp},
+        preflight_report=_report(),
+    )
+
+    assert plan.config_overrides["chunk_rows"] == 128
+    assert "gpu=" not in plan.decisions[0].reason
 
 
 def test_runtime_planner_clamps_to_default_max_chunk_rows(tmp_path, monkeypatch):

@@ -22,6 +22,7 @@ class BaseOp(object):
     VARIABLE_OUTPUT: bool = False  # True 时标记为变长输出（Filter 类）
     REPORTS_PROGRESS: bool = False  # True 时该 Op 被视为限速节点，注入真实 tracker
     CHUNK_PLANNED: bool = False  # True 时 chunk_rows 由 runtime planner 管理
+    BACKEND_LOGICAL_OP: str | None = None  # backend registry 中对应的 logical op
 
     @classmethod
     def estimate_resources(

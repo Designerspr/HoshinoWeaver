@@ -69,6 +69,25 @@ def compiled_build_info() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def cuda_memory_info() -> dict[str, Any]:
+    module, error = load_compiled_module()
+    if module is None:
+        return {"available": False, "reason": error or "compiled backend unavailable"}
+    if not hasattr(module, "cuda_memory_info"):
+        return {
+            "available": False,
+            "reason": "compiled backend does not expose CUDA memory info",
+        }
+    try:
+        payload = module.cuda_memory_info()
+    except RuntimeError as exc:
+        return {"available": False, "reason": str(exc)}
+    return payload if isinstance(payload, dict) else {
+        "available": False,
+        "reason": "invalid CUDA memory info payload",
+    }
+
+
 _LAST_APPLIED_COMPILED_THREADS: int | None = None
 
 
