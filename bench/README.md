@@ -174,6 +174,9 @@ synthetic starfield。
   当前 camera-model remap 口径集合。覆盖 `NumPy grid`、fused `camera_model_remap` custom-op、`cv2.remap` 与原主线路径。
 - `python -m bench.gpu.original_homography`
   纯 homography warp 的 CPU 基线。只测 `cv2.warpPerspective`，不含 detect / features / match。
+- `python -m bench.cli run gpu.sigma_clip_chunk`
+  fused sigma-clip chunk 的 host-in/host-out 口径。默认对比 OpenMP CPU 与 CUDA backend；
+  CUDA 不可用时会在结果中标记 skipped。
 
 ### 数据工具
 

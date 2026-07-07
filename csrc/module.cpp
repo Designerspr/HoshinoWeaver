@@ -15,6 +15,7 @@
 #if HNW_ENABLE_CUDA
 #include "ops/cuda/detection/star_detect_full_ops.h"
 #include "ops/cuda/remap/camera_model_remap_fused_ops.h"
+#include "ops/cuda/sigma_clip/sigma_clip_fused_chunk_ops.h"
 #include "ops/cuda/wavelet/wavelet_cuda_ops.h"
 #endif
 
@@ -37,6 +38,7 @@ PYBIND11_MODULE(_C, m) {
     bind_wavelet_ops(m);
 #if HNW_ENABLE_CUDA
     bind_camera_model_remap_fused_ops(m);
+    bind_sigma_clip_fused_chunk_cuda_ops(m);
     bind_star_detect_full_ops(m);
     bind_wavelet_cuda_ops(m);
 #endif

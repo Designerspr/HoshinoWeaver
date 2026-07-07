@@ -39,6 +39,10 @@ SUITES: dict[str, SuiteSpec] = {
         module="bench.gpu.original_homography",
         description="OpenCV homography warp baseline benchmark",
     ),
+    "gpu.sigma_clip_chunk": SuiteSpec(
+        module="bench.gpu.sigma_clip_chunk",
+        description="Sigma-clip fused chunk host-in/host-out benchmark",
+    ),
     "pipeline.alignment": SuiteSpec(
         module="bench.pipeline.alignment",
         description="End-to-end production alignment pipeline benchmark",

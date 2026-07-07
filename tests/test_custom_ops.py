@@ -23,6 +23,7 @@ from hoshicore._custom_op import (
     threshold_max_merge as custom_threshold_max_merge,
 )
 import hoshicore._custom_op.backend_registry as backend_registry
+from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 import hoshicore._custom_op.ops.alignment as alignment_ops
 import hoshicore._custom_op.ops.fgp as fgp_ops
 import hoshicore._custom_op.ops.filter as filter_ops
@@ -106,6 +107,8 @@ class TestCustomOpsFallback(unittest.TestCase):
         median_ops._compiled_build_info.cache_clear()
         median_ops._select_median_backend.cache_clear()
         median_ops._LAST_APPLIED_COMPILED_THREADS = None
+        sigma_clip_chunk_ops._load_compiled_module_result.cache_clear()
+        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
         alignment_ops._load_compiled_module_result.cache_clear()
         alignment_ops._select_extract_point_features_backend.cache_clear()
         alignment_ops._select_find_initial_match_backend.cache_clear()
@@ -1264,6 +1267,25 @@ class TestCustomOpsFallback(unittest.TestCase):
         self.assertEqual(c_n[8], 0.0)
         self.assertLess(c_n[4], 25.0)
 
+    def test_sigma_clip_fused_chunk_can_force_numpy_fallback(self) -> None:
+        """Fallback preference bypasses native fused chunk backends."""
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        expected = sigma_clip_chunk_ops.sigma_clip_fused_chunk_numpy(stack)
+
+        with mock.patch.dict("os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False):
+            with mock.patch.object(
+                    sigma_clip_chunk_ops,
+                    "sigma_clip_fused_chunk_compiled",
+                    side_effect=AssertionError("native backend should not be called")):
+                with mock.patch.object(
+                        sigma_clip_chunk_ops,
+                        "sigma_clip_fused_chunk_compiled_cuda",
+                        side_effect=AssertionError("native backend should not be called")):
+                    got = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
+
+        for actual, expected_arr in zip(got, expected, strict=True):
+            np.testing.assert_array_equal(actual, expected_arr)
+
     def test_sigma_clip_fused_chunk_skip_zero_rgb_matches_numpy(self) -> None:
         """Fused chunk kernel excludes RGB all-zero pixels in total stats."""
         rng = np.random.default_rng(456)
@@ -1289,6 +1311,125 @@ class TestCustomOpsFallback(unittest.TestCase):
         np.testing.assert_allclose(c_sum, n_sum, rtol=1e-10)
         np.testing.assert_allclose(c_sq, n_sq, rtol=1e-10)
         np.testing.assert_array_equal(c_n[9:12], np.zeros(3))
+
+    def test_sigma_clip_fused_chunk_skip_zero_rgb_requires_full_pixels(self) -> None:
+        """RGB zero-skip requires flattened data to contain complete pixels."""
+        stack = np.arange(40, dtype=np.uint16).reshape(4, 10)
+        with self.assertRaisesRegex(ValueError, "divisible by channels"):
+            sigma_clip_chunk_ops.sigma_clip_fused_chunk_numpy(
+                stack, skip_zero_rgb=True, channels=3)
+        with self.assertRaisesRegex(ValueError, "divisible by channels"):
+            sigma_clip_chunk_ops.sigma_clip_fused_chunk_compiled(
+                stack, skip_zero_rgb=True, channels=3)
+
+    def test_sigma_clip_fused_chunk_cuda_matches_numpy(self) -> None:
+        """CUDA fused chunk backend matches numpy when a CUDA device is available."""
+        if not build_info().get("cuda"):
+            self.skipTest("CUDA sigma clip backend is not built")
+
+        rng = np.random.default_rng(987)
+        n_frames = 18
+        spatial = 32
+        channels = 3
+        plane_size = spatial * channels
+        stack = rng.integers(
+            80, 140, size=(n_frames, plane_size), dtype=np.uint16)
+        stack[0, 12] = 900
+        stack[:, 21:24] = 0
+        mask = (rng.random((n_frames, plane_size)) > 0.2).astype(np.uint8)
+
+        try:
+            c_sum, c_sq, c_n = sigma_clip_chunk_ops.sigma_clip_fused_chunk_compiled_cuda(
+                stack, 3.0, 3.0, 5, mask=mask,
+                skip_zero_rgb=True, channels=channels)
+        except RuntimeError as exc:
+            if is_cuda_runtime_unavailable_error(exc):
+                self.skipTest(f"CUDA sigma clip runtime unavailable: {exc}")
+            raise
+
+        n_sum, n_sq, n_n = sigma_clip_chunk_ops.sigma_clip_fused_chunk_numpy(
+            stack, 3.0, 3.0, 5, mask=mask,
+            skip_zero_rgb=True, channels=channels)
+
+        np.testing.assert_array_equal(c_n, n_n)
+        np.testing.assert_allclose(c_sum, n_sum, rtol=1e-10)
+        np.testing.assert_allclose(c_sq, n_sq, rtol=1e-10)
+
+    def test_sigma_clip_fused_chunk_cuda_runtime_falls_back_to_cpu(self) -> None:
+        """Public fused dispatch falls back to CPU when CUDA runtime is unavailable."""
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        expected = tuple(np.full(6, value, dtype=np.float64)
+                         for value in (1.0, 2.0, 3.0))
+        cuda_candidate = backend_registry.BackendCandidate(
+            "sigma_clip_fused_chunk",
+            "cuda_host_io",
+            "sigma_clip_fused_chunk_cuda",
+            priority=10,
+            build_flag="cuda",
+        )
+        cuda_selection = backend_registry.BackendSelection(
+            cuda_candidate,
+            mock.Mock(),
+        )
+
+        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+        with mock.patch.object(
+                sigma_clip_chunk_ops,
+                "_select_backend",
+                return_value=cuda_selection):
+            with mock.patch.object(
+                    sigma_clip_chunk_ops,
+                    "sigma_clip_fused_chunk_compiled_cuda",
+                    side_effect=RuntimeError(
+                        "sigma_clip_fused_chunk_cuda cudaGetDevice: no CUDA-capable device is detected")):
+                sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+                with mock.patch.object(
+                        sigma_clip_chunk_ops,
+                        "sigma_clip_fused_chunk_compiled",
+                        return_value=expected) as cpu_fallback:
+                    got = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
+        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+
+        for actual, expected_arr in zip(got, expected, strict=True):
+            np.testing.assert_array_equal(actual, expected_arr)
+        cpu_fallback.assert_called_once()
+
+    def test_sigma_clip_fused_chunk_cuda_runtime_falls_back_to_numpy(self) -> None:
+        """Public fused dispatch falls back to numpy if CUDA and CPU are unavailable."""
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        expected = sigma_clip_chunk_ops.sigma_clip_fused_chunk_numpy(stack)
+        cuda_candidate = backend_registry.BackendCandidate(
+            "sigma_clip_fused_chunk",
+            "cuda_host_io",
+            "sigma_clip_fused_chunk_cuda",
+            priority=10,
+            build_flag="cuda",
+        )
+        cuda_selection = backend_registry.BackendSelection(
+            cuda_candidate,
+            mock.Mock(),
+        )
+
+        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+        with mock.patch.object(
+                sigma_clip_chunk_ops,
+                "_select_backend",
+                return_value=cuda_selection):
+            with mock.patch.object(
+                    sigma_clip_chunk_ops,
+                    "sigma_clip_fused_chunk_compiled_cuda",
+                    side_effect=RuntimeError(
+                        "sigma_clip_fused_chunk_cuda cudaGetDevice: no CUDA-capable device is detected")):
+                sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+                with mock.patch.object(
+                        sigma_clip_chunk_ops,
+                        "sigma_clip_fused_chunk_compiled",
+                        side_effect=RuntimeError("compiled CPU backend is unavailable")):
+                    got = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
+        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+
+        for actual, expected_arr in zip(got, expected, strict=True):
+            np.testing.assert_array_equal(actual, expected_arr)
 
 
 if __name__ == "__main__":
