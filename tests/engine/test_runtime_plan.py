@@ -258,6 +258,7 @@ def test_runtime_planner_sums_multiple_chunk_op_costs(tmp_path, monkeypatch):
 def test_runtime_planner_uses_cuda_budget_for_cuda_chunk_op(tmp_path, monkeypatch):
     path = tmp_path / "frame.tif"
     tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    monkeypatch.delenv("HNW_CUSTOM_OPS_FALLBACK", raising=False)
     _mock_available_memory(monkeypatch, budget=12800)
     _mock_cuda_memory(monkeypatch, budget=6400)
     _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
@@ -277,6 +278,7 @@ def test_runtime_planner_uses_cuda_budget_for_cuda_chunk_op(tmp_path, monkeypatc
 def test_runtime_planner_ignores_unavailable_cuda_budget(tmp_path, monkeypatch):
     path = tmp_path / "frame.tif"
     tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    monkeypatch.delenv("HNW_CUSTOM_OPS_FALLBACK", raising=False)
     _mock_available_memory(monkeypatch, budget=12800)
     _mock_cuda_memory(monkeypatch, budget=0, available=False)
     _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
