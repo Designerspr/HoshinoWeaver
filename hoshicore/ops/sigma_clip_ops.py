@@ -471,8 +471,6 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
         return {"result": result_img, "statistics": accepted_full}
 
     async def _async_execute(self, configs: dict[str, Any]) -> None:
-        # 缓存 configs 供 _check_convergence / _prepare_next_pass 使用
-        self._configs = configs
         configs['fgp_total'].inplace_calc = False
         await super()._async_execute(configs)
 
@@ -639,11 +637,6 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
         result_img = FloatImage(result, dtype=source_dtype)
         logger.info(f"{self.name} fused sigma clipping complete.")
         return {"result": result_img, "statistics": accepted_full}
-
-    async def _async_execute(self, configs: dict[str, Any]) -> None:
-        self._configs = configs
-        await super()._async_execute(configs)
-
 
 @register_op()
 class HuberMeanIteratorOp(ChunkIteratorBaseOp):

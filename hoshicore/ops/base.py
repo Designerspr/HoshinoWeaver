@@ -390,8 +390,10 @@ class ChunkIteratorBaseOp(BaseOp):
     def __init__(self, name: str):
         super().__init__(name)
         self._chunk_states: list[Any] = []
+        self._configs: dict[str, Any] = {}
 
     async def _async_execute(self, configs: dict[str, Any]) -> None:
+        self._configs = configs
         frame_buffer = configs['buffer_handle']
         chunk_rows = configs.get('chunk_rows', self.CHUNK_ROWS)
         overlap = self.CHUNK_OVERLAP

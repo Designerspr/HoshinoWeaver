@@ -72,7 +72,7 @@ void sigma_clip_iterative_chunk_kernel(
 
     for (int iter = 0; iter < max_iter; ++iter) {
         // 1. Compute thresholds from current accepted stats.
-        // 每个 idx 独立，按像素并行不会产生写冲突。
+        // Each idx is independent; pixel-parallel writes do not conflict.
 #if defined(_OPENMP) && HNW_ENABLE_OMP_SIMD
 #pragma omp parallel for simd schedule(static)
 #elif defined(_OPENMP)
@@ -98,7 +98,7 @@ void sigma_clip_iterative_chunk_kernel(
         std::vector<double> rej_sq(static_cast<size_t>(plane_size), 0.0);
         std::vector<double> rej_n(static_cast<size_t>(plane_size), 0.0);
 
-        // 3. Scan all frames. 按输出像素分片，每个线程只写自己的 rej_* 区间。
+        // 3. Scan all frames. Each thread writes only its own rej_* range.
         if (skip_zero_rgb && channels >= 3) {
             const ssize_t spatial = plane_size / channels;
 #if defined(_OPENMP)
