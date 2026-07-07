@@ -110,6 +110,8 @@ if(HNW_ENABLE_CUDA)
         ops/cuda/detection/star_detect_full_ops.cpp
         ops/cuda/detection/star_detect_full_ops.cu
         # Chunk stack kernels.
+        ops/cuda/fgp/huber_weighted_chunk_ops.cpp
+        ops/cuda/fgp/huber_weighted_chunk_ops.cu
         ops/cuda/sigma_clip/sigma_clip_fused_chunk_ops.cpp
         ops/cuda/sigma_clip/sigma_clip_fused_chunk_ops.cu
     )

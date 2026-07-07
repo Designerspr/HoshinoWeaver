@@ -177,6 +177,9 @@ synthetic starfield。
 - `python -m bench.cli run gpu.sigma_clip_chunk`
   fused sigma-clip chunk 的 host-in/host-out 口径。默认对比 OpenMP CPU 与 CUDA backend；
   CUDA 不可用时会在结果中标记 skipped。
+- `python -m bench.cli run gpu.huber_chunk`
+  Huber weighted chunk 的 host-in/host-out 口径。默认对比 NumPy chunk 与 CUDA backend；
+  用于评估 `HuberMeanIteratorOp` 的 fused CUDA chunk 路径。
 
 ### 数据工具
 

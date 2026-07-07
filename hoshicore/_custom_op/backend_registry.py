@@ -63,6 +63,13 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
     BackendCandidate("equalize_noise_correct", "openmp_cpu", "equalize_noise_correct"),
     BackendCandidate("sigma_clip_iterative_chunk", "openmp_cpu", "sigma_clip_iterative_chunk"),
     BackendCandidate(
+        "huber_weighted_chunk",
+        "cuda_host_io",
+        "huber_weighted_chunk_cuda",
+        priority=10,
+        build_flag="cuda",
+    ),
+    BackendCandidate(
         "sigma_clip_fused_chunk",
         "cuda_host_io",
         "sigma_clip_fused_chunk_cuda",

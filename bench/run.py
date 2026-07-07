@@ -43,6 +43,10 @@ SUITES: dict[str, SuiteSpec] = {
         module="bench.gpu.sigma_clip_chunk",
         description="Sigma-clip fused chunk host-in/host-out benchmark",
     ),
+    "gpu.huber_chunk": SuiteSpec(
+        module="bench.gpu.huber_chunk",
+        description="Huber weighted chunk host-in/host-out benchmark",
+    ),
     "pipeline.alignment": SuiteSpec(
         module="bench.pipeline.alignment",
         description="End-to-end production alignment pipeline benchmark",

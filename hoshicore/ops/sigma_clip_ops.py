@@ -33,6 +33,10 @@ import numpy as np
 from loguru import logger
 
 from .._custom_op import median_reduce_chunk as custom_median_reduce_chunk
+from .._custom_op.ops.fgp import (
+    huber_weighted_chunk_compiled_available as custom_huber_weighted_chunk_available,
+    huber_weighted_chunk_compiled_or_none as custom_huber_weighted_chunk_or_none,
+)
 from .._custom_op.ops.sigma_clip import (
     sigma_clip_iterative_chunk as custom_sigma_clip_iterative_chunk,
     _load_compiled_module_result as _sc_load_compiled,
@@ -659,6 +663,7 @@ class HuberMeanIteratorOp(ChunkIteratorBaseOp):
     EXECUTOR = "cpu"
     ITERATOR_TYPE = "huber_mean"
     CHUNK_ROWS = 256
+    BACKEND_LOGICAL_OP = "huber_weighted_chunk"
     CONFIGS: dict[str, dict[str, Any]] = {
         "fgp_total": {
             "type": "image",
@@ -705,12 +710,75 @@ class HuberMeanIteratorOp(ChunkIteratorBaseOp):
         )
 
         merger = HuberWeightedMerger(ref_stats=ref_chunk, huber_c=huber_c)
-        return {'merger': merger, 'source_dtype': fgp_total.source_dtype}
+        return {
+            'merger': merger,
+            'ref_mean': ref_chunk.mu.reshape(-1).astype(np.float64),
+            'ref_std': np.sqrt(np.maximum(ref_chunk.var, 0)).reshape(-1).astype(np.float64),
+            'source_dtype': fgp_total.source_dtype,
+            'result': None,
+            '_done': False,
+        }
+
+    def _run_pass(self, state, chunk_stack):
+        if self._run_pass_cuda(state, chunk_stack):
+            return
+        for frame_idx, (chunk_data, chunk_weight) in enumerate(chunk_stack):
+            self._merge_chunk(state, chunk_data, chunk_weight, frame_idx)
+
+    def _run_pass_cuda(self, state, chunk_stack):
+        if not custom_huber_weighted_chunk_available():
+            return False
+
+        n_frames = len(chunk_stack)
+        first_data = chunk_stack[0][0]
+        if first_data.dtype not in (np.dtype("uint8"), np.dtype("uint16")):
+            return False
+
+        weights = []
+        has_weight = False
+        for _, chunk_weight in chunk_stack:
+            if chunk_weight is None:
+                weights.append(1.0)
+                continue
+            if not np.isscalar(chunk_weight):
+                return False
+            has_weight = True
+            weights.append(float(chunk_weight))
+        weights_arr = np.asarray(weights, dtype=np.float64) if has_weight else None
+
+        stack_2d = np.empty((n_frames, first_data.size), dtype=first_data.dtype)
+        for f, (chunk_data, _) in enumerate(chunk_stack):
+            if chunk_data.shape != first_data.shape or chunk_data.dtype != first_data.dtype:
+                return False
+            stack_2d[f] = chunk_data.reshape(-1)
+
+        result = custom_huber_weighted_chunk_or_none(
+            stack_2d,
+            state['ref_mean'],
+            state['ref_std'],
+            self._configs['huber_c'],
+            weights_arr,
+        )
+        if result is None:
+            return False
+
+        weighted_sum, weight_total = result
+        state['result'] = np.round(np.divide(
+            weighted_sum,
+            np.where(weight_total > 0, weight_total, 1.0),
+        )).reshape(first_data.shape)
+        state['_done'] = True
+        return True
 
     def _merge_chunk(self, state, chunk_data, chunk_weight, frame_idx):
         state['merger'].merge(chunk_data, chunk_weight)
 
+    def _check_convergence(self, state, pass_idx):
+        return state['_done'] or pass_idx >= 0
+
     def _finalize_chunk(self, state):
+        if state['result'] is not None:
+            return state['result']
         result = state['merger'].merged_image
         if result is None:
             raise ValueError("HuberMeanIteratorOp: no frames processed in chunk")
