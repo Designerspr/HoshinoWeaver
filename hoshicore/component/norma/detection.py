@@ -19,7 +19,7 @@ class DetectedStars:
     volumes: NDArray[np.float64]
 
 
-FULL_GPU_COMPONENT_FILTER_PERCENTILE = 27.5
+FULL_GPU_COMPONENT_FILTER_PERCENTILE = 22.5
 
 
 def _wavelet_dec_rec(img_blr, resize_factor=0.25):
