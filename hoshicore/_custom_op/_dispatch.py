@@ -19,9 +19,10 @@ def debug_enabled() -> bool:
 
 
 def debug_log(module_name: str, message: str) -> None:
+    text = f"[hoshicore._custom_op.{module_name}] {message}"
+    logger.debug(text)
     if debug_enabled():
-        print(f"[hoshicore._custom_op.{module_name}] {message}", file=sys.stderr)
-    logger.info(f"[hoshicore._custom_op.{module_name}] {message}")
+        print(text, file=sys.stderr)
 
 
 def fallback_preference() -> str:
