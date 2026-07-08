@@ -138,8 +138,11 @@ custom-op wrapper；`stack_*` 不消费对齐输出。终端只打印每条路�
 | `stack_sigma_clip_fused` | fused sigma-clip chunk kernel |
 | `stack_huber` | `HuberWeightedMerger` 鲁棒均值 |
 | `noise_equalization` | 最大值叠加噪声均匀化，统计量使用 sigma-clipped stats |
-| `star_mask_threshold` / `star_mask_dog` | 星点 mask 检测 |
-| `star_shrink` | 缩星核心路径 |
+| `noise_equalization_stages` | 噪声均匀化分阶段诊断；不包含在默认 case 中 |
+| `star_mask_threshold` | 缩星 threshold mask 检测；生产 wrapper 默认走 OpenMP CPU custom-op，fallback 为原 OpenCV/scipy 路径 |
+| `star_mask_dog` | 缩星 DoG mask 检测；CUDA 可用时走 host-in/out CUDA custom-op，fallback 为原 OpenCV 路径 |
+| `star_shrink` | 缩星核心路径；detect mask 和 process 阶段均走生产 wrapper |
+| `star_shrink_stages` | 缩星分阶段诊断；不包含在默认 case 中，JSON 中记录 detect/process 分段耗时 |
 | `satellite_clean_window` | 卫星线清理窗口中位数核心 smoke，不含星点匹配 |
 | `warp_homography` | 单独 homography warp |
 | `remap_camera_model` | 单独 camera-model remap，默认使用轻微 focal 差异 |
