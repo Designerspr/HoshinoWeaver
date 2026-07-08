@@ -10,6 +10,8 @@ from numpy.typing import NDArray
 from scipy.stats import norm as _norm
 
 from .._custom_op import equalize_noise_correct as custom_equalize_noise_correct
+from .._custom_op import noise_equalization_params as custom_noise_equalization_params
+from .._custom_op import noise_fill_local_mean as custom_noise_fill_local_mean
 from .._custom_op import threshold_max_merge as custom_threshold_max_merge
 
 
@@ -59,23 +61,48 @@ def _ransac_ratio(x: NDArray,
 
 
 def fill_local_mean(img, mask: NDArray[np.bool], kernel_size=21):
-    img_f = img
-    valid = (~mask).astype(np.float32)
-    kernel = np.ones((kernel_size, kernel_size))
+    return custom_noise_fill_local_mean(img, mask, kernel_size)
 
-    sum_valid = cv2.filter2D(img_f * valid,
-                             -1,
-                             kernel,
-                             borderType=cv2.BORDER_REFLECT)
-    count_valid = cv2.filter2D(valid,
-                               -1,
-                               kernel,
-                               borderType=cv2.BORDER_REFLECT)
 
-    mean_local = sum_valid / np.maximum(count_valid, 1e-8)
-    out = img_f.copy()
-    out[mask] = mean_local[mask]
-    return out
+def _estimate_noise_equalization_params_python(
+    max_img: NDArray,
+    mean_img: NDArray,
+    std_img: NDArray,
+    n_img: NDArray,
+    estimate_method: str,
+    minus_only: bool,
+    top_fraction: float,
+    sigma_reject: float,
+) -> tuple[float, float, NDArray] | None:
+    threshold = np.quantile(n_img, 1.0 - top_fraction)
+    bg_mask = n_img >= threshold
+    if not np.any(bg_mask):
+        return None
+
+    residual = (max_img - mean_img)[bg_mask]
+    sigma_bg = std_img[bg_mask]
+    valid = sigma_bg > 0
+    if not np.any(valid):
+        return None
+
+    r_valid = residual[valid]
+    s_valid = sigma_bg[valid]
+    if estimate_method == "median":
+        c_n_eff = float(np.median(r_valid / s_valid))
+    elif estimate_method == "ransac":
+        c_n_eff = _ransac_ratio(s_valid, r_valid)
+    else:
+        raise ValueError("unsupport estimate method")
+
+    sigma_ref = 0.0 if minus_only else float(np.median(s_valid))
+    channels = std_img.shape[-1] if std_img.ndim == 3 else 1
+    squeeze_std = std_img.reshape((-1, channels)).astype(np.float64, copy=False)
+    mean_std = np.mean(squeeze_std, axis=0)
+    std_std = np.std(squeeze_std, axis=0)
+    mask = std_img > (mean_std + sigma_reject * std_std).reshape(
+        (1,) * (std_img.ndim - 1) + (channels,)
+    )
+    return sigma_ref, c_n_eff, mask
 
 
 def equalize_noise(max_img: NDArray,
@@ -105,54 +132,34 @@ def equalize_noise(max_img: NDArray,
         校正后的最大值图像
     """
     max_value = np.max(max_img)
-    # 背景掩码：帧数位于前 top_fraction 分位的像素
-    threshold = np.quantile(n_img, 1.0 - top_fraction)
-    bg_mask = n_img >= threshold
-    logger.info(
-        f"NoiseEqualization: top_fraction={top_fraction*100:.1f}%, "
-        f"threshold={threshold:.1f} frames, "
-        f"background pixels={np.sum(bg_mask)} ({np.mean(bg_mask)*100:.2f}%)")
-
-    if not np.any(bg_mask):
-        logger.warning(
-            f"Skip equalize_noise processing because "
-            f"no background pixels found with top_fraction={top_fraction}.")
-        return max_img
-
-    # Step 3: 估计经验偏移系数 ĉ_n^eff
-    residual = (max_img - mean_img)[bg_mask]
-    sigma_bg = std_img[bg_mask]
-    valid = sigma_bg > 0
-
-    logger.info(
-        f"NoiseEqualization residual: {np.median(residual):.4f}, sigma_bg: "
-        f"{np.median(sigma_bg):.4f}, valid pixels: {np.sum(valid)}/{len(residual)}"
-    )
-
-    if not np.any(valid):
+    if estimate_method == "median":
+        params = custom_noise_equalization_params(
+            max_img,
+            mean_img,
+            std_img,
+            n_img,
+            top_fraction,
+            sigma_reject,
+            minus_only,
+            estimate_method,
+        )
+    else:
+        params = _estimate_noise_equalization_params_python(
+            max_img,
+            mean_img,
+            std_img,
+            n_img,
+            estimate_method,
+            minus_only,
+            top_fraction,
+            sigma_reject,
+        )
+    if params is None:
         logger.warning("Skip equalize_noise processing because "
-                       "no valid background pixels with σ > 0. "
+                       "no valid background pixels with sigma > 0. "
                        "Maybe all images have same values?")
         return max_img
-
-    r_valid = residual[valid]
-    s_valid = sigma_bg[valid]
-
-    if estimate_method == "median":
-        c_n_eff = float(np.median(r_valid / s_valid))
-    elif estimate_method == "ransac":
-        c_n_eff = _ransac_ratio(s_valid, r_valid)
-    else:
-        raise ValueError(f"unsupport estimate method")
-
-    # Step 4: 选取参考噪声水平 σ_ref （如果不重建噪声，则置0）
-    sigma_ref = 0 if minus_only else np.median(s_valid)
-
-    # step4.5: 标准差排异(by channel)
-    squeeze_std = std_img.reshape((-1, 3))
-    mean_std = np.mean(squeeze_std, axis=0)
-    std_std = np.std(squeeze_std, axis=0)
-    mask = (std_img > (mean_std + sigma_reject * std_std)[None, None, ...])
+    sigma_ref, c_n_eff, mask = params
     filled_std_img = fill_local_mean(std_img, mask, kernel_size=21)
 
     # step4.x + step5: 逐像素高光保护与最终 clip 交给 custom-op / numpy backend。

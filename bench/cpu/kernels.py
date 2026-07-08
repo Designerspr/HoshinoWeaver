@@ -54,6 +54,7 @@ import hoshicore._custom_op.ops.max as max_ops
 import hoshicore._custom_op.ops.median as median_ops
 import hoshicore._custom_op.ops.noise as noise_ops
 import hoshicore._custom_op.ops.sigma_clip as sigma_clip_chunk_ops
+import hoshicore._custom_op.ops.star_shrink as star_shrink_ops
 import hoshicore._custom_op.ops.wavelet as wavelet_ops
 from hoshicore.component.data_container import DTYPE_MAX_VALUE
 
@@ -72,6 +73,14 @@ FRAME_STREAM_CASE_NAMES = {
     "calibration_divide_stream_compiled",
     "equalize_noise_correct_stream_numpy",
     "equalize_noise_correct_stream_compiled",
+    "noise_equalization_params_stream_numpy",
+    "noise_equalization_params_stream_compiled",
+    "noise_fill_local_mean_stream_numpy",
+    "noise_fill_local_mean_stream_compiled",
+    "star_shrink_detect_mask_stream_numpy",
+    "star_shrink_detect_mask_stream_compiled",
+    "star_shrink_process_stream_numpy",
+    "star_shrink_process_stream_compiled",
     "fgp_accumulate_stream_numpy",
     "fgp_accumulate_stream_compiled",
     "fgp_add_partial_reduce_numpy",
@@ -124,6 +133,14 @@ CASE_NAMES = [
     "calibration_divide_stream_compiled",
     "equalize_noise_correct_stream_numpy",
     "equalize_noise_correct_stream_compiled",
+    "noise_equalization_params_stream_numpy",
+    "noise_equalization_params_stream_compiled",
+    "noise_fill_local_mean_stream_numpy",
+    "noise_fill_local_mean_stream_compiled",
+    "star_shrink_detect_mask_stream_numpy",
+    "star_shrink_detect_mask_stream_compiled",
+    "star_shrink_process_stream_numpy",
+    "star_shrink_process_stream_compiled",
     "fgp_accumulate_stream_numpy",
     "fgp_accumulate_stream_compiled",
     "fgp_add_partial_reduce_numpy",
@@ -325,6 +342,52 @@ def build_equalize_noise_inputs(
     return payloads
 
 
+def build_noise_fill_local_mean_inputs(
+    frames: list[np.ndarray],
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    payloads: list[tuple[np.ndarray, np.ndarray]] = []
+    for frame in frames:
+        img = np.sqrt(np.maximum(frame.astype(np.float64, copy=False), 1.0))
+        flat = img.reshape((-1, img.shape[-1])) if img.ndim == 3 else img.reshape((-1, 1))
+        mean = np.mean(flat, axis=0)
+        std = np.std(flat, axis=0)
+        mask = img > (mean + 2.5 * std)
+        payloads.append((img, mask))
+    return payloads
+
+
+def build_noise_equalization_param_inputs(
+    frames: list[np.ndarray],
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    payloads: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    for frame in frames:
+        mean_img = frame.astype(np.float64, copy=False)
+        std_img = np.sqrt(np.maximum(mean_img, 1.0))
+        max_img = mean_img + std_img * 1.5
+        n_img = np.full(frame.shape, len(frames), dtype=np.int32)
+        payloads.append((max_img, mean_img, std_img, n_img))
+    return payloads
+
+
+def build_star_shrink_process_inputs(
+    frames: list[np.ndarray],
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    payloads: list[tuple[np.ndarray, np.ndarray]] = []
+    for frame in frames:
+        image = frame
+        if image.ndim == 2:
+            image = np.repeat(image[..., np.newaxis], 3, axis=2)
+        elif image.ndim == 3 and image.shape[-1] == 1:
+            image = np.repeat(image, 3, axis=2)
+        elif image.ndim == 3 and image.shape[-1] > 3:
+            image = image[..., :3]
+        h, w = image.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        mask[h // 4:h - h // 4, w // 4:w - w // 4] = 1
+        payloads.append((np.ascontiguousarray(image), mask))
+    return payloads
+
+
 def bench_equalize_noise_correct_stream_backend(
     payloads: list[tuple[np.ndarray, np.ndarray, float, float, float, float]],
     *,
@@ -336,6 +399,58 @@ def bench_equalize_noise_correct_stream_backend(
     }[backend]
     for max_img, filled_std_img, sigma_ref, c_n_eff, max_value, highlight_preserve in payloads:
         correct(max_img, filled_std_img, sigma_ref, c_n_eff, max_value, highlight_preserve)
+
+
+def bench_noise_equalization_params_stream_backend(
+    payloads: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+    *,
+    backend: str,
+) -> None:
+    params = {
+        "numpy": noise_ops.noise_equalization_params_numpy,
+        "compiled": noise_ops.noise_equalization_params_compiled,
+    }[backend]
+    for max_img, mean_img, std_img, n_img in payloads:
+        params(max_img, mean_img, std_img, n_img, 0.02, 3.0, False)
+
+
+def bench_noise_fill_local_mean_stream_backend(
+    payloads: list[tuple[np.ndarray, np.ndarray]],
+    *,
+    backend: str,
+) -> None:
+    fill = {
+        "numpy": noise_ops.noise_fill_local_mean_numpy,
+        "compiled": noise_ops.noise_fill_local_mean_compiled,
+    }[backend]
+    for img, mask in payloads:
+        fill(img, mask, 21)
+
+
+def bench_star_shrink_process_stream_backend(
+    payloads: list[tuple[np.ndarray, np.ndarray]],
+    *,
+    backend: str,
+) -> None:
+    process = {
+        "numpy": star_shrink_ops.star_shrink_process_numpy,
+        "compiled": star_shrink_ops.star_shrink_process_compiled,
+    }[backend]
+    for image, mask in payloads:
+        process(image, mask, 3, "CIRCLE", 1, 1.0, 51)
+
+
+def bench_star_shrink_detect_mask_stream_backend(
+    frames: list[np.ndarray],
+    *,
+    backend: str,
+) -> None:
+    detect = {
+        "numpy": star_shrink_ops.star_shrink_detect_mask_numpy,
+        "compiled": star_shrink_ops.star_shrink_detect_mask_compiled,
+    }[backend]
+    for frame in frames:
+        detect(frame, ksize=13, threshold_ratio=1.0, open_ksize=3, dilate_ksize=0)
 
 
 def bench_fgp_accumulate_stream_backend(
@@ -1008,6 +1123,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     calibration_subtract_ref = (frames[0] // 8).astype(frames[0].dtype, copy=False)
     calibration_divide_ref = np.maximum(frames[0], 1).astype(frames[0].dtype, copy=False)
     equalize_noise_payloads = build_equalize_noise_inputs(frames)
+    noise_param_payloads = build_noise_equalization_param_inputs(frames)
+    noise_fill_payloads = build_noise_fill_local_mean_inputs(frames)
+    star_shrink_payloads = build_star_shrink_process_inputs(frames)
     sigma_stats = build_mean_stats(frames, weights, True)
     huber_ref_mean = sigma_stats.mu.astype(np.float32)
     huber_ref_std = np.sqrt(np.maximum(sigma_stats.var, 0)).astype(np.float32)
@@ -1063,6 +1181,38 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "equalize_noise_correct_stream_compiled": lambda: bench_equalize_noise_correct_stream_backend(
             equalize_noise_payloads,
+            backend="compiled",
+        ),
+        "noise_equalization_params_stream_numpy": lambda: bench_noise_equalization_params_stream_backend(
+            noise_param_payloads,
+            backend="numpy",
+        ),
+        "noise_equalization_params_stream_compiled": lambda: bench_noise_equalization_params_stream_backend(
+            noise_param_payloads,
+            backend="compiled",
+        ),
+        "noise_fill_local_mean_stream_numpy": lambda: bench_noise_fill_local_mean_stream_backend(
+            noise_fill_payloads,
+            backend="numpy",
+        ),
+        "noise_fill_local_mean_stream_compiled": lambda: bench_noise_fill_local_mean_stream_backend(
+            noise_fill_payloads,
+            backend="compiled",
+        ),
+        "star_shrink_detect_mask_stream_numpy": lambda: bench_star_shrink_detect_mask_stream_backend(
+            frames,
+            backend="numpy",
+        ),
+        "star_shrink_detect_mask_stream_compiled": lambda: bench_star_shrink_detect_mask_stream_backend(
+            frames,
+            backend="compiled",
+        ),
+        "star_shrink_process_stream_numpy": lambda: bench_star_shrink_process_stream_backend(
+            star_shrink_payloads,
+            backend="numpy",
+        ),
+        "star_shrink_process_stream_compiled": lambda: bench_star_shrink_process_stream_backend(
+            star_shrink_payloads,
             backend="compiled",
         ),
         "fgp_accumulate_stream_numpy": lambda: bench_fgp_accumulate_stream_backend(frames, backend="numpy"),

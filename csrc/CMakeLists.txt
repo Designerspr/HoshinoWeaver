@@ -61,6 +61,10 @@ add_library(hnw_ops_cpu_sigma_clip STATIC
     ops/sigma_clip/sigma_clip_chunk_ops.cpp
 )
 
+add_library(hnw_ops_cpu_star_shrink STATIC
+    ops/star_shrink/star_shrink_ops.cpp
+)
+
 add_library(hnw_ops_cpu_wavelet STATIC
     ops/wavelet/wavelet_ops.cpp
 )
@@ -77,6 +81,7 @@ set(hnw_cpu_targets
     hnw_ops_cpu_noise
     hnw_ops_cpu_remap
     hnw_ops_cpu_sigma_clip
+    hnw_ops_cpu_star_shrink
     hnw_ops_cpu_wavelet
 )
 
@@ -114,6 +119,11 @@ if(HNW_ENABLE_CUDA)
         ops/cuda/fgp/huber_weighted_chunk_ops.cu
         ops/cuda/sigma_clip/sigma_clip_fused_chunk_ops.cpp
         ops/cuda/sigma_clip/sigma_clip_fused_chunk_ops.cu
+        # Star shrink fused processing.
+        ops/cuda/star_shrink/star_mask_ops.cpp
+        ops/cuda/star_shrink/star_mask_ops.cu
+        ops/cuda/star_shrink/star_shrink_process_ops.cpp
+        ops/cuda/star_shrink/star_shrink_process_ops.cu
     )
 endif()
 
@@ -135,6 +145,7 @@ target_link_libraries(_C PRIVATE
     hnw_ops_cpu_noise
     hnw_ops_cpu_remap
     hnw_ops_cpu_sigma_clip
+    hnw_ops_cpu_star_shrink
     hnw_ops_cpu_wavelet
 )
 hnw_apply_common_compile_options(_C)

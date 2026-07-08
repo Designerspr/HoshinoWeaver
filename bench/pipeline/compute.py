@@ -37,15 +37,18 @@ from hoshicore.component.merger import (
     MeanMerger,
     MinMerger,
 )
-from hoshicore.component.noise_equalization import equalize_noise
+from hoshicore._custom_op import (
+    equalize_noise_correct,
+    noise_equalization_params,
+    star_mask_dog,
+    star_shrink_detect_mask,
+    star_shrink_process,
+)
+from hoshicore.component.noise_equalization import equalize_noise, fill_local_mean
 from hoshicore.component.calibration import calibration_divide
 from hoshicore.component.calibration import calibration_subtract
-from hoshicore.component.star_detect import (
-    detect_starmask_by_dog,
-    detect_starmask_by_threshold,
-)
 from hoshicore.ops.satellite_clean_op import SatelliteCleanOp, _FrameSlot
-from hoshicore.ops.star_ops import _star_shrink_pipeline
+from hoshicore.ops.star_ops import SHRINK_MODE_PRESETS, _star_shrink_pipeline
 
 
 SUITE_ID = "pipeline.compute"
@@ -62,14 +65,20 @@ CASE_NAMES = [
     "stack_huber",
     "calibration_full",
     "noise_equalization",
+    "noise_equalization_stages",
     "star_mask_threshold",
     "star_mask_dog",
     "star_shrink",
+    "star_shrink_stages",
     "satellite_clean_window",
     "warp_homography",
     "remap_camera_model",
 ]
-DEFAULT_CASES = CASE_NAMES
+DEFAULT_CASES = [
+    case_name
+    for case_name in CASE_NAMES
+    if case_name not in {"noise_equalization_stages", "star_shrink_stages"}
+]
 
 
 def parse_cases(raw: str) -> list[str]:
@@ -288,11 +297,59 @@ def _run_noise_equalization_once(frames: list[np.ndarray]) -> dict[str, Any]:
     return _output_payload(np.round(result).astype(max_img.dtype))
 
 
+def _run_noise_equalization_stages_once(frames: list[np.ndarray]) -> dict[str, Any]:
+    work_frames = [_ensure_three_channels(frame) for frame in frames]
+    stages: dict[str, float] = {}
+
+    t0 = time.perf_counter()
+    max_merger = MaxMerger()
+    for idx, frame in enumerate(work_frames):
+        max_merger.merge(_clone_first_frame(frame) if idx == 0 else frame)
+    max_img = max_merger.merged_image
+    if not isinstance(max_img, np.ndarray):
+        raise RuntimeError("MaxMerger did not produce an ndarray result")
+    stages["max_stack_sec"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    stats = _compute_sigma_clip_fused_stats(work_frames)
+    stages["sigma_clip_fused_stats_sec"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    max_f64 = max_img.astype(np.float64)
+    mean_f64 = stats.mu.astype(np.float64)
+    std_f64 = np.sqrt(np.maximum(stats.var, 0)).astype(np.float64)
+    n_img = stats.n
+    params = noise_equalization_params(max_f64, mean_f64, std_f64, n_img)
+    if params is None:
+        raise RuntimeError("noise equalization stage benchmark found no valid background")
+    sigma_ref, c_n_eff, mask = params
+    stages["scalar_setup_sec"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    filled_std = fill_local_mean(std_f64, mask, kernel_size=21)
+    stages["fill_local_mean_sec"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    corrected = equalize_noise_correct(
+        max_f64,
+        filled_std,
+        sigma_ref,
+        c_n_eff,
+        float(np.max(max_f64)),
+        0.9,
+    )
+    stages["equalize_noise_correct_sec"] = time.perf_counter() - t0
+
+    payload = _output_payload(np.round(corrected).astype(max_img.dtype))
+    payload["stages_sec"] = stages
+    return payload
+
+
 def _run_star_mask_threshold_once(frames: list[np.ndarray]) -> dict[str, Any]:
     total_nonzero = 0
     last_mask = None
     for frame in frames:
-        last_mask = detect_starmask_by_threshold(frame, ksize=13)
+        last_mask = star_shrink_detect_mask(frame, ksize=13)
         total_nonzero += int(np.count_nonzero(last_mask))
     if last_mask is None:
         raise RuntimeError("star mask threshold did not process any frame")
@@ -307,7 +364,7 @@ def _run_star_mask_dog_once(frames: list[np.ndarray]) -> dict[str, Any]:
     total_nonzero = 0
     last_mask = None
     for frame in frames:
-        last_mask = detect_starmask_by_dog(frame)
+        last_mask = star_mask_dog(frame)
         total_nonzero += int(np.count_nonzero(last_mask))
     if last_mask is None:
         raise RuntimeError("star mask dog did not process any frame")
@@ -335,6 +392,61 @@ def _run_star_shrink_once(frames: list[np.ndarray]) -> dict[str, Any]:
     if last is None:
         raise RuntimeError("star shrink did not process any frame")
     return _output_payload(last)
+
+
+def _run_star_shrink_stages_once(frames: list[np.ndarray]) -> dict[str, Any]:
+    configs = {
+        "mode": "moderate",
+        "detect_method": "threshold",
+        "detect_ksize": 13,
+        "detect_threshold": 1.0,
+        "detect_open": 3,
+        "detect_dilate": 0,
+        "dog_sigma_small": 1.5,
+        "dog_sigma_large": 12.0,
+    }
+    p = SHRINK_MODE_PRESETS[configs["mode"]]
+    stages = {
+        "ensure_three_channels_sec": 0.0,
+        "detect_sec": 0.0,
+        "fused_process_sec": 0.0,
+    }
+    mask_nonzero_total = 0
+    last = None
+    for frame in frames:
+        t0 = time.perf_counter()
+        img = _ensure_three_channels(frame)
+        stages["ensure_three_channels_sec"] += time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        star_mask = star_shrink_detect_mask(
+            img,
+            ksize=configs["detect_ksize"],
+            threshold_ratio=configs["detect_threshold"],
+            open_ksize=configs["detect_open"],
+            dilate_ksize=configs["detect_dilate"],
+        )
+        stages["detect_sec"] += time.perf_counter() - t0
+        mask_nonzero_total += int(np.count_nonzero(star_mask))
+
+        t0 = time.perf_counter()
+        last = star_shrink_process(
+            img,
+            star_mask,
+            p["shrink_ksize"],
+            p.get("shrink_shape", "CIRCLE"),
+            p["shrink_times"],
+            None if p.get("shrink_ratio", 0.0) == 0.0 else p.get("shrink_ratio", 0.0),
+            p["deringing_ksize"],
+        )
+        stages["fused_process_sec"] += time.perf_counter() - t0
+
+    if last is None:
+        raise RuntimeError("star shrink stage benchmark did not process any frame")
+    payload = _output_payload(last)
+    payload["stages_sec"] = stages
+    payload["mask_nonzero_total"] = mask_nonzero_total
+    return payload
 
 
 def _run_satellite_clean_window_once(frames: list[np.ndarray]) -> dict[str, Any]:
@@ -517,9 +629,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "stack_huber": lambda: _run_huber_stack_once(frames),
             "calibration_full": lambda: _run_calibration_full_once(frames),
             "noise_equalization": lambda: _run_noise_equalization_once(frames),
+            "noise_equalization_stages": lambda: _run_noise_equalization_stages_once(frames),
             "star_mask_threshold": lambda: _run_star_mask_threshold_once(frames),
             "star_mask_dog": lambda: _run_star_mask_dog_once(frames),
             "star_shrink": lambda: _run_star_shrink_once(frames),
+            "star_shrink_stages": lambda: _run_star_shrink_stages_once(frames),
             "satellite_clean_window": lambda: _run_satellite_clean_window_once(frames),
             "warp_homography": lambda: _run_warp_homography_once(frames),
             "remap_camera_model": lambda: _run_remap_camera_model_once(args, frames),

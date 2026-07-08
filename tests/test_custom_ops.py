@@ -19,11 +19,17 @@ from hoshicore._custom_op import (
     max_combine,
     median_filter_2d,
     median_reduce_chunk,
+    noise_equalization_params,
+    noise_fill_local_mean,
     sigma_clip_fused_masked_merge,
     sigma_clip_fused_merge,
+    star_mask_dog,
+    star_shrink_detect_mask,
+    star_shrink_process,
     threshold_max_merge as custom_threshold_max_merge,
 )
 import hoshicore._custom_op.backend_registry as backend_registry
+from hoshicore._custom_op._dispatch import cuda_memory_info
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 import hoshicore._custom_op.ops.alignment as alignment_ops
 import hoshicore._custom_op.ops.fgp as fgp_ops
@@ -31,6 +37,7 @@ import hoshicore._custom_op.ops.filter as filter_ops
 import hoshicore._custom_op.ops.max as max_ops
 import hoshicore._custom_op.ops.median as median_ops
 import hoshicore._custom_op.ops.noise as noise_ops
+import hoshicore._custom_op.ops.star_shrink as star_shrink_ops
 from hoshicore.component.data_container import FastGaussianParam, HuberMeanParam
 from hoshicore.component.frame_buffer import MemoryFrameBuffer
 import hoshicore.component.noise_equalization as noise_equalization
@@ -104,7 +111,13 @@ class TestCustomOpsFallback(unittest.TestCase):
         noise_ops._load_compiled_module_result.cache_clear()
         noise_ops._compiled_build_info.cache_clear()
         noise_ops._select_equalize_noise_backend.cache_clear()
+        noise_ops._select_fill_local_mean_backend.cache_clear()
+        noise_ops._select_equalization_params_backend.cache_clear()
         noise_ops._LAST_APPLIED_COMPILED_THREADS = None
+        star_shrink_ops._load_compiled_module_result.cache_clear()
+        star_shrink_ops._select_star_mask_dog_backend.cache_clear()
+        star_shrink_ops._select_star_shrink_detect_mask_backend.cache_clear()
+        star_shrink_ops._select_star_shrink_process_backend.cache_clear()
         median_ops._load_compiled_module_result.cache_clear()
         median_ops._compiled_build_info.cache_clear()
         median_ops._select_median_backend.cache_clear()
@@ -227,6 +240,190 @@ class TestCustomOpsFallback(unittest.TestCase):
         )
         np.testing.assert_allclose(got, expected, rtol=1e-7, atol=1e-7)
 
+    def test_noise_fill_local_mean_matches_numpy(self) -> None:
+        rng = np.random.default_rng(123)
+        img = rng.normal(size=(7, 8, 3)).astype(np.float64)
+        mask = rng.random(size=img.shape) > 0.72
+
+        got = noise_fill_local_mean(img, mask, kernel_size=5)
+        expected = noise_ops.noise_fill_local_mean_numpy(img, mask, kernel_size=5)
+
+        np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-12)
+
+    def test_noise_fill_local_mean_float32_2d_matches_numpy(self) -> None:
+        img = np.arange(30, dtype=np.float32).reshape(5, 6)
+        mask = np.zeros_like(img, dtype=bool)
+        mask[0, 0] = True
+        mask[2, 3] = True
+        mask[-1, -1] = True
+
+        got = noise_fill_local_mean(img, mask, kernel_size=3)
+        expected = noise_ops.noise_fill_local_mean_numpy(img, mask, kernel_size=3)
+
+        self.assertEqual(got.dtype, np.float32)
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-6)
+
+    def test_noise_fill_local_mean_all_valid_and_all_mask(self) -> None:
+        img = np.arange(24, dtype=np.float64).reshape(4, 3, 2)
+
+        all_valid = np.zeros_like(img, dtype=bool)
+        valid_result = noise_fill_local_mean(img, all_valid, kernel_size=3)
+        np.testing.assert_array_equal(valid_result, img)
+
+        all_mask = np.ones_like(img, dtype=bool)
+        masked_result = noise_fill_local_mean(img, all_mask, kernel_size=3)
+        np.testing.assert_array_equal(masked_result, np.zeros_like(img))
+
+    def test_noise_fill_local_mean_can_force_numpy_fallback(self) -> None:
+        img = np.array([[1.0, 2.0], [4.0, 8.0]], dtype=np.float64)
+        mask = np.array([[True, False], [False, True]])
+
+        with mock.patch.dict("os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False):
+            with mock.patch.object(noise_ops, "_load_compiled_module_result", return_value=(None, "mock error")):
+                noise_ops._select_fill_local_mean_backend.cache_clear()
+                got = noise_fill_local_mean(img, mask, kernel_size=3)
+
+        expected = noise_ops.noise_fill_local_mean_numpy(img, mask, kernel_size=3)
+        np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-12)
+
+    def test_noise_equalization_params_matches_numpy(self) -> None:
+        rng = np.random.default_rng(321)
+        mean_img = rng.normal(loc=100.0, scale=3.0, size=(5, 6, 3)).astype(np.float64)
+        std_img = rng.uniform(0.5, 8.0, size=mean_img.shape).astype(np.float64)
+        max_img = mean_img + std_img * rng.uniform(0.1, 3.0, size=mean_img.shape)
+        n_img = rng.integers(1, 8, size=mean_img.shape).astype(np.int32)
+        std_img[1, 2, 0] = 100.0
+
+        got = noise_equalization_params(
+            max_img,
+            mean_img,
+            std_img,
+            n_img,
+            top_fraction=0.35,
+            sigma_reject=2.0,
+        )
+        expected = noise_ops.noise_equalization_params_numpy(
+            max_img,
+            mean_img,
+            std_img,
+            n_img,
+            top_fraction=0.35,
+            sigma_reject=2.0,
+        )
+
+        self.assertIsNotNone(got)
+        self.assertIsNotNone(expected)
+        got_sigma_ref, got_c_n_eff, got_mask = got
+        expected_sigma_ref, expected_c_n_eff, expected_mask = expected
+        self.assertAlmostEqual(got_sigma_ref, expected_sigma_ref, places=10)
+        self.assertAlmostEqual(got_c_n_eff, expected_c_n_eff, places=10)
+        np.testing.assert_array_equal(got_mask, expected_mask)
+
+    def test_noise_equalization_params_accepts_2d_count_image_for_rgb(self) -> None:
+        rng = np.random.default_rng(654)
+        mean_img = rng.normal(loc=50.0, scale=2.0, size=(4, 5, 3)).astype(np.float64)
+        std_img = rng.uniform(0.25, 5.0, size=mean_img.shape).astype(np.float64)
+        max_img = mean_img + std_img * rng.uniform(0.1, 2.5, size=mean_img.shape)
+        n_img = rng.integers(1, 10, size=mean_img.shape[:2]).astype(np.int32)
+        std_img[0, 1, 2] = 25.0
+
+        got = noise_equalization_params(
+            max_img,
+            mean_img,
+            std_img,
+            n_img,
+            top_fraction=0.4,
+            sigma_reject=1.5,
+        )
+        expected = noise_ops.noise_equalization_params_numpy(
+            max_img,
+            mean_img,
+            std_img,
+            n_img,
+            top_fraction=0.4,
+            sigma_reject=1.5,
+        )
+
+        self.assertIsNotNone(got)
+        self.assertIsNotNone(expected)
+        np.testing.assert_allclose(got[0], expected[0], rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(got[1], expected[1], rtol=1e-10, atol=1e-12)
+        np.testing.assert_array_equal(got[2], expected[2])
+
+    def test_noise_equalization_params_float32_minus_only_matches_numpy(self) -> None:
+        rng = np.random.default_rng(987)
+        mean_img = rng.normal(loc=20.0, scale=1.0, size=(4, 4, 2)).astype(np.float32)
+        std_img = rng.uniform(0.1, 3.0, size=mean_img.shape).astype(np.float32)
+        max_img = mean_img + std_img * rng.uniform(0.2, 2.0, size=mean_img.shape).astype(np.float32)
+        n_img = rng.integers(1, 6, size=mean_img.shape).astype(np.int32)
+
+        got = noise_equalization_params(
+            max_img,
+            mean_img,
+            std_img,
+            n_img,
+            top_fraction=0.5,
+            sigma_reject=2.0,
+            minus_only=True,
+        )
+        expected = noise_ops.noise_equalization_params_numpy(
+            max_img,
+            mean_img,
+            std_img,
+            n_img,
+            top_fraction=0.5,
+            sigma_reject=2.0,
+            minus_only=True,
+        )
+
+        self.assertIsNotNone(got)
+        self.assertIsNotNone(expected)
+        self.assertEqual(got[0], 0.0)
+        np.testing.assert_allclose(got[0], expected[0], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(got[1], expected[1], rtol=1e-6, atol=1e-6)
+        np.testing.assert_array_equal(got[2], expected[2])
+
+    def test_noise_equalization_params_can_force_numpy_fallback(self) -> None:
+        mean_img = np.ones((3, 4, 3), dtype=np.float64)
+        std_img = np.full_like(mean_img, 2.0)
+        max_img = mean_img + std_img
+        n_img = np.arange(mean_img.size).reshape(mean_img.shape)
+
+        with mock.patch.dict("os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False):
+            with mock.patch.object(noise_ops, "_load_compiled_module_result", return_value=(None, "mock error")):
+                noise_ops._select_equalization_params_backend.cache_clear()
+                got = noise_equalization_params(max_img, mean_img, std_img, n_img)
+
+        expected = noise_ops.noise_equalization_params_numpy(max_img, mean_img, std_img, n_img)
+        self.assertIsNotNone(got)
+        self.assertIsNotNone(expected)
+        np.testing.assert_allclose(got[0], expected[0], rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(got[1], expected[1], rtol=1e-10, atol=1e-12)
+        np.testing.assert_array_equal(got[2], expected[2])
+
+    def test_noise_equalization_params_returns_none_without_valid_sigma(self) -> None:
+        mean_img = np.ones((2, 2, 3), dtype=np.float64)
+        std_img = np.zeros_like(mean_img)
+        max_img = mean_img.copy()
+        n_img = np.ones_like(mean_img)
+
+        self.assertIsNone(noise_equalization_params(max_img, mean_img, std_img, n_img))
+
+    def test_noise_equalization_params_rejects_non_median_helper_method(self) -> None:
+        mean_img = np.ones((2, 2, 3), dtype=np.float64)
+        std_img = np.ones_like(mean_img)
+        max_img = mean_img + std_img
+        n_img = np.ones_like(mean_img)
+
+        with self.assertRaises(ValueError):
+            noise_equalization_params(
+                max_img,
+                mean_img,
+                std_img,
+                n_img,
+                estimate_method="ransac",
+            )
+
     def test_equalize_noise_routes_pixel_correction_through_custom_op(self) -> None:
         max_img = np.array(
             [[[12.0, 15.0, 18.0], [30.0, 36.0, 42.0]],
@@ -278,18 +475,504 @@ class TestCustomOpsFallback(unittest.TestCase):
             "custom_equalize_noise_correct",
             wraps=noise_ops.equalize_noise_correct_numpy,
         ) as patched_custom:
-            got = noise_equalization.equalize_noise(
-                max_img,
-                mean_img,
-                std_img,
-                n_img,
-                top_fraction=0.25,
-                sigma_reject=3.0,
-                highlight_preserve=0.9,
-            )
+            with mock.patch.object(
+                noise_equalization,
+                "custom_noise_equalization_params",
+                wraps=noise_ops.noise_equalization_params,
+            ) as patched_params:
+                got = noise_equalization.equalize_noise(
+                    max_img,
+                    mean_img,
+                    std_img,
+                    n_img,
+                    top_fraction=0.25,
+                    sigma_reject=3.0,
+                    highlight_preserve=0.9,
+                )
 
         patched_custom.assert_called_once()
+        patched_params.assert_called_once()
         np.testing.assert_allclose(got, expected, rtol=1e-7, atol=1e-7)
+
+    def test_equalize_noise_ransac_bypasses_fused_prepare(self) -> None:
+        max_img = np.array(
+            [[[12.0, 15.0, 18.0], [30.0, 36.0, 42.0]],
+             [[24.0, 20.0, 16.0], [48.0, 45.0, 51.0]]],
+            dtype=np.float64,
+        )
+        mean_img = np.array(
+            [[[10.0, 11.0, 13.0], [28.0, 30.0, 35.0]],
+             [[21.0, 18.0, 14.0], [40.0, 39.0, 43.0]]],
+            dtype=np.float64,
+        )
+        std_img = np.array(
+            [[[2.0, 3.0, 4.0], [5.0, 7.0, 6.0]],
+             [[3.0, 2.0, 1.5], [8.0, 7.0, 9.0]]],
+            dtype=np.float64,
+        )
+        n_img = np.array(
+            [[[10, 10, 10], [9, 9, 9]],
+             [[10, 10, 10], [8, 8, 8]]],
+            dtype=np.uint16,
+        )
+
+        with mock.patch.object(
+            noise_equalization,
+            "custom_noise_equalization_params",
+            side_effect=AssertionError("median params helper should not be called"),
+        ) as patched_params:
+            with mock.patch.object(noise_equalization, "_ransac_ratio", return_value=1.25) as patched_ransac:
+                got = noise_equalization.equalize_noise(
+                    max_img,
+                    mean_img,
+                    std_img,
+                    n_img,
+                    estimate_method="ransac",
+                    top_fraction=0.25,
+                    sigma_reject=3.0,
+                    highlight_preserve=0.9,
+                )
+
+        patched_params.assert_not_called()
+        patched_ransac.assert_called_once()
+        self.assertEqual(got.shape, max_img.shape)
+
+    def test_star_shrink_process_compiled_matches_numpy_uint16(self) -> None:
+        rng = np.random.default_rng(2468)
+        base = rng.normal(loc=12000.0, scale=1200.0, size=(16, 18)).clip(0, 50000)
+        for y, x, value in [(5, 6, 42000), (8, 10, 36000), (11, 13, 39000)]:
+            base[y, x] = value
+            base[y - 1:y + 2, x - 1:x + 2] = np.maximum(
+                base[y - 1:y + 2, x - 1:x + 2],
+                value * 0.45,
+            )
+        image = np.stack(
+            [
+                base * 0.96,
+                base,
+                base * 1.04,
+            ],
+            axis=2,
+        ).clip(0, 65535).astype(np.uint16)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[3:13, 4:15] = 1
+
+        got = star_shrink_ops.star_shrink_process_compiled(
+            image,
+            mask,
+            3,
+            "CIRCLE",
+            1,
+            1.0,
+            7,
+        )
+        expected = star_shrink_ops.star_shrink_process_numpy(
+            image,
+            mask,
+            3,
+            "CIRCLE",
+            1,
+            1.0,
+            7,
+        )
+
+        self.assertEqual(got.dtype, np.uint16)
+        self.assertEqual(got.shape, image.shape)
+        # OpenCV's float Lab conversion and the native standard-Lab implementation
+        # are not bit-exact; keep the 16-bit tolerance below 0.2% of full scale.
+        np.testing.assert_allclose(got, expected, rtol=0, atol=128)
+        np.testing.assert_array_equal(got[mask == 0], image[mask == 0])
+
+    def test_star_shrink_process_compiled_matches_numpy_uint8_edges(self) -> None:
+        image = np.array(
+            [
+                [[8, 9, 10], [20, 22, 24], [40, 42, 44], [60, 62, 64], [80, 82, 84]],
+                [[12, 13, 14], [45, 48, 51], [90, 94, 98], [70, 72, 74], [35, 37, 39]],
+                [[16, 17, 18], [55, 58, 61], [140, 145, 150], [85, 88, 91], [45, 47, 49]],
+                [[22, 23, 24], [40, 42, 44], [75, 78, 81], [65, 68, 71], [30, 32, 34]],
+                [[28, 29, 30], [35, 37, 39], [50, 52, 54], [45, 47, 49], [25, 27, 29]],
+            ],
+            dtype=np.uint8,
+        )
+        mask = np.ones(image.shape[:2], dtype=np.uint8)
+
+        got = star_shrink_ops.star_shrink_process_compiled(
+            image,
+            mask,
+            3,
+            "CIRCLE",
+            1,
+            1.0,
+            3,
+        )
+        expected = star_shrink_ops.star_shrink_process_numpy(
+            image,
+            mask,
+            3,
+            "CIRCLE",
+            1,
+            1.0,
+            3,
+        )
+
+        self.assertEqual(got.dtype, np.uint8)
+        np.testing.assert_allclose(got, expected, rtol=0, atol=2)
+
+    def test_star_shrink_process_float32_uses_numpy_semantics(self) -> None:
+        image = np.linspace(0.0, 2.0, 9 * 11, dtype=np.float32).reshape(9, 11)
+        mask = np.zeros(image.shape, dtype=np.uint8)
+        mask[2:8, 3:10] = 1
+
+        got = star_shrink_process(image, mask, 3, "RECT", 2, 0.5, 5)
+        expected = star_shrink_ops.star_shrink_process_numpy(
+            image,
+            mask,
+            3,
+            "RECT",
+            2,
+            0.5,
+            5,
+        )
+
+        self.assertEqual(got.dtype, np.float32)
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-6)
+        np.testing.assert_array_equal(got[mask == 0], image[mask == 0])
+
+        with self.assertRaises(ValueError):
+            star_shrink_ops.star_shrink_process_compiled(
+                image,
+                mask,
+                3,
+                "RECT",
+                2,
+                0.5,
+                5,
+            )
+
+    def test_star_shrink_process_can_force_numpy_fallback(self) -> None:
+        image = np.arange(6 * 7 * 3, dtype=np.uint8).reshape(6, 7, 3)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[1:5, 2:6] = 1
+
+        with mock.patch.dict("os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_process_compiled",
+                side_effect=AssertionError("native backend should not be called"),
+            ):
+                star_shrink_ops._select_star_shrink_process_backend.cache_clear()
+                got = star_shrink_process(image, mask, 3, "CROSS", 1, 1.0, 5)
+
+        expected = star_shrink_ops.star_shrink_process_numpy(
+            image,
+            mask,
+            3,
+            "CROSS",
+            1,
+            1.0,
+            5,
+        )
+        np.testing.assert_array_equal(got, expected)
+
+    def test_star_shrink_process_cuda_runtime_falls_back_to_cpu(self) -> None:
+        image = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)
+        mask = np.ones(image.shape[:2], dtype=np.uint8)
+        candidate = backend_registry.BackendCandidate(
+            "star_shrink_process",
+            "cuda_host_io",
+            "star_shrink_process_cuda",
+            priority=10,
+            build_flag="cuda",
+        )
+        selection = backend_registry.BackendSelection(candidate, object(), None)
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_select_star_shrink_process_backend",
+            return_value=selection,
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_process_compiled_cuda",
+                side_effect=RuntimeError("no CUDA-capable device is detected"),
+            ) as mock_cuda:
+                with mock.patch.object(
+                    star_shrink_ops,
+                    "_compiled_cpu_available",
+                    return_value=True,
+                ):
+                    with mock.patch.object(
+                        star_shrink_ops,
+                        "star_shrink_process_compiled",
+                        wraps=star_shrink_ops.star_shrink_process_numpy,
+                    ) as mock_cpu:
+                        got = star_shrink_process(image, mask, 3, "CIRCLE", 1, 1.0, 5)
+
+        mock_cuda.assert_called_once()
+        mock_cpu.assert_called_once()
+        expected = star_shrink_ops.star_shrink_process_numpy(
+            image,
+            mask,
+            3,
+            "CIRCLE",
+            1,
+            1.0,
+            5,
+        )
+        np.testing.assert_array_equal(got, expected)
+
+    def test_star_shrink_process_cpu_backend_error_propagates(self) -> None:
+        image = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)
+        mask = np.ones(image.shape[:2], dtype=np.uint8)
+        candidate = backend_registry.BackendCandidate(
+            "star_shrink_process",
+            "openmp_cpu",
+            "star_shrink_process",
+        )
+        selection = backend_registry.BackendSelection(candidate, object(), None)
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_select_star_shrink_process_backend",
+            return_value=selection,
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_process_compiled",
+                side_effect=ValueError("bad star shrink params"),
+            ):
+                with self.assertRaisesRegex(ValueError, "bad star shrink params"):
+                    star_shrink_process(image, mask, 3, "CIRCLE", 1, 1.0, 5)
+
+    def test_star_shrink_process_cuda_matches_compiled_when_available(self) -> None:
+        info = cuda_memory_info()
+        if not info.get("available"):
+            self.skipTest(f"CUDA runtime unavailable: {info.get('reason', 'unknown')}")
+
+        rng = np.random.default_rng(9753)
+        image = rng.integers(100, 30000, size=(24, 28, 3), dtype=np.uint16)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[4:20, 5:24] = 1
+
+        got = star_shrink_ops.star_shrink_process_compiled_cuda(
+            image,
+            mask,
+            3,
+            "CIRCLE",
+            1,
+            1.0,
+            7,
+        )
+        expected = star_shrink_ops.star_shrink_process_compiled(
+            image,
+            mask,
+            3,
+            "CIRCLE",
+            1,
+            1.0,
+            7,
+        )
+
+        np.testing.assert_allclose(got, expected, rtol=0, atol=1)
+
+    def test_star_shrink_detect_mask_compiled_matches_numpy_uint16_2d(self) -> None:
+        image = np.full((15, 17), 1000, dtype=np.uint16)
+        image[5, 6] = 16000
+        image[6, 7] = 18000
+        image[10, 12] = 22000
+
+        got = star_shrink_ops.star_shrink_detect_mask_compiled(
+            image,
+            ksize=5,
+            threshold_ratio=2.0,
+            open_ksize=0,
+            dilate_ksize=0,
+        )
+        expected = star_shrink_ops.star_shrink_detect_mask_numpy(
+            image,
+            ksize=5,
+            threshold_ratio=2.0,
+            open_ksize=0,
+            dilate_ksize=0,
+        )
+
+        self.assertEqual(got.dtype, np.uint8)
+        np.testing.assert_array_equal(got, expected)
+
+    def test_star_shrink_detect_mask_compiled_matches_numpy_rgb_morphology(self) -> None:
+        gray = np.full((17, 19), 40, dtype=np.uint8)
+        gray[7:10, 8:11] = 255
+        gray[2, 3] = 240
+        image = np.repeat(gray[..., np.newaxis], 3, axis=2)
+
+        got = star_shrink_ops.star_shrink_detect_mask_compiled(
+            image,
+            ksize=3,
+            threshold_ratio=1.0,
+            open_ksize=3,
+            dilate_ksize=3,
+        )
+        expected = star_shrink_ops.star_shrink_detect_mask_numpy(
+            image,
+            ksize=3,
+            threshold_ratio=1.0,
+            open_ksize=3,
+            dilate_ksize=3,
+        )
+
+        self.assertEqual(got.dtype, np.uint8)
+        np.testing.assert_array_equal(got, expected)
+
+    def test_star_shrink_detect_mask_can_force_numpy_fallback(self) -> None:
+        image = np.arange(9 * 11, dtype=np.uint8).reshape(9, 11)
+
+        with mock.patch.dict("os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_detect_mask_compiled",
+                side_effect=AssertionError("native backend should not be called"),
+            ):
+                star_shrink_ops._select_star_shrink_detect_mask_backend.cache_clear()
+                got = star_shrink_detect_mask(
+                    image,
+                    ksize=3,
+                    threshold_ratio=1.5,
+                    open_ksize=0,
+                    dilate_ksize=0,
+                )
+
+        expected = star_shrink_ops.star_shrink_detect_mask_numpy(
+            image,
+            ksize=3,
+            threshold_ratio=1.5,
+            open_ksize=0,
+            dilate_ksize=0,
+        )
+        np.testing.assert_array_equal(got, expected)
+
+    def test_star_shrink_detect_mask_cpu_backend_error_propagates(self) -> None:
+        image = np.arange(6 * 7, dtype=np.uint8).reshape(6, 7)
+        candidate = backend_registry.BackendCandidate(
+            "star_shrink_detect_mask",
+            "openmp_cpu",
+            "star_shrink_detect_mask",
+        )
+        selection = backend_registry.BackendSelection(candidate, object(), None)
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_select_star_shrink_detect_mask_backend",
+            return_value=selection,
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_detect_mask_compiled",
+                side_effect=ValueError("bad detect params"),
+            ):
+                with self.assertRaisesRegex(ValueError, "bad detect params"):
+                    star_shrink_detect_mask(image, ksize=3)
+
+    def test_star_mask_dog_can_force_numpy_fallback(self) -> None:
+        image = np.zeros((17, 19), dtype=np.uint16)
+        image[8, 9] = 50000
+
+        with mock.patch.dict("os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_mask_dog_compiled_cuda",
+                side_effect=AssertionError("native backend should not be called"),
+            ):
+                star_shrink_ops._select_star_mask_dog_backend.cache_clear()
+                got = star_mask_dog(
+                    image,
+                    sigma_small=1.0,
+                    sigma_large=3.0,
+                    threshold_ratio=1.0,
+                    open_ksize=0,
+                    dilate_ksize=0,
+                )
+
+        expected = star_shrink_ops.star_mask_dog_numpy(
+            image,
+            sigma_small=1.0,
+            sigma_large=3.0,
+            threshold_ratio=1.0,
+            open_ksize=0,
+            dilate_ksize=0,
+        )
+        np.testing.assert_array_equal(got, expected)
+
+    def test_star_mask_dog_cuda_runtime_falls_back_to_numpy(self) -> None:
+        image = np.zeros((9, 11), dtype=np.uint8)
+        image[4, 5] = 255
+        candidate = backend_registry.BackendCandidate(
+            "star_mask_dog",
+            "cuda_host_io",
+            "star_mask_dog_cuda",
+            priority=10,
+            build_flag="cuda",
+        )
+        selection = backend_registry.BackendSelection(candidate, object(), None)
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_select_star_mask_dog_backend",
+            return_value=selection,
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_mask_dog_compiled_cuda",
+                side_effect=RuntimeError("no CUDA-capable device is detected"),
+            ) as mock_cuda:
+                got = star_mask_dog(
+                    image,
+                    sigma_small=1.0,
+                    sigma_large=2.0,
+                    threshold_ratio=1.0,
+                    open_ksize=0,
+                    dilate_ksize=0,
+                )
+
+        mock_cuda.assert_called_once()
+        expected = star_shrink_ops.star_mask_dog_numpy(
+            image,
+            sigma_small=1.0,
+            sigma_large=2.0,
+            threshold_ratio=1.0,
+            open_ksize=0,
+            dilate_ksize=0,
+        )
+        np.testing.assert_array_equal(got, expected)
+
+    def test_star_mask_dog_cuda_detects_synthetic_star_when_available(self) -> None:
+        info = cuda_memory_info()
+        if not info.get("available"):
+            self.skipTest(f"CUDA runtime unavailable: {info.get('reason', 'unknown')}")
+
+        image = np.zeros((33, 35), dtype=np.uint16)
+        image[16, 17] = 60000
+        image[15:18, 16:19] = np.maximum(image[15:18, 16:19], 18000)
+        got = star_shrink_ops.star_mask_dog_compiled_cuda(
+            image,
+            sigma_small=1.0,
+            sigma_large=3.0,
+            threshold_ratio=1.0,
+            open_ksize=0,
+            dilate_ksize=0,
+        )
+        expected = star_shrink_ops.star_mask_dog_numpy(
+            image,
+            sigma_small=1.0,
+            sigma_large=3.0,
+            threshold_ratio=1.0,
+            open_ksize=0,
+            dilate_ksize=0,
+        )
+
+        self.assertEqual(got.dtype, np.uint8)
+        self.assertEqual(got.shape, image.shape)
+        self.assertEqual(int(got[16, 17]), 1)
+        self.assertLessEqual(abs(int(np.count_nonzero(got)) - int(np.count_nonzero(expected))), 8)
 
     def test_median_reduce_chunk_matches_numpy(self) -> None:
         stack = np.array(
@@ -1056,6 +1739,10 @@ class TestCustomOpsFallback(unittest.TestCase):
 
         buffer = FakeFrameBuffer()
         op = ConfigCaptureChunkOp("capture")
+        async def run_inline(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        op._run_cpu = run_inline
         configs = {"buffer_handle": buffer, "chunk_rows": 1, "marker": "ok"}
 
         asyncio.run(op._async_execute(configs))

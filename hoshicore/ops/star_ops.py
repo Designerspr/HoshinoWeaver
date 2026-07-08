@@ -3,16 +3,19 @@ from typing import Any, Awaitable, Mapping
 import numpy as np
 from loguru import logger
 
+from hoshicore._custom_op import (
+    star_mask_dog,
+    star_shrink_detect_mask,
+    star_shrink_process,
+)
+
 from ..component.data_container import FloatImage
-from ..component.star_detect import (detect_starmask_by_dog,
-                                     detect_starmask_by_threshold)
-from ..component.star_shrink import apply_mask, deringing, morph_shrink_luma
 from ..engine.registry import register_op
 from .base import ParallelBaseOp
 
 _DETECT_METHODS = {
-    "threshold": detect_starmask_by_threshold,
-    "dog": detect_starmask_by_dog,
+    "threshold": star_shrink_detect_mask,
+    "dog": star_mask_dog,
 }
 
 SHRINK_MODE_PRESETS: dict[str, dict] = {
@@ -82,17 +85,15 @@ def _star_shrink_pipeline(img: np.ndarray, configs: dict[str,
     star_mask = detect_fn(img, **detect_kwargs)
 
     raw_ratio = p.get('shrink_ratio', 0.0)
-    shrunk = morph_shrink_luma(
+    return star_shrink_process(
         img,
-        ksize=p['shrink_ksize'],
-        shape=p.get('shrink_shape', 'CIRCLE'),
-        times=p['shrink_times'],
-        ratio=None if raw_ratio == 0.0 else raw_ratio,
+        star_mask,
+        p['shrink_ksize'],
+        p.get('shrink_shape', 'CIRCLE'),
+        p['shrink_times'],
+        None if raw_ratio == 0.0 else raw_ratio,
+        p['deringing_ksize'],
     )
-
-    shrunk = deringing(img, shrunk, algo="mean", ksize=p['deringing_ksize'])
-
-    return apply_mask(img, shrunk, star_mask)
 
 
 @register_op()
