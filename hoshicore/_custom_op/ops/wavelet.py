@@ -144,7 +144,7 @@ def _select_wavelet_dec_rec_backend(
 def _wavelet_dec_rec_cpu_fallback_available() -> bool:
     selection = _select_backend(
         "wavelet_dec_rec",
-        _fallback_preference(),
+        "auto",
         load_module=_load_compiled_module_result,
         build_info={"cuda": False},
     )

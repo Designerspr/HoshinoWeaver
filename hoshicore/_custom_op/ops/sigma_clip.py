@@ -383,7 +383,7 @@ def _select_sigma_clip_fused_chunk_cpu_fallback(
 ) -> Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]] | None:
     selection = _select_backend(
         "sigma_clip_fused_chunk",
-        _fallback_preference(),
+        "auto",
         load_module=_load_compiled_module_result,
         build_info={"cuda": False},
     )

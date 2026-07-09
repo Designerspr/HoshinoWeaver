@@ -406,7 +406,7 @@ def _select_camera_model_remap_backend(
 def _camera_model_remap_cpu_fallback_available() -> bool:
     selection = _select_backend(
         "camera_model_remap",
-        _fallback_preference(),
+        "auto",
         load_module=_load_compiled_module_result,
         build_info={"cuda": False},
     )
