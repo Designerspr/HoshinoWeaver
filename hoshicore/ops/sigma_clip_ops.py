@@ -526,12 +526,22 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
 
     @classmethod
     def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
+        return cls.chunk_cost_per_row_for_backend(
+            "openmp_cpu", n_frames, row_bytes, dtype_bytes)
+
+    @classmethod
+    def chunk_cost_per_row_for_backend(cls, backend, n_frames, row_bytes, dtype_bytes):
         plane_items_per_row = row_bytes // dtype_bytes
         float64_row = plane_items_per_row * 8
         stack = 2 * n_frames * row_bytes
         active = n_frames * row_bytes
         mask_bytes = n_frames * plane_items_per_row
         state = 3 * float64_row
+        if backend == "numpy":
+            float64_stacks = 2 * n_frames * float64_row
+            active_masks = 2 * n_frames * plane_items_per_row
+            iterative_state = 6 * float64_row
+            return stack + float64_stacks + active_masks + state + iterative_state
         return stack + active + mask_bytes + state
 
     def _init_chunk_state(self, configs, row_start, row_end, w):

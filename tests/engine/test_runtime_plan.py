@@ -122,7 +122,12 @@ def _mock_cuda_memory(monkeypatch, budget: int, available: bool = True) -> None:
     )
 
 
-def _mock_cuda_backend(monkeypatch, logical_op: str) -> None:
+def _mock_cuda_backend(
+    monkeypatch,
+    logical_op: str,
+    *,
+    cpu_available: bool = False,
+) -> None:
     candidate = backend_registry.BackendCandidate(
         logical_op,
         "cuda_host_io",
@@ -130,13 +135,25 @@ def _mock_cuda_backend(monkeypatch, logical_op: str) -> None:
         priority=10,
         build_flag="cuda",
     )
+    cpu_candidate = backend_registry.BackendCandidate(
+        logical_op,
+        "openmp_cpu",
+        f"{logical_op}_cpu",
+    )
     selection = backend_registry.BackendSelection(candidate, object())
+    cpu_selection = backend_registry.BackendSelection(cpu_candidate, object())
 
-    def select(logical_op_arg: str, preference: str = "auto"):
+    def select(logical_op_arg: str, preference: str = "auto", **kwargs):
         if preference == "numpy":
             return backend_registry.BackendSelection(
                 None, None, "numpy backend forced by preference")
         if logical_op_arg == logical_op:
+            build_info = kwargs.get("build_info")
+            if isinstance(build_info, dict) and not build_info.get("cuda", True):
+                if cpu_available:
+                    return cpu_selection
+                return backend_registry.BackendSelection(
+                    None, object(), "mock CPU backend unavailable")
             return selection
         return backend_registry.BackendSelection(None, None, "mock unavailable")
 
@@ -172,6 +189,25 @@ class FixedCudaChunkOp(BaseOp):
     @classmethod
     def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
         _ = n_frames, row_bytes, dtype_bytes
+        return 100
+
+
+class FixedCudaFallbackChunkOp(BaseOp):
+    CHUNK_PLANNED = True
+    BACKEND_LOGICAL_OP = "fixed_cuda_fallback_chunk"
+
+    @classmethod
+    def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
+        _ = n_frames, row_bytes, dtype_bytes
+        return 100
+
+    @classmethod
+    def chunk_cost_per_row_for_backend(cls, backend, n_frames, row_bytes, dtype_bytes):
+        _ = n_frames, row_bytes, dtype_bytes
+        if backend == "openmp_cpu":
+            return 200
+        if backend == "numpy":
+            return 400
         return 100
 
 
@@ -295,6 +331,41 @@ def test_runtime_planner_ignores_unavailable_cuda_budget(tmp_path, monkeypatch):
     assert "gpu=" not in plan.decisions[0].reason
 
 
+def test_runtime_planner_uses_cpu_cost_when_cuda_runtime_unavailable(
+        tmp_path, monkeypatch):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    monkeypatch.delenv("HNW_CUSTOM_OPS_FALLBACK", raising=False)
+    _mock_available_memory(monkeypatch, budget=12800)
+    _mock_cuda_memory(monkeypatch, budget=0, available=False)
+    _mock_cuda_backend(
+        monkeypatch,
+        "fixed_cuda_fallback_chunk",
+        cpu_available=True,
+    )
+    dag = ValidatedDag(
+        nodes={
+            "chunk": {"op": "FixedCudaFallbackChunkOp", "configs": {}},
+        },
+        global_inputs={},
+        global_configs={},
+        output_links={},
+        node_deps={},
+        exec_order=["chunk"],
+    )
+
+    plan = plan_runtime(
+        dag,
+        {"runtime_planner": True},
+        {"fnames": [str(path)] * 4},
+        op_registry={"FixedCudaFallbackChunkOp": FixedCudaFallbackChunkOp},
+        preflight_report=_report(),
+    )
+
+    assert plan.config_overrides["chunk_rows"] == 64
+    assert "gpu=" not in plan.decisions[0].reason
+
+
 def test_runtime_planner_ignores_cuda_budget_when_numpy_forced(tmp_path, monkeypatch):
     path = tmp_path / "frame.tif"
     tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
@@ -313,6 +384,34 @@ def test_runtime_planner_ignores_cuda_budget_when_numpy_forced(tmp_path, monkeyp
 
     assert plan.config_overrides["chunk_rows"] == 128
     assert "gpu=" not in plan.decisions[0].reason
+
+
+def test_runtime_planner_uses_numpy_chunk_cost_when_numpy_forced(tmp_path, monkeypatch):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    _mock_available_memory(monkeypatch, budget=12800)
+    monkeypatch.setenv("HNW_CUSTOM_OPS_FALLBACK", "numpy")
+
+    dag = ValidatedDag(
+        nodes={
+            "chunk": {"op": "SigmaClipFusedChunkOp", "configs": {}},
+        },
+        global_inputs={},
+        global_configs={},
+        output_links={},
+        node_deps={},
+        exec_order=["chunk"],
+    )
+
+    plan = plan_runtime(
+        dag,
+        {"runtime_planner": True},
+        {"fnames": [str(path)] * 4},
+        op_registry={"SigmaClipFusedChunkOp": SigmaClipFusedChunkOp},
+        preflight_report=_report(),
+    )
+
+    assert plan.config_overrides["chunk_rows"] == 8
 
 
 def test_runtime_planner_clamps_to_default_max_chunk_rows(tmp_path, monkeypatch):
@@ -345,6 +444,14 @@ def test_chunk_cost_per_row_formulas():
             n_frames * row_bytes +
             n_frames * row_bytes // dtype_bytes +
             3 * float64_row
+        )
+    assert SigmaClipFusedChunkOp.chunk_cost_per_row_for_backend(
+        "numpy", n_frames, row_bytes, dtype_bytes) == (
+            2 * n_frames * row_bytes +
+            2 * n_frames * float64_row +
+            2 * n_frames * (row_bytes // dtype_bytes) +
+            3 * float64_row +
+            6 * float64_row
         )
     assert SigmaClipIteratorOp.chunk_cost_per_row(
         n_frames, row_bytes, dtype_bytes) == (

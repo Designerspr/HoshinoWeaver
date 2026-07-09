@@ -147,7 +147,7 @@ def _plan_chunk_rows(
         return None, None
 
     cost_per_row = sum(
-        op_cls.chunk_cost_per_row(n_frames, row_bytes, dtype_bytes)
+        _chunk_cost_per_row(op_cls, n_frames, row_bytes, dtype_bytes)
         for op_cls in chunk_ops
     )
     if cost_per_row <= 0:
@@ -193,17 +193,59 @@ def _cuda_chunk_memory_budget_bytes(chunk_ops: list[type[BaseOp]]) -> int | None
 
 def _uses_cuda_host_io_chunk_backend(chunk_ops: list[type[BaseOp]]) -> bool:
     for op_cls in chunk_ops:
-        logical_op = getattr(op_cls, "BACKEND_LOGICAL_OP", None)
-        if not logical_op:
-            continue
-        selection = select_backend(logical_op, fallback_preference())
+        selection = _selected_backend_for_chunk_op(op_cls)
         if (
-            selection.native
+            selection is not None
+            and selection.native
             and selection.candidate is not None
             and selection.candidate.backend == "cuda_host_io"
         ):
             return True
     return False
+
+
+def _chunk_cost_per_row(
+    op_cls: type[BaseOp],
+    n_frames: int,
+    row_bytes: int,
+    dtype_bytes: int,
+) -> int:
+    cost_for_backend = getattr(op_cls, "chunk_cost_per_row_for_backend", None)
+    if cost_for_backend is None:
+        return int(op_cls.chunk_cost_per_row(n_frames, row_bytes, dtype_bytes))
+    selection = _selected_backend_for_chunk_op(op_cls)
+    backend = "numpy"
+    if (
+        selection is not None
+        and selection.native
+        and selection.candidate is not None
+    ):
+        backend = selection.candidate.backend
+    return int(cost_for_backend(backend, n_frames, row_bytes, dtype_bytes))
+
+
+def _selected_backend_for_chunk_op(op_cls: type[BaseOp]) -> Any | None:
+    logical_op = getattr(op_cls, "BACKEND_LOGICAL_OP", None)
+    if not logical_op:
+        return None
+    selection = select_backend(logical_op, fallback_preference())
+    if (
+        selection.native
+        and selection.candidate is not None
+        and selection.candidate.backend == "cuda_host_io"
+        and not _cuda_runtime_available()
+    ):
+        return select_backend(
+            logical_op,
+            fallback_preference(),
+            build_info={"cuda": False},
+        )
+    return selection
+
+
+def _cuda_runtime_available() -> bool:
+    info = cuda_memory_info()
+    return bool(info.get("available"))
 
 
 def _positive_int(value: Any, default: int) -> int:
