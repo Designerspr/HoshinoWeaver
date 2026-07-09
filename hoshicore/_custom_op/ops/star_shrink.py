@@ -23,6 +23,31 @@ _SUPPORTED_DTYPES = (np.dtype(np.uint8), np.dtype(np.uint16), np.dtype(np.float3
 _COMPILED_SUPPORTED_DTYPES = (np.dtype(np.uint8), np.dtype(np.uint16))
 
 
+def _validate_process_params(
+    shrink_ksize: int,
+    shrink_shape: str,
+    shrink_times: int,
+    shrink_ratio: float | None,
+    deringing_ksize: int,
+) -> tuple[int, str, int, float, int]:
+    shrink_size = int(shrink_ksize)
+    dering_size = int(deringing_ksize)
+    if shrink_size <= 0 or shrink_size % 2 == 0:
+        raise ValueError("star_shrink_process: shrink_ksize must be a positive odd value")
+    if dering_size <= 0 or dering_size % 2 == 0:
+        raise ValueError("star_shrink_process: deringing_ksize must be a positive odd value")
+    times = int(shrink_times)
+    if times <= 0:
+        raise ValueError("star_shrink_process: shrink_times must be positive")
+    shape = str(shrink_shape)
+    if shape not in {"RECT", "CROSS", "CIRCLE"}:
+        raise ValueError("star_shrink_process: unknown shrink_shape")
+    ratio = 1.0 / times if shrink_ratio is None else float(shrink_ratio)
+    if not (0.0 < ratio <= 1.0):
+        raise ValueError("star_shrink_process: shrink_ratio must be in (0, 1]")
+    return shrink_size, shape, times, ratio, dering_size
+
+
 def _validate_inputs(
     image: np.ndarray,
     star_mask: np.ndarray,
@@ -45,21 +70,13 @@ def _validate_inputs(
     if np.dtype(image_arr.dtype) not in _SUPPORTED_DTYPES:
         raise ValueError("star_shrink_process: image dtype must be uint8, uint16, or float32")
 
-    shrink_size = int(shrink_ksize)
-    dering_size = int(deringing_ksize)
-    if shrink_size <= 0 or shrink_size % 2 == 0:
-        raise ValueError("star_shrink_process: shrink_ksize must be a positive odd value")
-    if dering_size <= 0 or dering_size % 2 == 0:
-        raise ValueError("star_shrink_process: deringing_ksize must be a positive odd value")
-    times = int(shrink_times)
-    if times <= 0:
-        raise ValueError("star_shrink_process: shrink_times must be positive")
-    shape = str(shrink_shape)
-    if shape not in {"RECT", "CROSS", "CIRCLE"}:
-        raise ValueError("star_shrink_process: unknown shrink_shape")
-    ratio = 1.0 / times if shrink_ratio is None else float(shrink_ratio)
-    if not (0.0 < ratio <= 1.0):
-        raise ValueError("star_shrink_process: shrink_ratio must be in (0, 1]")
+    shrink_size, shape, times, ratio, dering_size = _validate_process_params(
+        shrink_ksize,
+        shrink_shape,
+        shrink_times,
+        shrink_ratio,
+        deringing_ksize,
+    )
 
     if mask_arr.dtype != np.uint8:
         mask_arr = mask_arr.astype(np.uint8, copy=False)
@@ -515,4 +532,167 @@ def star_mask_dog(
         threshold_ratio=threshold_ratio,
         open_ksize=open_ksize,
         dilate_ksize=dilate_ksize,
+    )
+
+
+def star_shrink_dog_process_numpy(
+    image: np.ndarray,
+    sigma_small: float = 1.5,
+    sigma_large: float = 12.0,
+    threshold_ratio: int | float = 3,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+    shrink_ksize: int = 3,
+    shrink_shape: str = "CIRCLE",
+    shrink_times: int = 1,
+    shrink_ratio: float | None = 1.0,
+    deringing_ksize: int = 51,
+) -> np.ndarray:
+    image_arr = np.asarray(image)
+    mask = star_mask_dog_numpy(
+        image_arr,
+        sigma_small=sigma_small,
+        sigma_large=sigma_large,
+        threshold_ratio=threshold_ratio,
+        open_ksize=open_ksize,
+        dilate_ksize=dilate_ksize,
+    )
+    return star_shrink_process_numpy(
+        image_arr,
+        mask,
+        shrink_ksize,
+        shrink_shape,
+        shrink_times,
+        shrink_ratio,
+        deringing_ksize,
+    )
+
+
+def star_shrink_dog_process_compiled_cuda(
+    image: np.ndarray,
+    sigma_small: float = 1.5,
+    sigma_large: float = 12.0,
+    threshold_ratio: int | float = 3,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+    shrink_ksize: int = 3,
+    shrink_shape: str = "CIRCLE",
+    shrink_times: int = 1,
+    shrink_ratio: float | None = 1.0,
+    deringing_ksize: int = 51,
+) -> np.ndarray:
+    module, _ = _load_compiled_module_result()
+    if module is None or not hasattr(module, "star_shrink_dog_process_cuda"):
+        raise RuntimeError("compiled custom op backend is unavailable")
+    image_arr = np.asarray(image)
+    if image_arr.ndim not in (2, 3):
+        raise ValueError("star_shrink_dog_process: image must have shape (H, W) or (H, W, C)")
+    if image_arr.ndim == 3 and image_arr.shape[2] != 3:
+        raise ValueError("star_shrink_dog_process: 3D image must have exactly 3 channels")
+    if np.dtype(image_arr.dtype) not in _COMPILED_SUPPORTED_DTYPES:
+        raise ValueError("star_shrink_dog_process: CUDA backend supports uint8/uint16 only")
+    if image_arr.shape[0] <= 0 or image_arr.shape[1] <= 0:
+        raise ValueError("star_shrink_dog_process: image height and width must be positive")
+    shrink_size, shape, times, ratio, dering_size = _validate_process_params(
+        shrink_ksize,
+        shrink_shape,
+        shrink_times,
+        shrink_ratio,
+        deringing_ksize,
+    )
+    if not image_arr.flags.c_contiguous:
+        image_arr = np.ascontiguousarray(image_arr)
+    return module.star_shrink_dog_process_cuda(
+        image_arr,
+        float(sigma_small),
+        float(sigma_large),
+        float(threshold_ratio),
+        int(open_ksize),
+        int(dilate_ksize),
+        shrink_size,
+        shape,
+        times,
+        ratio,
+        dering_size,
+    )
+
+
+@lru_cache(maxsize=2)
+def _select_star_shrink_dog_process_backend(preference: str) -> BackendSelection:
+    return _select_backend(
+        "star_shrink_dog_process",
+        preference,
+        load_module=_load_compiled_module_result,
+    )
+
+
+def star_shrink_dog_process(
+    image: np.ndarray,
+    sigma_small: float = 1.5,
+    sigma_large: float = 12.0,
+    threshold_ratio: int | float = 3,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+    shrink_ksize: int = 3,
+    shrink_shape: str = "CIRCLE",
+    shrink_times: int = 1,
+    shrink_ratio: float | None = 1.0,
+    deringing_ksize: int = 51,
+) -> np.ndarray:
+    image_arr = np.asarray(image)
+    if np.dtype(image_arr.dtype) not in _COMPILED_SUPPORTED_DTYPES:
+        return star_shrink_dog_process_numpy(
+            image,
+            sigma_small=sigma_small,
+            sigma_large=sigma_large,
+            threshold_ratio=threshold_ratio,
+            open_ksize=open_ksize,
+            dilate_ksize=dilate_ksize,
+            shrink_ksize=shrink_ksize,
+            shrink_shape=shrink_shape,
+            shrink_times=shrink_times,
+            shrink_ratio=shrink_ratio,
+            deringing_ksize=deringing_ksize,
+        )
+
+    selection = _select_star_shrink_dog_process_backend(_fallback_preference())
+    if selection.native and selection.candidate is not None:
+        if selection.candidate.backend == "cuda_host_io":
+            try:
+                return star_shrink_dog_process_compiled_cuda(
+                    image,
+                    sigma_small=sigma_small,
+                    sigma_large=sigma_large,
+                    threshold_ratio=threshold_ratio,
+                    open_ksize=open_ksize,
+                    dilate_ksize=dilate_ksize,
+                    shrink_ksize=shrink_ksize,
+                    shrink_shape=shrink_shape,
+                    shrink_times=shrink_times,
+                    shrink_ratio=shrink_ratio,
+                    deringing_ksize=deringing_ksize,
+                )
+            except RuntimeError as exc:
+                if not is_cuda_runtime_unavailable_error(exc):
+                    raise
+                _debug_log(f"CUDA DoG shrink backend unavailable at runtime, reason: {exc}")
+    elif selection.reason:
+        _debug_log(f"DoG shrink fused backend unavailable, reason: {selection.reason}")
+
+    mask = star_mask_dog(
+        image,
+        sigma_small=sigma_small,
+        sigma_large=sigma_large,
+        threshold_ratio=threshold_ratio,
+        open_ksize=open_ksize,
+        dilate_ksize=dilate_ksize,
+    )
+    return star_shrink_process(
+        image,
+        mask,
+        shrink_ksize,
+        shrink_shape,
+        shrink_times,
+        shrink_ratio,
+        deringing_ksize,
     )

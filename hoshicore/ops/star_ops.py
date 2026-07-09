@@ -6,6 +6,7 @@ from loguru import logger
 from hoshicore._custom_op import (
     star_mask_dog,
     star_shrink_detect_mask,
+    star_shrink_dog_process,
     star_shrink_process,
 )
 
@@ -82,9 +83,23 @@ def _star_shrink_pipeline(img: np.ndarray, configs: dict[str,
         detect_kwargs["sigma_small"] = configs['dog_sigma_small']
         detect_kwargs["sigma_large"] = configs['dog_sigma_large']
 
-    star_mask = detect_fn(img, **detect_kwargs)
-
     raw_ratio = p.get('shrink_ratio', 0.0)
+    if method == "dog":
+        return star_shrink_dog_process(
+            img,
+            sigma_small=configs['dog_sigma_small'],
+            sigma_large=configs['dog_sigma_large'],
+            threshold_ratio=configs['detect_threshold'],
+            open_ksize=configs['detect_open'],
+            dilate_ksize=configs['detect_dilate'],
+            shrink_ksize=p['shrink_ksize'],
+            shrink_shape=p.get('shrink_shape', 'CIRCLE'),
+            shrink_times=p['shrink_times'],
+            shrink_ratio=None if raw_ratio == 0.0 else raw_ratio,
+            deringing_ksize=p['deringing_ksize'],
+        )
+
+    star_mask = detect_fn(img, **detect_kwargs)
     return star_shrink_process(
         img,
         star_mask,

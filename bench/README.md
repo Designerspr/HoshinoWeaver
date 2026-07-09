@@ -141,6 +141,7 @@ custom-op wrapper；`stack_*` 不消费对齐输出。终端只打印每条路�
 | `noise_equalization_stages` | 噪声均匀化分阶段诊断；不包含在默认 case 中 |
 | `star_mask_threshold` | 缩星 threshold mask 检测；生产 wrapper 默认走 OpenMP CPU custom-op，fallback 为原 OpenCV/scipy 路径 |
 | `star_mask_dog` | 缩星 DoG mask 检测；CUDA 可用时走 host-in/out CUDA custom-op，fallback 为原 OpenCV 路径 |
+| `star_shrink_dog` | 缩星 DoG 检测 + process 整段融合；CUDA 可用时走 fused host-in/out custom-op，fallback 为 `star_mask_dog` + `star_shrink_process` |
 | `star_shrink` | 缩星核心路径；detect mask 和 process 阶段均走生产 wrapper |
 | `star_shrink_stages` | 缩星分阶段诊断；不包含在默认 case 中，JSON 中记录 detect/process 分段耗时 |
 | `satellite_clean_window` | 卫星线清理窗口中位数核心 smoke，不含星点匹配 |

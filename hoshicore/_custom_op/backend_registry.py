@@ -79,6 +79,13 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         priority=10,
         build_flag="cuda",
     ),
+    BackendCandidate(
+        "star_shrink_dog_process",
+        "cuda_host_io",
+        "star_shrink_dog_process_cuda",
+        priority=10,
+        build_flag="cuda",
+    ),
     BackendCandidate("sigma_clip_iterative_chunk", "openmp_cpu", "sigma_clip_iterative_chunk"),
     BackendCandidate(
         "huber_weighted_chunk",

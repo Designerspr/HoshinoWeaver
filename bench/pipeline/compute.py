@@ -42,6 +42,7 @@ from hoshicore._custom_op import (
     noise_equalization_params,
     star_mask_dog,
     star_shrink_detect_mask,
+    star_shrink_dog_process,
     star_shrink_process,
 )
 from hoshicore.component.noise_equalization import equalize_noise, fill_local_mean
@@ -68,6 +69,7 @@ CASE_NAMES = [
     "noise_equalization_stages",
     "star_mask_threshold",
     "star_mask_dog",
+    "star_shrink_dog",
     "star_shrink",
     "star_shrink_stages",
     "satellite_clean_window",
@@ -394,6 +396,28 @@ def _run_star_shrink_once(frames: list[np.ndarray]) -> dict[str, Any]:
     return _output_payload(last)
 
 
+def _run_star_shrink_dog_once(frames: list[np.ndarray]) -> dict[str, Any]:
+    p = SHRINK_MODE_PRESETS["moderate"]
+    last = None
+    for frame in frames:
+        last = star_shrink_dog_process(
+            _ensure_three_channels(frame),
+            sigma_small=1.5,
+            sigma_large=12.0,
+            threshold_ratio=1.0,
+            open_ksize=3,
+            dilate_ksize=0,
+            shrink_ksize=p["shrink_ksize"],
+            shrink_shape=p.get("shrink_shape", "CIRCLE"),
+            shrink_times=p["shrink_times"],
+            shrink_ratio=None if p.get("shrink_ratio", 0.0) == 0.0 else p.get("shrink_ratio", 0.0),
+            deringing_ksize=p["deringing_ksize"],
+        )
+    if last is None:
+        raise RuntimeError("star shrink dog did not process any frame")
+    return _output_payload(last)
+
+
 def _run_star_shrink_stages_once(frames: list[np.ndarray]) -> dict[str, Any]:
     configs = {
         "mode": "moderate",
@@ -632,6 +656,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "noise_equalization_stages": lambda: _run_noise_equalization_stages_once(frames),
             "star_mask_threshold": lambda: _run_star_mask_threshold_once(frames),
             "star_mask_dog": lambda: _run_star_mask_dog_once(frames),
+            "star_shrink_dog": lambda: _run_star_shrink_dog_once(frames),
             "star_shrink": lambda: _run_star_shrink_once(frames),
             "star_shrink_stages": lambda: _run_star_shrink_stages_once(frames),
             "satellite_clean_window": lambda: _run_satellite_clean_window_once(frames),

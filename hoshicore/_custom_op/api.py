@@ -39,6 +39,7 @@ from hoshicore._custom_op.ops.sigma_clip import (
 from hoshicore._custom_op.ops.star_shrink import (
     star_mask_dog,
     star_shrink_detect_mask,
+    star_shrink_dog_process,
     star_shrink_process,
 )
 from hoshicore._custom_op.ops.wavelet import wavelet_dec_rec
@@ -69,6 +70,7 @@ __all__ = [
     "star_detect_full_connected_components",
     "star_mask_dog",
     "star_shrink_detect_mask",
+    "star_shrink_dog_process",
     "star_shrink_process",
     "threshold_max_merge",
     "wavelet_dec_rec",
