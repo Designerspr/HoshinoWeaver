@@ -141,6 +141,24 @@ def _select_wavelet_dec_rec_backend(
     return "numpy", wavelet_dec_rec_core_numpy
 
 
+def _wavelet_dec_rec_cpu_fallback_available() -> bool:
+    selection = _select_backend(
+        "wavelet_dec_rec",
+        _fallback_preference(),
+        load_module=_load_compiled_module_result,
+        build_info={"cuda": False},
+    )
+    if (
+        selection.native
+        and selection.candidate is not None
+        and selection.candidate.kernel_name == "wavelet_dec_rec_cpu"
+    ):
+        return True
+    if selection.reason:
+        _debug_log(f"compiled CPU backend unavailable after CUDA fallback, reason: {selection.reason}")
+    return False
+
+
 def wavelet_dec_rec_core(
     image: np.ndarray,
     level: int,
@@ -156,14 +174,9 @@ def wavelet_dec_rec_core(
         _debug_log(
             f"compiled CUDA backend unavailable at runtime, falling back to CPU: {exc}"
         )
-        try:
+        if _wavelet_dec_rec_cpu_fallback_available():
             return wavelet_dec_rec_core_compiled(image, level)
-        except RuntimeError as cpu_exc:
-            _debug_log(
-                f"compiled CPU backend unavailable after CUDA fallback, "
-                f"falling back to numpy: {cpu_exc}"
-            )
-            return wavelet_dec_rec_core_numpy(image, level)
+        return wavelet_dec_rec_core_numpy(image, level)
 
 
 def wavelet_dec_rec(

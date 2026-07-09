@@ -179,12 +179,43 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
                 return_value=("cuda", raise_no_cuda)):
             with mock.patch.object(
                     wavelet_ops,
-                    "wavelet_dec_rec_core_compiled",
-                    return_value=expected) as cpu_backend:
-                got = wavelet_ops.wavelet_dec_rec_core(image, 6)
+                    "_wavelet_dec_rec_cpu_fallback_available",
+                    return_value=True):
+                with mock.patch.object(
+                        wavelet_ops,
+                        "wavelet_dec_rec_core_compiled",
+                        return_value=expected) as cpu_backend:
+                    got = wavelet_ops.wavelet_dec_rec_core(image, 6)
 
         cpu_backend.assert_called_once()
         self.assertIs(got, expected)
+
+    def test_wavelet_dec_rec_cuda_fallback_propagates_cpu_runtime_error(self) -> None:
+        rng = np.random.default_rng(15)
+        image = rng.normal(size=(24, 26))
+
+        def raise_no_cuda(_image: np.ndarray, _level: int) -> np.ndarray:
+            raise RuntimeError(
+                "wavelet_dec_rec_cuda_core cudaMalloc input: "
+                "no CUDA-capable device is detected")
+
+        with mock.patch.object(
+                wavelet_ops, "_select_wavelet_dec_rec_backend",
+                return_value=("cuda", raise_no_cuda)):
+            with mock.patch.object(
+                    wavelet_ops,
+                    "_wavelet_dec_rec_cpu_fallback_available",
+                    return_value=True):
+                with mock.patch.object(
+                        wavelet_ops,
+                        "wavelet_dec_rec_core_compiled",
+                        side_effect=RuntimeError("native CPU wavelet bug")):
+                    with mock.patch.object(
+                            wavelet_ops,
+                            "wavelet_dec_rec_core_numpy",
+                            side_effect=AssertionError("numpy backend should not be called")):
+                        with self.assertRaisesRegex(RuntimeError, "native CPU wavelet bug"):
+                            wavelet_ops.wavelet_dec_rec_core(image, 6)
 
     def test_wavelet_dec_rec_backend_registered(self) -> None:
         candidates = registered_backend_candidates("wavelet_dec_rec")

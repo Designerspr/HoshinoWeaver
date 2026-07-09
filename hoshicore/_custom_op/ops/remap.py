@@ -403,6 +403,24 @@ def _select_camera_model_remap_backend(
     return "numpy", camera_model_remap_numpy
 
 
+def _camera_model_remap_cpu_fallback_available() -> bool:
+    selection = _select_backend(
+        "camera_model_remap",
+        _fallback_preference(),
+        load_module=_load_compiled_module_result,
+        build_info={"cuda": False},
+    )
+    if (
+        selection.native
+        and selection.candidate is not None
+        and selection.candidate.kernel_name == "camera_model_remap_cpu"
+    ):
+        return True
+    if selection.reason:
+        _debug_log(f"compiled CPU backend unavailable after CUDA fallback, reason: {selection.reason}")
+    return False
+
+
 def camera_model_remap(
     *,
     image: np.ndarray,
@@ -450,14 +468,10 @@ def camera_model_remap(
     try:
         return backend(**kwargs)
     except RuntimeError as exc:
-        if backend_name not in {"cuda", "compiled"} or not is_cuda_runtime_unavailable_error(exc):
+        if backend_name != "cuda" or not is_cuda_runtime_unavailable_error(exc):
             raise
-        try:
+        if _camera_model_remap_cpu_fallback_available():
             return camera_model_remap_cpu_compiled(**kwargs)
-        except RuntimeError as cpu_exc:
-            _debug_log(
-                f"compiled CPU backend unavailable after CUDA runtime failure, falling back to numpy: {cpu_exc}"
-            )
         _debug_log(
             f"compiled CUDA backend unavailable at runtime, falling back to numpy: {exc}"
         )

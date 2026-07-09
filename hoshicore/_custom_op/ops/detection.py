@@ -10,8 +10,10 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from hoshicore._custom_op._dispatch import CustomOpUnavailableError
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
+from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
 from hoshicore._custom_op.ops.wavelet import _wavelet_level
@@ -209,7 +211,7 @@ def _full_detection_kernel_params(
     ).reshape(-1)
     dilate_size = int(max(shape) * 0.003 * resize_factor)
     if dilate_size <= 0:
-        raise RuntimeError(
+        raise CustomOpUnavailableError(
             "star_detect_full_connected_components: image is too small for GPU mask dilation"
         )
     dilate_kernel = cv2.getStructuringElement(
@@ -277,7 +279,7 @@ def _select_star_detect_full_connected_components_backend(
 
     reason = compiled_error or "compiled full CUDA detector unavailable"
     _debug_log(f"compiled full detector unavailable, reason: {reason}")
-    raise RuntimeError(
+    raise CustomOpUnavailableError(
         "star_detect_full_connected_components requires the compiled CUDA "
         f"backend; use the original contour detector for production fallback. {reason}"
     )
@@ -298,5 +300,13 @@ def star_detect_full_connected_components(
     image_arr, mask_u8 = _validate_full_detection_inputs(image, mask)
     _, backend = _select_star_detect_full_connected_components_backend(
         _fallback_preference())
-    return backend(
-        image_arr, mask_u8, resize_factor, int(gaussian_ksize), float(sigma))
+    try:
+        return backend(
+            image_arr, mask_u8, resize_factor, int(gaussian_ksize), float(sigma))
+    except RuntimeError as exc:
+        if not is_cuda_runtime_unavailable_error(exc):
+            raise
+        raise CustomOpUnavailableError(
+            "star_detect_full_connected_components CUDA backend unavailable "
+            f"at runtime: {exc}"
+        ) from exc

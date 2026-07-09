@@ -6,6 +6,7 @@ import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
 
+from hoshicore._custom_op._dispatch import CustomOpUnavailableError
 from hoshicore._custom_op.ops.detection import (
     star_detect_bandpass_threshold_morph_numpy,
     star_detect_full_connected_components,
@@ -255,7 +256,7 @@ def detect_star_points(
             sigma=sigma,
             min_star_points=min_star_points,
         )
-    except RuntimeError as exc:
+    except CustomOpUnavailableError as exc:
         # Full GPU detector 不可用时，生产 fallback 必须回到原始 contour/OpenCV 路径。
         logger.debug(
             f"Full GPU star detector unavailable, falling back to contour detector: {exc}"

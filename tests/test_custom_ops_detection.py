@@ -6,6 +6,7 @@ import numpy as np
 
 from hoshicore._custom_op import build_info
 from hoshicore._custom_op.backend_registry import registered_backend_candidates
+from hoshicore._custom_op._dispatch import CustomOpUnavailableError
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op.ops import detection as detection_ops
 import hoshicore.component.norma.detection as star_detection
@@ -224,7 +225,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
                 "os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"},
                 clear=False):
             detection_ops._select_star_detect_full_connected_components_backend.cache_clear()
-            with self.assertRaisesRegex(RuntimeError, "requires the compiled CUDA"):
+            with self.assertRaisesRegex(CustomOpUnavailableError, "requires the compiled CUDA"):
                 detection_ops.star_detect_full_connected_components(
                     image, mask, 1.0)
 
@@ -348,7 +349,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         with mock.patch.object(
                 star_detection,
                 "_detect_star_points_full_gpu",
-                side_effect=RuntimeError("mock CUDA unavailable")) as full_gpu:
+                side_effect=CustomOpUnavailableError("mock CUDA unavailable")) as full_gpu:
             with mock.patch.object(
                     star_detection,
                     "_detect_star_points_opencv",
@@ -377,6 +378,20 @@ class TestStarDetectCustomOps(unittest.TestCase):
             min_star_points=0,
         )
         self.assertIs(got, expected)
+
+    def test_detect_star_points_gpu_kernel_error_propagates(self) -> None:
+        image = np.zeros((16, 16), dtype=np.float64)
+
+        with mock.patch.object(
+                star_detection,
+                "_detect_star_points_full_gpu",
+                side_effect=RuntimeError("kernel bug")):
+            with mock.patch.object(
+                    star_detection,
+                    "_detect_star_points_opencv",
+                    side_effect=AssertionError("opencv fallback should not be called")):
+                with self.assertRaisesRegex(RuntimeError, "kernel bug"):
+                    star_detection.detect_star_points(image, min_star_points=0)
 
     def test_opencv_prepared_detector_uses_cpu_bandpass_helper(self) -> None:
         img_blr = np.zeros((32, 32), dtype=np.float64)

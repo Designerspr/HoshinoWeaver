@@ -14,6 +14,10 @@ from loguru import logger
 from hoshicore._custom_op import thread_tuning
 
 
+class CustomOpUnavailableError(RuntimeError):
+    """Raised when a native backend is unavailable and production may fallback."""
+
+
 def debug_enabled() -> bool:
     return os.environ.get("HNW_CUSTOM_OPS_DEBUG", "0") not in {"", "0", "false", "False"}
 
@@ -40,15 +44,10 @@ def is_cuda_runtime_unavailable_error(exc: RuntimeError) -> bool:
         or "cuda initialization error" in message
         or "cudaunknown" in message
         or "cuda unknown" in message
-        or "invalid device" in message
         or "device is busy" in message
         or "device unavailable" in message
         or "no kernel image is available" in message
         or "no binary for gpu" in message
-        or "out of memory" in message
-        or "memory allocation" in message
-        or "cudamalloc" in message
-        or "cudamallochost" in message
     )
 
 

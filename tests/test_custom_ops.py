@@ -93,6 +93,20 @@ def _make_alignment_match_inputs(seed: int = 0, n_points: int = 96):
     return vec, vec2, vol, vol2, pts, pts2
 
 
+class TestCustomOpDispatchHelpers(unittest.TestCase):
+    def test_cuda_runtime_unavailable_classifier_does_not_hide_resource_errors(self) -> None:
+        self.assertFalse(is_cuda_runtime_unavailable_error(
+            RuntimeError("kernel cudaMalloc input: out of memory")))
+        self.assertFalse(is_cuda_runtime_unavailable_error(
+            RuntimeError("kernel cudaMallocHost input: memory allocation failed")))
+        self.assertFalse(is_cuda_runtime_unavailable_error(
+            RuntimeError("kernel launch failed: invalid device pointer")))
+        self.assertTrue(is_cuda_runtime_unavailable_error(
+            RuntimeError("cudaGetDevice: no CUDA-capable device is detected")))
+        self.assertTrue(is_cuda_runtime_unavailable_error(
+            RuntimeError("kernel launch: no kernel image is available for execution on the device")))
+
+
 class TestCustomOpsFallback(unittest.TestCase):
     def tearDown(self) -> None:
         filter_ops._load_compiled_module_result.cache_clear()
@@ -2500,10 +2514,11 @@ class TestCustomOpsFallback(unittest.TestCase):
                     side_effect=RuntimeError(
                         "sigma_clip_fused_chunk_cuda cudaGetDevice: no CUDA-capable device is detected")):
                 sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+                cpu_fallback = mock.Mock(return_value=expected)
                 with mock.patch.object(
                         sigma_clip_chunk_ops,
-                        "sigma_clip_fused_chunk_compiled",
-                        return_value=expected) as cpu_fallback:
+                        "_select_sigma_clip_fused_chunk_cpu_fallback",
+                        return_value=cpu_fallback):
                     got = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
         sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
 
@@ -2572,8 +2587,8 @@ class TestCustomOpsFallback(unittest.TestCase):
                 sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
                 with mock.patch.object(
                         sigma_clip_chunk_ops,
-                        "sigma_clip_fused_chunk_compiled",
-                        side_effect=RuntimeError("compiled CPU backend is unavailable")):
+                        "_select_sigma_clip_fused_chunk_cpu_fallback",
+                        return_value=None):
                     got = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
         sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
 
@@ -2606,15 +2621,55 @@ class TestCustomOpsFallback(unittest.TestCase):
                     side_effect=RuntimeError(
                         "sigma_clip_fused_chunk_cuda cudaGetDevice: no CUDA-capable device is detected")):
                 sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+                cpu_fallback = mock.Mock(side_effect=ValueError("bad CPU fallback input"))
                 with mock.patch.object(
                         sigma_clip_chunk_ops,
-                        "sigma_clip_fused_chunk_compiled",
-                        side_effect=ValueError("bad CPU fallback input")):
+                        "_select_sigma_clip_fused_chunk_cpu_fallback",
+                        return_value=cpu_fallback):
                     with mock.patch.object(
                             sigma_clip_chunk_ops,
                             "sigma_clip_fused_chunk_numpy",
                             side_effect=AssertionError("numpy backend should not be called")):
                         with self.assertRaisesRegex(ValueError, "bad CPU fallback input"):
+                            sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
+        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+
+    def test_sigma_clip_fused_chunk_cuda_fallback_propagates_cpu_runtime_error(self) -> None:
+        """CUDA runtime fallback does not hide CPU kernel RuntimeError failures."""
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        cuda_candidate = backend_registry.BackendCandidate(
+            "sigma_clip_fused_chunk",
+            "cuda_host_io",
+            "sigma_clip_fused_chunk_cuda",
+            priority=10,
+            build_flag="cuda",
+        )
+        cuda_selection = backend_registry.BackendSelection(
+            cuda_candidate,
+            mock.Mock(),
+        )
+
+        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+        with mock.patch.object(
+                sigma_clip_chunk_ops,
+                "_select_backend",
+                return_value=cuda_selection):
+            with mock.patch.object(
+                    sigma_clip_chunk_ops,
+                    "sigma_clip_fused_chunk_compiled_cuda",
+                    side_effect=RuntimeError(
+                        "sigma_clip_fused_chunk_cuda cudaGetDevice: no CUDA-capable device is detected")):
+                sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+                cpu_fallback = mock.Mock(side_effect=RuntimeError("native CPU bug"))
+                with mock.patch.object(
+                        sigma_clip_chunk_ops,
+                        "_select_sigma_clip_fused_chunk_cpu_fallback",
+                        return_value=cpu_fallback):
+                    with mock.patch.object(
+                            sigma_clip_chunk_ops,
+                            "sigma_clip_fused_chunk_numpy",
+                            side_effect=AssertionError("numpy backend should not be called")):
+                        with self.assertRaisesRegex(RuntimeError, "native CPU bug"):
                             sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
         sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
 

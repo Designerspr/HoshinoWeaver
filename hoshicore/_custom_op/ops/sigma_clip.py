@@ -77,13 +77,20 @@ def sigma_clip_iterative_chunk_numpy(
     mask: np.ndarray | None = None,
     skip_zero_rgb: bool = False,
     channels: int = 1,
+    *,
+    _stack_f64: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Numpy fallback: per-pixel iterative sigma clip on a chunk."""
     stack, total_sum, total_sq, total_n, mask = _validate_inputs(
         stack, total_sum, total_sq, total_n, mask)
 
     n_frames, plane_size = stack.shape
-    stack_f64 = stack.astype(np.float64)
+    stack_f64 = _stack_f64
+    if stack_f64 is None:
+        stack_f64 = stack.astype(np.float64)
+    elif stack_f64.shape != stack.shape or stack_f64.dtype != np.float64:
+        raise ValueError(
+            "sigma_clip_iterative_chunk: _stack_f64 must be float64 with stack shape")
 
     # Build zero-pixel mask for skip_zero_rgb (flattened data needs explicit channels)
     zero_frame_mask = None
@@ -285,7 +292,7 @@ def sigma_clip_fused_chunk_numpy(
 
     return sigma_clip_iterative_chunk_numpy(
         stack, total_sum, total_sq, total_n, rej_high, rej_low, max_iter, mask,
-        skip_zero_rgb, channels)
+        skip_zero_rgb, channels, _stack_f64=stack_f64)
 
 
 def _validate_fused_inputs(
@@ -372,6 +379,25 @@ def _select_sigma_clip_fused_chunk_backend(
     return "numpy", sigma_clip_fused_chunk_numpy
 
 
+def _select_sigma_clip_fused_chunk_cpu_fallback(
+) -> Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]] | None:
+    selection = _select_backend(
+        "sigma_clip_fused_chunk",
+        _fallback_preference(),
+        load_module=_load_compiled_module_result,
+        build_info={"cuda": False},
+    )
+    if (
+        selection.native
+        and selection.candidate is not None
+        and selection.candidate.kernel_name == "sigma_clip_fused_chunk"
+    ):
+        return sigma_clip_fused_chunk_compiled
+    if selection.reason:
+        _debug_log(f"compiled CPU backend unavailable after CUDA fallback, reason: {selection.reason}")
+    return None
+
+
 def sigma_clip_fused_chunk(
     stack: np.ndarray,
     rej_high: float = 3.0,
@@ -411,15 +437,11 @@ def sigma_clip_fused_chunk(
         _debug_log(
             f"compiled CUDA backend unavailable at runtime, falling back to CPU: {exc}"
         )
-        try:
-            return sigma_clip_fused_chunk_compiled(
+        cpu_backend = _select_sigma_clip_fused_chunk_cpu_fallback()
+        if cpu_backend is not None:
+            return cpu_backend(
                 stack, rej_high, rej_low, max_iter, mask,
                 skip_zero_rgb, channels)
-        except RuntimeError as cpu_exc:
-            _debug_log(
-                f"compiled CPU backend unavailable after CUDA fallback, "
-                f"falling back to numpy: {cpu_exc}"
-            )
-            return sigma_clip_fused_chunk_numpy(
-                stack, rej_high, rej_low, max_iter, mask,
-                skip_zero_rgb, channels)
+        return sigma_clip_fused_chunk_numpy(
+            stack, rej_high, rej_low, max_iter, mask,
+            skip_zero_rgb, channels)

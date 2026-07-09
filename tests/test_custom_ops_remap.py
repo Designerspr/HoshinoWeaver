@@ -537,11 +537,50 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                     "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
             with mock.patch.object(
                     remap_ops,
-                    "camera_model_remap_cpu_compiled",
-                    side_effect=RuntimeError("compiled CPU remap unavailable")):
+                    "_camera_model_remap_cpu_fallback_available",
+                    return_value=False):
                 got = camera_model_remap(**kwargs)
 
         np.testing.assert_array_equal(got, expected)
+
+    def test_camera_model_remap_cuda_fallback_propagates_cpu_runtime_error(
+            self) -> None:
+        image = np.arange(18, dtype=np.uint8).reshape(3, 3, 2)
+        rotation = np.eye(3, dtype=np.float32)
+        kwargs = {
+            "image": image,
+            "out_height": 2,
+            "out_width": 2,
+            "fx_src": 6.0,
+            "fy_src": 6.0,
+            "cx_src": 1.0,
+            "cy_src": 1.0,
+            "fx_dst": 5.0,
+            "fy_dst": 5.0,
+            "cx_dst": 1.0,
+            "cy_dst": 1.0,
+            "rotation_dst_to_src": rotation,
+        }
+
+        with mock.patch.object(
+                remap_ops,
+                "_select_camera_model_remap_backend",
+                return_value=("cuda", mock.Mock(side_effect=RuntimeError(
+                    "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
+            with mock.patch.object(
+                    remap_ops,
+                    "_camera_model_remap_cpu_fallback_available",
+                    return_value=True):
+                with mock.patch.object(
+                        remap_ops,
+                        "camera_model_remap_cpu_compiled",
+                        side_effect=RuntimeError("native CPU remap bug")):
+                    with mock.patch.object(
+                            remap_ops,
+                            "camera_model_remap_numpy",
+                            side_effect=AssertionError("numpy fallback should not be called")):
+                        with self.assertRaisesRegex(RuntimeError, "native CPU remap bug"):
+                            camera_model_remap(**kwargs)
 
     def test_camera_model_remap_falls_back_for_unsupported_cuda_device(self) -> None:
         image = np.arange(18, dtype=np.uint8).reshape(3, 3, 2)
@@ -560,18 +599,27 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
             "cy_dst": 1.0,
             "rotation_dst_to_src": rotation,
         }
-        expected = remap_ops.camera_model_remap_numpy(**kwargs)
+        expected = np.full((2, 2, 2), 9, dtype=np.uint8)
 
         with mock.patch.object(
                 remap_ops,
                 "_select_camera_model_remap_backend",
-                return_value=("compiled", mock.Mock(side_effect=RuntimeError(
+                return_value=("cuda", mock.Mock(side_effect=RuntimeError(
                     "camera_model_remap kernel launch: no kernel image is available for execution on the device")))):
-            got = camera_model_remap(**kwargs)
+            with mock.patch.object(
+                    remap_ops,
+                    "_camera_model_remap_cpu_fallback_available",
+                    return_value=True):
+                with mock.patch.object(
+                        remap_ops,
+                        "camera_model_remap_cpu_compiled",
+                        return_value=expected) as cpu_fallback:
+                    got = camera_model_remap(**kwargs)
 
         np.testing.assert_array_equal(got, expected)
+        cpu_fallback.assert_called_once()
 
-    def test_camera_model_remap_falls_back_for_cuda_allocation_failure(self) -> None:
+    def test_camera_model_remap_raises_for_cuda_allocation_failure(self) -> None:
         image = np.arange(18, dtype=np.uint8).reshape(3, 3, 2)
         rotation = np.eye(3, dtype=np.float32)
         kwargs = {
@@ -588,16 +636,13 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
             "cy_dst": 1.0,
             "rotation_dst_to_src": rotation,
         }
-        expected = remap_ops.camera_model_remap_numpy(**kwargs)
-
         with mock.patch.object(
                 remap_ops,
                 "_select_camera_model_remap_backend",
-                return_value=("compiled", mock.Mock(side_effect=RuntimeError(
+                return_value=("cuda", mock.Mock(side_effect=RuntimeError(
                     "camera_model_remap cudaMallocHost(image): out of memory")))):
-            got = camera_model_remap(**kwargs)
-
-        np.testing.assert_array_equal(got, expected)
+            with self.assertRaisesRegex(RuntimeError, "out of memory"):
+                camera_model_remap(**kwargs)
 
     def test_project_image_from_camera_routes_zero_distortion_through_custom_fused(self) -> None:
         img = np.arange(16, dtype=np.uint8).reshape(4, 4)
