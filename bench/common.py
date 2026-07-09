@@ -222,6 +222,13 @@ def render_terminal_summary(report: dict[str, Any], output_json: str | None) -> 
         payload = results.get(case_name, {})
         if not isinstance(payload, dict):
             continue
+        if payload.get("skipped"):
+            reason = payload.get("reason")
+            summary = f"{case_name}: skipped"
+            if isinstance(reason, str) and reason:
+                summary += f" ({reason})"
+            lines.append(summary)
+            continue
         mean_sec = payload.get("mean_sec")
         min_sec = payload.get("min_sec")
         max_sec = payload.get("max_sec")

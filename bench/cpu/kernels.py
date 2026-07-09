@@ -45,6 +45,7 @@ from bench.common import (
     run_benchmark,
 )
 from hoshicore._custom_op import build_info as custom_ops_build_info
+from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 import hoshicore._custom_op.ops.alignment as alignment_ops
 import hoshicore._custom_op.ops.calibration as calibration_ops
 import hoshicore._custom_op.ops.detection as detection_ops
@@ -180,6 +181,26 @@ CASE_NAMES = [
 ]
 DEFAULT_CASES = CASE_NAMES
 SUITE_ID = "cpu.kernels"
+
+
+def _is_backend_unavailable_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return (
+        is_cuda_runtime_unavailable_error(exc)
+        or "compiled custom op backend is unavailable" in message
+        or "compiled cuda custom op backend is unavailable" in message
+        or "compiled backend missing kernel" in message
+        or "requires the compiled" in message
+    )
+
+
+def _run_case(func, *, warmup: int, repeat: int) -> dict[str, Any]:
+    try:
+        return run_benchmark(func, warmup=warmup, repeat=repeat)
+    except RuntimeError as exc:
+        if not _is_backend_unavailable_error(exc):
+            raise
+        return {"skipped": True, "reason": str(exc)}
 
 
 def parse_cases(raw: str | None) -> list[str] | None:
@@ -1036,7 +1057,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             ),
         }
         cases = {
-            case_name: run_benchmark(
+            case_name: _run_case(
                 registry[case_name],
                 warmup=args.warmup,
                 repeat=args.repeat,
@@ -1068,12 +1089,134 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         return report
 
     weights = make_weights(frame_count)
-    spatial_mask = build_spatial_mask(frames[0], args.mask_density)
-    fgp_partials = build_fgp_partials(frames)
-    threshold_frames, threshold_mean_img, threshold_std_img = build_threshold_max_stats(frames)
-    median_chunk_stacks = build_median_chunk_stacks(frames, args.chunk_rows)
+    spatial_mask = None
+    fgp_partials = None
+    threshold_stats = None
+    median_chunk_stacks = None
     alignment_inputs = None
     alignment_features = None
+    wavelet_input = None
+    cc_candidate_input = None
+    sc_chunk_stack = None
+    calibration_subtract_ref = None
+    calibration_divide_ref = None
+    equalize_noise_payloads = None
+    noise_param_payloads = None
+    noise_fill_payloads = None
+    star_shrink_payloads = None
+    sigma_stats = None
+    huber_refs = None
+    sigma_bounds = None
+
+    def get_spatial_mask():
+        nonlocal spatial_mask
+        if spatial_mask is None:
+            spatial_mask = build_spatial_mask(frames[0], args.mask_density)
+        return spatial_mask
+
+    def get_fgp_partials():
+        nonlocal fgp_partials
+        if fgp_partials is None:
+            fgp_partials = build_fgp_partials(frames)
+        return fgp_partials
+
+    def get_threshold_stats():
+        nonlocal threshold_stats
+        if threshold_stats is None:
+            threshold_stats = build_threshold_max_stats(frames)
+        return threshold_stats
+
+    def get_median_chunk_stacks():
+        nonlocal median_chunk_stacks
+        if median_chunk_stacks is None:
+            median_chunk_stacks = build_median_chunk_stacks(frames, args.chunk_rows)
+        return median_chunk_stacks
+
+    def get_wavelet_input():
+        nonlocal wavelet_input
+        if wavelet_input is None:
+            wavelet_input = build_wavelet_input(frames[0])
+        return wavelet_input
+
+    def get_cc_candidate_input():
+        nonlocal cc_candidate_input
+        if cc_candidate_input is None:
+            cc_candidate_input = build_cc_candidate_input(
+                args.height,
+                args.width,
+                seed=args.seed,
+            )
+        return cc_candidate_input
+
+    def get_sc_chunk_stack():
+        nonlocal sc_chunk_stack
+        if sc_chunk_stack is None:
+            sc_chunk_stack = build_sigma_clip_chunk_stack(frames, args.chunk_rows)
+        return sc_chunk_stack
+
+    def get_calibration_subtract_ref():
+        nonlocal calibration_subtract_ref
+        if calibration_subtract_ref is None:
+            calibration_subtract_ref = (frames[0] // 8).astype(
+                frames[0].dtype, copy=False)
+        return calibration_subtract_ref
+
+    def get_calibration_divide_ref():
+        nonlocal calibration_divide_ref
+        if calibration_divide_ref is None:
+            calibration_divide_ref = np.maximum(frames[0], 1).astype(
+                frames[0].dtype, copy=False)
+        return calibration_divide_ref
+
+    def get_equalize_noise_payloads():
+        nonlocal equalize_noise_payloads
+        if equalize_noise_payloads is None:
+            equalize_noise_payloads = build_equalize_noise_inputs(frames)
+        return equalize_noise_payloads
+
+    def get_noise_param_payloads():
+        nonlocal noise_param_payloads
+        if noise_param_payloads is None:
+            noise_param_payloads = build_noise_equalization_param_inputs(frames)
+        return noise_param_payloads
+
+    def get_noise_fill_payloads():
+        nonlocal noise_fill_payloads
+        if noise_fill_payloads is None:
+            noise_fill_payloads = build_noise_fill_local_mean_inputs(frames)
+        return noise_fill_payloads
+
+    def get_star_shrink_payloads():
+        nonlocal star_shrink_payloads
+        if star_shrink_payloads is None:
+            star_shrink_payloads = build_star_shrink_process_inputs(frames)
+        return star_shrink_payloads
+
+    def get_sigma_stats():
+        nonlocal sigma_stats
+        if sigma_stats is None:
+            sigma_stats = build_mean_stats(frames, weights, True)
+        return sigma_stats
+
+    def get_huber_refs():
+        nonlocal huber_refs
+        if huber_refs is None:
+            stats = get_sigma_stats()
+            huber_refs = (
+                stats.mu.astype(np.float32),
+                np.sqrt(np.maximum(stats.var, 0)).astype(np.float32),
+            )
+        return huber_refs
+
+    def get_sigma_bounds():
+        nonlocal sigma_bounds
+        if sigma_bounds is None:
+            sigma_bounds = build_sigma_clip_bounds(
+                get_sigma_stats(),
+                rej_high=args.sigma_rej_high,
+                rej_low=args.sigma_rej_low,
+            )
+        return sigma_bounds
 
     def get_alignment_inputs():
         nonlocal alignment_inputs
@@ -1112,29 +1255,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             backend=backend,
         )
 
-    wavelet_input = build_wavelet_input(frames[0])
-    cc_candidate_image, cc_candidate_bw = build_cc_candidate_input(
-        args.height,
-        args.width,
-        seed=args.seed,
-    )
-    sc_chunk_stack, sc_chunk_sum, sc_chunk_sq, sc_chunk_n = build_sigma_clip_chunk_stack(
-        frames, args.chunk_rows)
-    calibration_subtract_ref = (frames[0] // 8).astype(frames[0].dtype, copy=False)
-    calibration_divide_ref = np.maximum(frames[0], 1).astype(frames[0].dtype, copy=False)
-    equalize_noise_payloads = build_equalize_noise_inputs(frames)
-    noise_param_payloads = build_noise_equalization_param_inputs(frames)
-    noise_fill_payloads = build_noise_fill_local_mean_inputs(frames)
-    star_shrink_payloads = build_star_shrink_process_inputs(frames)
-    sigma_stats = build_mean_stats(frames, weights, True)
-    huber_ref_mean = sigma_stats.mu.astype(np.float32)
-    huber_ref_std = np.sqrt(np.maximum(sigma_stats.var, 0)).astype(np.float32)
-    rej_high_img, rej_low_img = build_sigma_clip_bounds(
-        sigma_stats,
-        rej_high=args.sigma_rej_high,
-        rej_low=args.sigma_rej_low,
-    )
-
     registry: dict[str, Any] = {
         "max_combine_int_weight": lambda: bench_max_combine(frames, weights, True),
         "mean_merge_int_weight": lambda: bench_mean_merge(frames, weights, True),
@@ -1142,61 +1262,61 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "max_combine_stream_numpy": lambda: bench_max_combine_stream_backend(frames, backend="numpy"),
         "max_combine_stream_compiled": lambda: bench_max_combine_stream_backend(frames, backend="compiled"),
         "threshold_max_merge_stream_numpy": lambda: bench_threshold_max_merge_stream_backend(
-            threshold_frames,
-            threshold_mean_img,
-            threshold_std_img,
+            get_threshold_stats()[0],
+            get_threshold_stats()[1],
+            get_threshold_stats()[2],
             weights,
             backend="numpy",
         ),
         "threshold_max_merge_stream_compiled": lambda: bench_threshold_max_merge_stream_backend(
-            threshold_frames,
-            threshold_mean_img,
-            threshold_std_img,
+            get_threshold_stats()[0],
+            get_threshold_stats()[1],
+            get_threshold_stats()[2],
             weights,
             backend="compiled",
         ),
         "calibration_subtract_stream_numpy": lambda: bench_calibration_subtract_stream_backend(
             frames,
-            calibration_subtract_ref,
+            get_calibration_subtract_ref(),
             backend="numpy",
         ),
         "calibration_subtract_stream_compiled": lambda: bench_calibration_subtract_stream_backend(
             frames,
-            calibration_subtract_ref,
+            get_calibration_subtract_ref(),
             backend="compiled",
         ),
         "calibration_divide_stream_numpy": lambda: bench_calibration_divide_stream_backend(
             frames,
-            calibration_divide_ref,
+            get_calibration_divide_ref(),
             backend="numpy",
         ),
         "calibration_divide_stream_compiled": lambda: bench_calibration_divide_stream_backend(
             frames,
-            calibration_divide_ref,
+            get_calibration_divide_ref(),
             backend="compiled",
         ),
         "equalize_noise_correct_stream_numpy": lambda: bench_equalize_noise_correct_stream_backend(
-            equalize_noise_payloads,
+            get_equalize_noise_payloads(),
             backend="numpy",
         ),
         "equalize_noise_correct_stream_compiled": lambda: bench_equalize_noise_correct_stream_backend(
-            equalize_noise_payloads,
+            get_equalize_noise_payloads(),
             backend="compiled",
         ),
         "noise_equalization_params_stream_numpy": lambda: bench_noise_equalization_params_stream_backend(
-            noise_param_payloads,
+            get_noise_param_payloads(),
             backend="numpy",
         ),
         "noise_equalization_params_stream_compiled": lambda: bench_noise_equalization_params_stream_backend(
-            noise_param_payloads,
+            get_noise_param_payloads(),
             backend="compiled",
         ),
         "noise_fill_local_mean_stream_numpy": lambda: bench_noise_fill_local_mean_stream_backend(
-            noise_fill_payloads,
+            get_noise_fill_payloads(),
             backend="numpy",
         ),
         "noise_fill_local_mean_stream_compiled": lambda: bench_noise_fill_local_mean_stream_backend(
-            noise_fill_payloads,
+            get_noise_fill_payloads(),
             backend="compiled",
         ),
         "star_shrink_detect_mask_stream_numpy": lambda: bench_star_shrink_detect_mask_stream_backend(
@@ -1208,79 +1328,79 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             backend="compiled",
         ),
         "star_shrink_process_stream_numpy": lambda: bench_star_shrink_process_stream_backend(
-            star_shrink_payloads,
+            get_star_shrink_payloads(),
             backend="numpy",
         ),
         "star_shrink_process_stream_compiled": lambda: bench_star_shrink_process_stream_backend(
-            star_shrink_payloads,
+            get_star_shrink_payloads(),
             backend="compiled",
         ),
         "fgp_accumulate_stream_numpy": lambda: bench_fgp_accumulate_stream_backend(frames, backend="numpy"),
         "fgp_accumulate_stream_compiled": lambda: bench_fgp_accumulate_stream_backend(frames, backend="compiled"),
         "fgp_add_partial_reduce_numpy": lambda: bench_fgp_add_partial_reduce_backend(
-            fgp_partials,
+            get_fgp_partials(),
             backend="numpy",
         ),
         "fgp_add_partial_reduce_compiled": lambda: bench_fgp_add_partial_reduce_backend(
-            fgp_partials,
+            get_fgp_partials(),
             backend="compiled",
         ),
         "huber_weighted_accumulate_stream_numpy": lambda: bench_huber_weighted_accumulate_stream_backend(
             frames,
-            huber_ref_mean,
-            huber_ref_std,
+            get_huber_refs()[0],
+            get_huber_refs()[1],
             backend="numpy",
         ),
         "huber_weighted_accumulate_stream_compiled": lambda: bench_huber_weighted_accumulate_stream_backend(
             frames,
-            huber_ref_mean,
-            huber_ref_std,
+            get_huber_refs()[0],
+            get_huber_refs()[1],
             backend="compiled",
         ),
         "fgp_masked_mean_merge_stream_numpy": lambda: bench_fgp_masked_mean_merge_stream_backend(
             frames,
-            spatial_mask,
+            get_spatial_mask(),
             backend="numpy",
         ),
         "fgp_masked_mean_merge_stream_compiled": lambda: bench_fgp_masked_mean_merge_stream_backend(
             frames,
-            spatial_mask,
+            get_spatial_mask(),
             backend="compiled",
         ),
         "sigma_clip_fused_merge_stream_numpy": lambda: bench_sigma_clip_fused_merge_stream_backend(
             frames,
-            rej_high_img,
-            rej_low_img,
+            get_sigma_bounds()[0],
+            get_sigma_bounds()[1],
             backend="numpy",
         ),
         "sigma_clip_fused_merge_stream_compiled": lambda: bench_sigma_clip_fused_merge_stream_backend(
             frames,
-            rej_high_img,
-            rej_low_img,
+            get_sigma_bounds()[0],
+            get_sigma_bounds()[1],
             backend="compiled",
         ),
         "sigma_clip_fused_masked_merge_stream_numpy": lambda: bench_sigma_clip_fused_masked_merge_stream_backend(
             frames,
-            spatial_mask,
-            rej_high_img,
-            rej_low_img,
+            get_spatial_mask(),
+            get_sigma_bounds()[0],
+            get_sigma_bounds()[1],
             backend="numpy",
         ),
         "sigma_clip_fused_masked_merge_stream_compiled": lambda: bench_sigma_clip_fused_masked_merge_stream_backend(
             frames,
-            spatial_mask,
-            rej_high_img,
-            rej_low_img,
+            get_spatial_mask(),
+            get_sigma_bounds()[0],
+            get_sigma_bounds()[1],
             backend="compiled",
         ),
         "sigma_clip_pass": lambda: bench_sigma_clip_pass(frames, weights, True),
         "huber_pass": lambda: bench_huber_pass(frames, weights, True),
         "median_reduce_chunk_numpy": lambda: bench_median_reduce_chunk_backend(
-            median_chunk_stacks,
+            get_median_chunk_stacks(),
             backend="numpy",
         ),
         "median_reduce_chunk_compiled": lambda: bench_median_reduce_chunk_backend(
-            median_chunk_stacks,
+            get_median_chunk_stacks(),
             backend="compiled",
         ),
         "median_filter_2d_numpy": lambda: bench_median_filter_2d_backend(
@@ -1298,64 +1418,76 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "find_initial_match_numpy": lambda: bench_alignment_match("numpy"),
         "find_initial_match_compiled": lambda: bench_alignment_match("compiled"),
         "wavelet_dec_rec_core_numpy": lambda: bench_wavelet_dec_rec_core_backend(
-            wavelet_input,
+            get_wavelet_input(),
             args.wavelet_level,
             backend="numpy",
         ),
         "wavelet_dec_rec_core_compiled": lambda: bench_wavelet_dec_rec_core_backend(
-            wavelet_input,
+            get_wavelet_input(),
             args.wavelet_level,
             backend="compiled",
         ),
         "wavelet_dec_rec_core_cuda": lambda: bench_wavelet_dec_rec_core_backend(
-            wavelet_input,
+            get_wavelet_input(),
             args.wavelet_level,
             backend="cuda",
         ),
         "wavelet_dec_rec_numpy": lambda: bench_wavelet_dec_rec_backend(
-            wavelet_input,
+            get_wavelet_input(),
             args.wavelet_resize_factor,
             backend="numpy",
         ),
         "wavelet_dec_rec_auto": lambda: bench_wavelet_dec_rec_backend(
-            wavelet_input,
+            get_wavelet_input(),
             args.wavelet_resize_factor,
             backend="auto",
         ),
         "star_detect_connected_components_compiled": lambda: bench_star_detect_connected_components_backend(
-            cc_candidate_image,
-            cc_candidate_bw,
+            get_cc_candidate_input()[0],
+            get_cc_candidate_input()[1],
         ),
         "sigma_clip_chunk_numpy": lambda: bench_sigma_clip_chunk_backend(
-            sc_chunk_stack, sc_chunk_sum, sc_chunk_sq, sc_chunk_n,
+            get_sc_chunk_stack()[0],
+            get_sc_chunk_stack()[1],
+            get_sc_chunk_stack()[2],
+            get_sc_chunk_stack()[3],
             backend="numpy",
         ),
         "sigma_clip_chunk_compiled": lambda: bench_sigma_clip_chunk_backend(
-            sc_chunk_stack, sc_chunk_sum, sc_chunk_sq, sc_chunk_n,
+            get_sc_chunk_stack()[0],
+            get_sc_chunk_stack()[1],
+            get_sc_chunk_stack()[2],
+            get_sc_chunk_stack()[3],
             backend="compiled",
         ),
         "sigma_clip_iterative_chunk_numpy": lambda: bench_sigma_clip_chunk_backend(
-            sc_chunk_stack, sc_chunk_sum, sc_chunk_sq, sc_chunk_n,
+            get_sc_chunk_stack()[0],
+            get_sc_chunk_stack()[1],
+            get_sc_chunk_stack()[2],
+            get_sc_chunk_stack()[3],
             backend="numpy",
         ),
         "sigma_clip_iterative_chunk_compiled": lambda: bench_sigma_clip_chunk_backend(
-            sc_chunk_stack, sc_chunk_sum, sc_chunk_sq, sc_chunk_n,
+            get_sc_chunk_stack()[0],
+            get_sc_chunk_stack()[1],
+            get_sc_chunk_stack()[2],
+            get_sc_chunk_stack()[3],
             backend="compiled",
         ),
         "sigma_clip_chunk_full_numpy": lambda: bench_sigma_clip_chunk_full_backend(
-            sc_chunk_stack,
+            get_sc_chunk_stack()[0],
             backend="numpy",
         ),
         "sigma_clip_chunk_full_compiled": lambda: bench_sigma_clip_chunk_full_backend(
-            sc_chunk_stack,
+            get_sc_chunk_stack()[0],
             backend="compiled",
         ),
         "sigma_clip_fused_chunk_numpy": lambda: bench_sigma_clip_fused_chunk_backend(
-            sc_chunk_stack,
+            get_sc_chunk_stack()[0],
             backend="numpy",
         ),
         "sigma_clip_fused_chunk_compiled": lambda: bench_sigma_clip_fused_chunk_backend(
-            sc_chunk_stack,
+            get_sc_chunk_stack()[0],
             backend="compiled",
         ),
     }
@@ -1366,15 +1498,19 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     cases: dict[str, dict[str, Any]] = {}
     for case_name in selected_cases:
-        cases[case_name] = run_benchmark(
+        cases[case_name] = _run_case(
             registry[case_name],
             warmup=args.warmup,
             repeat=args.repeat,
         )
+    median_chunk_count = (
+        (frames[0].shape[0] + args.chunk_rows - 1) // args.chunk_rows
+        if args.chunk_rows > 0 else 0
+    )
     annotate_case_units(cases, kernel_case_units(
         selected_cases,
         frame_count=frame_count,
-        median_chunk_count=len(median_chunk_stacks),
+        median_chunk_count=median_chunk_count,
     ))
 
     report = {

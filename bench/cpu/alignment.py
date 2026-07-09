@@ -603,9 +603,17 @@ def bench_features_stream(frames: list[np.ndarray]) -> None:
 
 
 def precompute_geometries(frames: list[np.ndarray]):
-    ref = make_geometry(frames[0])
-    rest = [make_geometry(frame) for frame in frames[1:]]
+    ref = _make_geometry_eager(frames[0])
+    rest = [_make_geometry_eager(frame) for frame in frames[1:]]
     return ref, rest
+
+
+def _make_geometry_eager(frame: np.ndarray):
+    geo = make_geometry(frame)
+    _ = len(geo.positions)
+    _ = len(geo.volumes)
+    _ = geo.unit_vectors.shape
+    return geo
 
 
 def build_synthetic_camera(frame: np.ndarray) -> CameraModel:
@@ -620,8 +628,7 @@ def build_synthetic_camera(frame: np.ndarray) -> CameraModel:
     return CameraModel(intrinsics=intrinsics, distortion=Distortion())
 
 
-def bench_match_stream(frames: list[np.ndarray]) -> None:
-    ref_geo, src_geos = precompute_geometries(frames)
+def bench_match_stream_geometries(ref_geo, src_geos) -> None:
     for src_geo in src_geos:
         _ = match_star_pairs(
             ref_geo.unit_vectors,
@@ -633,9 +640,13 @@ def bench_match_stream(frames: list[np.ndarray]) -> None:
         )
 
 
-def bench_warp_stream(frames: list[np.ndarray]) -> None:
-    ref_arr = frames[0]
+def bench_match_stream(frames: list[np.ndarray]) -> None:
     ref_geo, src_geos = precompute_geometries(frames)
+    bench_match_stream_geometries(ref_geo, src_geos)
+
+
+def bench_warp_stream_geometries(frames: list[np.ndarray], ref_geo, src_geos) -> None:
+    ref_arr = frames[0]
     h, w = ref_arr.shape[:2]
     for frame, src_geo in zip(frames[1:], src_geos):
         match = match_star_pairs(
@@ -650,12 +661,15 @@ def bench_warp_stream(frames: list[np.ndarray]) -> None:
         _ = cv2.warpPerspective(frame, H, (w, h))
 
 
-def bench_optimization_stream(frames: list[np.ndarray]) -> None:
+def bench_warp_stream(frames: list[np.ndarray]) -> None:
+    ref_geo, src_geos = precompute_geometries(frames)
+    bench_warp_stream_geometries(frames, ref_geo, src_geos)
+
+
+def bench_optimization_stream_geometries(frames: list[np.ndarray], ref_geo, src_geos) -> None:
     ref_arr = frames[0]
-    ref_geo = make_geometry(ref_arr)
     ref_camera = build_synthetic_camera(ref_arr)
-    for frame in frames[1:]:
-        src_geo = make_geometry(frame)
+    for frame, src_geo in zip(frames[1:], src_geos):
         src_camera = build_synthetic_camera(frame)
         match = match_star_pairs(
             ref_geo.unit_vectors,
@@ -671,6 +685,11 @@ def bench_optimization_stream(frames: list[np.ndarray]) -> None:
             src_camera,
             same_camera=True,
         )
+
+
+def bench_optimization_stream(frames: list[np.ndarray]) -> None:
+    ref_geo, src_geos = precompute_geometries(frames)
+    bench_optimization_stream_geometries(frames, ref_geo, src_geos)
 
 
 def bench_homography_pipeline(frames: list[np.ndarray]) -> None:
@@ -827,6 +846,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if "remap_stream" in benchmark_case_names:
         remap_payloads = _prepare_remap_payloads(frames)
 
+    stream_geometry = None
+    if any(case in benchmark_case_names for case in (
+            "match_stream",
+            "warp_stream",
+            "optimization_stream",
+    )):
+        stream_geometry = precompute_geometries(frames)
+
     runners: dict[str, Any] = {
         "detect_stream": lambda: bench_detect_stream(frames),
         "detect_opencv_stream": lambda: bench_detect_opencv_stream(frames),
@@ -849,10 +876,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             contour_payloads),
         "features_stream": lambda: bench_features_stream(frames),
         "geometry_stream": lambda: bench_geometry_stream(frames),
-        "match_stream": lambda: bench_match_stream(frames),
-        "warp_stream": lambda: bench_warp_stream(frames),
+        "match_stream": lambda: bench_match_stream_geometries(
+            stream_geometry[0], stream_geometry[1]),
+        "warp_stream": lambda: bench_warp_stream_geometries(
+            frames, stream_geometry[0], stream_geometry[1]),
         "homography_pipeline": lambda: bench_homography_pipeline(frames),
-        "optimization_stream": lambda: bench_optimization_stream(frames),
+        "optimization_stream": lambda: bench_optimization_stream_geometries(
+            frames, stream_geometry[0], stream_geometry[1]),
         "remap_stream": lambda: bench_remap_stream(remap_payloads),
         "camera_model_pipeline": lambda: bench_camera_model_pipeline(frames),
     }
