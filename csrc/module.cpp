@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 
 #include "common/backend_info.h"
+#include "common/cuda_error.h"
 #include "ops/cpu/alignment/alignment_ops.h"
 #include "ops/cpu/calibration/calibration_ops.h"
 #include "ops/cpu/detection/detection_ops.h"
@@ -27,6 +28,9 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(_C, m) {
     m.doc() = "Optional C++ ops for HoshinoWeaver";
+
+    py::register_exception<hnw::CudaRuntimeUnavailableError>(
+        m, "CudaRuntimeUnavailableError", PyExc_RuntimeError);
 
     bind_backend_info(m);
     bind_alignment_ops(m);

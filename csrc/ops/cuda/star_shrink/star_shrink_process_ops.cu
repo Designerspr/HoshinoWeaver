@@ -1,4 +1,5 @@
 #include "common/compat.h"
+#include "common/cuda_host_io_workspace.cuh"
 
 #include <cuda_runtime.h>
 
@@ -11,168 +12,6 @@
 namespace {
 
 constexpr int THREADS_PER_BLOCK = 256;
-
-struct StarShrinkCudaHostIoCache {
-    void* image = nullptr;
-    uint8_t* mask = nullptr;
-    void* output = nullptr;
-    float* luma = nullptr;
-    float* luma_tmp = nullptr;
-    float* lab_a = nullptr;
-    float* lab_b = nullptr;
-    float* shrunk = nullptr;
-    float* blur_tmp = nullptr;
-    float* blurred = nullptr;
-    cudaStream_t stream = nullptr;
-    size_t image_capacity = 0;
-    size_t mask_capacity = 0;
-    size_t output_capacity = 0;
-    size_t luma_capacity = 0;
-    size_t luma_tmp_capacity = 0;
-    size_t lab_a_capacity = 0;
-    size_t lab_b_capacity = 0;
-    size_t shrunk_capacity = 0;
-    size_t blur_tmp_capacity = 0;
-    size_t blurred_capacity = 0;
-    int device = -1;
-
-    ~StarShrinkCudaHostIoCache() {
-        int current_device = -1;
-        const cudaError_t get_device_error = cudaGetDevice(&current_device);
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(device);
-        }
-        cudaFree(image);
-        cudaFree(mask);
-        cudaFree(output);
-        cudaFree(luma);
-        cudaFree(luma_tmp);
-        cudaFree(lab_a);
-        cudaFree(lab_b);
-        cudaFree(shrunk);
-        cudaFree(blur_tmp);
-        cudaFree(blurred);
-        if (stream != nullptr) {
-            cudaStreamDestroy(stream);
-        }
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(current_device);
-        }
-    }
-};
-
-thread_local StarShrinkCudaHostIoCache star_shrink_cache;
-
-void throw_if_cuda_failed(const cudaError_t error, const char* context) {
-    if (error != cudaSuccess) {
-        throw std::runtime_error(
-            std::string(context) + ": " + cudaGetErrorString(error));
-    }
-}
-
-void ensure_device_buffer(void** ptr,
-                          size_t* capacity,
-                          const size_t required_bytes,
-                          const char* context) {
-    if (required_bytes <= *capacity) {
-        return;
-    }
-    if (*ptr != nullptr) {
-        cudaFree(*ptr);
-        *ptr = nullptr;
-        *capacity = 0;
-    }
-    void* new_ptr = nullptr;
-    throw_if_cuda_failed(cudaMalloc(&new_ptr, required_bytes), context);
-    *ptr = new_ptr;
-    *capacity = required_bytes;
-}
-
-void ensure_float_buffer(float** ptr,
-                         size_t* capacity,
-                         const size_t required_bytes,
-                         const char* context) {
-    void* raw_ptr = static_cast<void*>(*ptr);
-    ensure_device_buffer(&raw_ptr, capacity, required_bytes, context);
-    *ptr = static_cast<float*>(raw_ptr);
-}
-
-void clear_device_cache(StarShrinkCudaHostIoCache* cache) {
-    cudaFree(cache->image);
-    cudaFree(cache->mask);
-    cudaFree(cache->output);
-    cudaFree(cache->luma);
-    cudaFree(cache->luma_tmp);
-    cudaFree(cache->lab_a);
-    cudaFree(cache->lab_b);
-    cudaFree(cache->shrunk);
-    cudaFree(cache->blur_tmp);
-    cudaFree(cache->blurred);
-    cache->image = nullptr;
-    cache->mask = nullptr;
-    cache->output = nullptr;
-    cache->luma = nullptr;
-    cache->luma_tmp = nullptr;
-    cache->lab_a = nullptr;
-    cache->lab_b = nullptr;
-    cache->shrunk = nullptr;
-    cache->blur_tmp = nullptr;
-    cache->blurred = nullptr;
-    cache->image_capacity = 0;
-    cache->mask_capacity = 0;
-    cache->output_capacity = 0;
-    cache->luma_capacity = 0;
-    cache->luma_tmp_capacity = 0;
-    cache->lab_a_capacity = 0;
-    cache->lab_b_capacity = 0;
-    cache->shrunk_capacity = 0;
-    cache->blur_tmp_capacity = 0;
-    cache->blurred_capacity = 0;
-}
-
-void clear_cuda_host_io_cache(StarShrinkCudaHostIoCache* cache) {
-    clear_device_cache(cache);
-    if (cache->stream != nullptr) {
-        cudaStreamDestroy(cache->stream);
-        cache->stream = nullptr;
-    }
-    cache->device = -1;
-}
-
-void ensure_stream(StarShrinkCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        return;
-    }
-    throw_if_cuda_failed(cudaStreamCreateWithFlags(&cache->stream, cudaStreamNonBlocking),
-                         "star_shrink_process_cuda cudaStreamCreate");
-}
-
-void prepare_cuda_host_io_cache(StarShrinkCudaHostIoCache* cache) {
-    int current_device = -1;
-    throw_if_cuda_failed(cudaGetDevice(&current_device),
-                         "star_shrink_process_cuda cudaGetDevice");
-    if (cache->device == current_device) {
-        ensure_stream(cache);
-        return;
-    }
-    if (cache->device >= 0) {
-        const int restore_device = current_device;
-        throw_if_cuda_failed(cudaSetDevice(cache->device),
-                             "star_shrink_process_cuda cudaSetDevice(old)");
-        clear_cuda_host_io_cache(cache);
-        throw_if_cuda_failed(cudaSetDevice(restore_device),
-                             "star_shrink_process_cuda cudaSetDevice(restore)");
-    }
-    cache->device = current_device;
-    ensure_stream(cache);
-}
-
-void reset_cuda_host_io_cache_after_error(StarShrinkCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        cudaStreamSynchronize(cache->stream);
-    }
-    clear_cuda_host_io_cache(cache);
-}
 
 template <typename T>
 __device__ inline float dtype_max_value() {
@@ -451,9 +290,9 @@ void launch_star_shrink_process_cuda_impl(const T* image_host,
                                           const int shrink_times,
                                           const float shrink_ratio,
                                           const int deringing_ksize) {
-    auto* cache = &star_shrink_cache;
+    auto workspace = hnw::cuda::acquire_host_io_workspace(
+        "star_shrink_process_cuda cudaGetDevice");
     try {
-        prepare_cuda_host_io_cache(cache);
         const int64_t plane_size = static_cast<int64_t>(height) * width;
         const int64_t total = plane_size * channels;
         const size_t image_bytes = static_cast<size_t>(total) * sizeof(T);
@@ -461,52 +300,39 @@ void launch_star_shrink_process_cuda_impl(const T* image_host,
         const size_t plane_float_bytes = static_cast<size_t>(plane_size) * sizeof(float);
         const size_t total_float_bytes = static_cast<size_t>(total) * sizeof(float);
 
-        ensure_device_buffer(
-            &cache->image, &cache->image_capacity, image_bytes, "star_shrink cudaMalloc image");
-        ensure_device_buffer(
-            &cache->output, &cache->output_capacity, image_bytes, "star_shrink cudaMalloc output");
-        void* mask_raw = static_cast<void*>(cache->mask);
-        ensure_device_buffer(
-            &mask_raw, &cache->mask_capacity, mask_bytes, "star_shrink cudaMalloc mask");
-        cache->mask = static_cast<uint8_t*>(mask_raw);
-        ensure_float_buffer(
-            &cache->luma, &cache->luma_capacity, plane_float_bytes, "star_shrink cudaMalloc luma");
-        ensure_float_buffer(&cache->luma_tmp,
-                            &cache->luma_tmp_capacity,
-                            plane_float_bytes,
-                            "star_shrink cudaMalloc luma_tmp");
-        ensure_float_buffer(&cache->lab_a,
-                            &cache->lab_a_capacity,
-                            plane_float_bytes,
-                            "star_shrink cudaMalloc lab_a");
-        ensure_float_buffer(&cache->lab_b,
-                            &cache->lab_b_capacity,
-                            plane_float_bytes,
-                            "star_shrink cudaMalloc lab_b");
-        ensure_float_buffer(&cache->shrunk,
-                            &cache->shrunk_capacity,
-                            total_float_bytes,
-                            "star_shrink cudaMalloc shrunk");
-        ensure_float_buffer(&cache->blur_tmp,
-                            &cache->blur_tmp_capacity,
-                            total_float_bytes,
-                            "star_shrink cudaMalloc blur_tmp");
-        ensure_float_buffer(&cache->blurred,
-                            &cache->blurred_capacity,
-                            total_float_bytes,
-                            "star_shrink cudaMalloc blurred");
+        void* image_device = workspace.device_buffer(
+            image_bytes, "star_shrink cudaMalloc image");
+        void* output_device = workspace.device_buffer(
+            image_bytes, "star_shrink cudaMalloc output");
+        auto* mask_device = static_cast<uint8_t*>(workspace.device_buffer(
+            mask_bytes, "star_shrink cudaMalloc mask"));
+        auto* luma = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink cudaMalloc luma"));
+        auto* luma_tmp = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink cudaMalloc luma_tmp"));
+        auto* lab_a = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink cudaMalloc lab_a"));
+        auto* lab_b = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink cudaMalloc lab_b"));
+        auto* shrunk = static_cast<float*>(workspace.device_buffer(
+            total_float_bytes, "star_shrink cudaMalloc shrunk"));
+        auto* blur_tmp = static_cast<float*>(workspace.device_buffer(
+            total_float_bytes, "star_shrink cudaMalloc blur_tmp"));
+        auto* blurred = static_cast<float*>(workspace.device_buffer(
+            total_float_bytes, "star_shrink cudaMalloc blurred"));
+        cudaStream_t stream = workspace.stream();
 
-        throw_if_cuda_failed(cudaMemcpyAsync(cache->image,
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(image_device,
                                              image_host,
                                              image_bytes,
                                              cudaMemcpyHostToDevice,
-                                             cache->stream),
+                                             stream),
                              "star_shrink_process_cuda copy image to device");
-        throw_if_cuda_failed(cudaMemcpyAsync(cache->mask,
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(mask_device,
                                              mask_host,
                                              mask_bytes,
                                              cudaMemcpyHostToDevice,
-                                             cache->stream),
+                                             stream),
                              "star_shrink_process_cuda copy mask to device");
 
         const int blocks_plane =
@@ -514,19 +340,19 @@ void launch_star_shrink_process_cuda_impl(const T* image_host,
         const int blocks_total =
             static_cast<int>((total + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
 
-        bgr_to_lab_kernel<T><<<blocks_plane, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            static_cast<const T*>(cache->image),
-            cache->luma,
-            cache->lab_a,
-            cache->lab_b,
+        bgr_to_lab_kernel<T><<<blocks_plane, THREADS_PER_BLOCK, 0, stream>>>(
+            static_cast<const T*>(image_device),
+            luma,
+            lab_a,
+            lab_b,
             plane_size,
             channels);
-        throw_if_cuda_failed(cudaGetLastError(), "star_shrink_process_cuda bgr_to_lab");
+        hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda bgr_to_lab");
 
-        float* current = cache->luma;
-        float* next = cache->luma_tmp;
+        float* current = luma;
+        float* next = luma_tmp;
         for (int iter = 0; iter < shrink_times; ++iter) {
-            erode_luma_kernel<<<blocks_plane, THREADS_PER_BLOCK, 0, cache->stream>>>(
+            erode_luma_kernel<<<blocks_plane, THREADS_PER_BLOCK, 0, stream>>>(
                 current,
                 next,
                 height,
@@ -534,58 +360,58 @@ void launch_star_shrink_process_cuda_impl(const T* image_host,
                 shrink_ksize,
                 shrink_shape,
                 shrink_ratio);
-            throw_if_cuda_failed(cudaGetLastError(), "star_shrink_process_cuda erode_luma");
+            hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda erode_luma");
             float* tmp = current;
             current = next;
             next = tmp;
         }
 
-        lab_to_bgr_kernel<<<blocks_plane, THREADS_PER_BLOCK, 0, cache->stream>>>(
+        lab_to_bgr_kernel<<<blocks_plane, THREADS_PER_BLOCK, 0, stream>>>(
             current,
-            cache->lab_a,
-            cache->lab_b,
-            cache->shrunk,
+            lab_a,
+            lab_b,
+            shrunk,
             plane_size,
             channels);
-        throw_if_cuda_failed(cudaGetLastError(), "star_shrink_process_cuda lab_to_bgr");
+        hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda lab_to_bgr");
 
-        horizontal_blur_kernel<T><<<blocks_total, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            static_cast<const T*>(cache->image),
-            cache->blur_tmp,
+        horizontal_blur_kernel<T><<<blocks_total, THREADS_PER_BLOCK, 0, stream>>>(
+            static_cast<const T*>(image_device),
+            blur_tmp,
             height,
             width,
             channels,
             deringing_ksize);
-        throw_if_cuda_failed(cudaGetLastError(), "star_shrink_process_cuda horizontal_blur");
-        vertical_blur_kernel<<<blocks_total, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            cache->blur_tmp,
-            cache->blurred,
+        hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda horizontal_blur");
+        vertical_blur_kernel<<<blocks_total, THREADS_PER_BLOCK, 0, stream>>>(
+            blur_tmp,
+            blurred,
             height,
             width,
             channels,
             deringing_ksize);
-        throw_if_cuda_failed(cudaGetLastError(), "star_shrink_process_cuda vertical_blur");
+        hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda vertical_blur");
 
-        final_mask_kernel<T><<<blocks_total, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            static_cast<const T*>(cache->image),
-            cache->mask,
-            cache->shrunk,
-            cache->blurred,
-            static_cast<T*>(cache->output),
+        final_mask_kernel<T><<<blocks_total, THREADS_PER_BLOCK, 0, stream>>>(
+            static_cast<const T*>(image_device),
+            mask_device,
+            shrunk,
+            blurred,
+            static_cast<T*>(output_device),
             plane_size,
             channels);
-        throw_if_cuda_failed(cudaGetLastError(), "star_shrink_process_cuda final_mask");
+        hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda final_mask");
 
-        throw_if_cuda_failed(cudaMemcpyAsync(out_host,
-                                             cache->output,
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(out_host,
+                                             output_device,
                                              image_bytes,
                                              cudaMemcpyDeviceToHost,
-                                             cache->stream),
+                                             stream),
                              "star_shrink_process_cuda copy output to host");
-        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream),
+        hnw::cuda::throw_if_failed(cudaStreamSynchronize(stream),
                              "star_shrink_process_cuda synchronize");
     } catch (...) {
-        reset_cuda_host_io_cache_after_error(cache);
+        workspace.reset_after_error();
         throw;
     }
 }

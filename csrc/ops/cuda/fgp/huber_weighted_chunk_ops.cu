@@ -1,4 +1,5 @@
 #include "common/compat.h"
+#include "common/cuda_host_io_workspace.cuh"
 
 #include <cuda_runtime.h>
 
@@ -12,144 +13,6 @@
 namespace {
 
 constexpr int THREADS_PER_BLOCK = 256;
-
-struct HuberChunkCudaHostIoCache {
-    void* stack = nullptr;
-    double* ref_mean = nullptr;
-    double* ref_std = nullptr;
-    double* weights = nullptr;
-    double* weighted_sum = nullptr;
-    double* weight_total = nullptr;
-    cudaStream_t stream = nullptr;
-    size_t stack_capacity = 0;
-    size_t ref_mean_capacity = 0;
-    size_t ref_std_capacity = 0;
-    size_t weights_capacity = 0;
-    size_t weighted_sum_capacity = 0;
-    size_t weight_total_capacity = 0;
-    int device = -1;
-
-    ~HuberChunkCudaHostIoCache() {
-        int current_device = -1;
-        const cudaError_t get_device_error = cudaGetDevice(&current_device);
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(device);
-        }
-        cudaFree(stack);
-        cudaFree(ref_mean);
-        cudaFree(ref_std);
-        cudaFree(weights);
-        cudaFree(weighted_sum);
-        cudaFree(weight_total);
-        if (stream != nullptr) {
-            cudaStreamDestroy(stream);
-        }
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(current_device);
-        }
-    }
-};
-
-thread_local HuberChunkCudaHostIoCache huber_chunk_host_io_cache;
-
-void throw_if_cuda_failed(const cudaError_t error, const char* context) {
-    if (error != cudaSuccess) {
-        throw std::runtime_error(
-            std::string(context) + ": " + cudaGetErrorString(error));
-    }
-}
-
-void ensure_device_buffer(void** ptr,
-                          size_t* capacity,
-                          const size_t required_bytes,
-                          const char* context) {
-    if (required_bytes <= *capacity) {
-        return;
-    }
-    if (*ptr != nullptr) {
-        cudaFree(*ptr);
-        *ptr = nullptr;
-        *capacity = 0;
-    }
-    void* new_ptr = nullptr;
-    throw_if_cuda_failed(cudaMalloc(&new_ptr, required_bytes), context);
-    *ptr = new_ptr;
-    *capacity = required_bytes;
-}
-
-void ensure_double_buffer(double** ptr,
-                          size_t* capacity,
-                          const size_t required_bytes,
-                          const char* context) {
-    void* raw_ptr = static_cast<void*>(*ptr);
-    ensure_device_buffer(&raw_ptr, capacity, required_bytes, context);
-    *ptr = static_cast<double*>(raw_ptr);
-}
-
-void clear_device_cache(HuberChunkCudaHostIoCache* cache) {
-    cudaFree(cache->stack);
-    cudaFree(cache->ref_mean);
-    cudaFree(cache->ref_std);
-    cudaFree(cache->weights);
-    cudaFree(cache->weighted_sum);
-    cudaFree(cache->weight_total);
-    cache->stack = nullptr;
-    cache->ref_mean = nullptr;
-    cache->ref_std = nullptr;
-    cache->weights = nullptr;
-    cache->weighted_sum = nullptr;
-    cache->weight_total = nullptr;
-    cache->stack_capacity = 0;
-    cache->ref_mean_capacity = 0;
-    cache->ref_std_capacity = 0;
-    cache->weights_capacity = 0;
-    cache->weighted_sum_capacity = 0;
-    cache->weight_total_capacity = 0;
-}
-
-void clear_cuda_host_io_cache(HuberChunkCudaHostIoCache* cache) {
-    clear_device_cache(cache);
-    if (cache->stream != nullptr) {
-        cudaStreamDestroy(cache->stream);
-        cache->stream = nullptr;
-    }
-    cache->device = -1;
-}
-
-void ensure_stream(HuberChunkCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        return;
-    }
-    throw_if_cuda_failed(cudaStreamCreateWithFlags(&cache->stream, cudaStreamNonBlocking),
-                         "huber_weighted_chunk_cuda cudaStreamCreate");
-}
-
-void prepare_cuda_host_io_cache(HuberChunkCudaHostIoCache* cache) {
-    int current_device = -1;
-    throw_if_cuda_failed(cudaGetDevice(&current_device),
-                         "huber_weighted_chunk_cuda cudaGetDevice");
-    if (cache->device == current_device) {
-        ensure_stream(cache);
-        return;
-    }
-    if (cache->device >= 0) {
-        const int restore_device = current_device;
-        throw_if_cuda_failed(cudaSetDevice(cache->device),
-                             "huber_weighted_chunk_cuda cudaSetDevice(old)");
-        clear_cuda_host_io_cache(cache);
-        throw_if_cuda_failed(cudaSetDevice(restore_device),
-                             "huber_weighted_chunk_cuda cudaSetDevice(restore)");
-    }
-    cache->device = current_device;
-    ensure_stream(cache);
-}
-
-void reset_cuda_host_io_cache_after_error(HuberChunkCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        cudaStreamSynchronize(cache->stream);
-    }
-    clear_cuda_host_io_cache(cache);
-}
 
 template <typename T>
 __global__ void huber_weighted_chunk_kernel(
@@ -211,113 +74,93 @@ void launch_huber_weighted_chunk_cuda_impl(
         throw std::invalid_argument("huber_weighted_chunk_cuda: stack is too large");
     }
 
-    HuberChunkCudaHostIoCache* cache = &huber_chunk_host_io_cache;
+    auto workspace = hnw::cuda::acquire_host_io_workspace(
+        "huber_weighted_chunk_cuda cudaGetDevice");
     try {
-        prepare_cuda_host_io_cache(cache);
-
         const size_t stack_bytes = stack_count * sizeof(T);
         const size_t plane_bytes = static_cast<size_t>(plane_size) * sizeof(double);
         const size_t weights_bytes = static_cast<size_t>(n_frames) * sizeof(double);
-
-        ensure_device_buffer(
-            &cache->stack,
-            &cache->stack_capacity,
-            stack_bytes,
-            "huber_weighted_chunk_cuda cudaMalloc(stack)");
-        ensure_double_buffer(
-            &cache->ref_mean,
-            &cache->ref_mean_capacity,
-            plane_bytes,
-            "huber_weighted_chunk_cuda cudaMalloc(ref_mean)");
-        ensure_double_buffer(
-            &cache->ref_std,
-            &cache->ref_std_capacity,
-            plane_bytes,
-            "huber_weighted_chunk_cuda cudaMalloc(ref_std)");
-        ensure_double_buffer(
-            &cache->weighted_sum,
-            &cache->weighted_sum_capacity,
-            plane_bytes,
-            "huber_weighted_chunk_cuda cudaMalloc(weighted_sum)");
-        ensure_double_buffer(
-            &cache->weight_total,
-            &cache->weight_total_capacity,
-            plane_bytes,
-            "huber_weighted_chunk_cuda cudaMalloc(weight_total)");
+        cudaStream_t stream = workspace.stream();
+        void* stack_device = workspace.device_buffer(
+            stack_bytes, "huber_weighted_chunk_cuda cudaMalloc(stack)");
+        auto* ref_mean_device = static_cast<double*>(workspace.device_buffer(
+            plane_bytes, "huber_weighted_chunk_cuda cudaMalloc(ref_mean)"));
+        auto* ref_std_device = static_cast<double*>(workspace.device_buffer(
+            plane_bytes, "huber_weighted_chunk_cuda cudaMalloc(ref_std)"));
+        auto* weighted_sum_device = static_cast<double*>(workspace.device_buffer(
+            plane_bytes, "huber_weighted_chunk_cuda cudaMalloc(weighted_sum)"));
+        auto* weight_total_device = static_cast<double*>(workspace.device_buffer(
+            plane_bytes, "huber_weighted_chunk_cuda cudaMalloc(weight_total)"));
 
         double* weights_device = nullptr;
         if (weights_host != nullptr) {
-            ensure_double_buffer(
-                &cache->weights,
-                &cache->weights_capacity,
-                weights_bytes,
-                "huber_weighted_chunk_cuda cudaMalloc(weights)");
-            weights_device = cache->weights;
+            weights_device = static_cast<double*>(workspace.device_buffer(
+                weights_bytes, "huber_weighted_chunk_cuda cudaMalloc(weights)"));
         }
 
-        throw_if_cuda_failed(cudaMemcpyAsync(
-                                 cache->stack,
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(
+                                 stack_device,
                                  stack_host,
                                  stack_bytes,
                                  cudaMemcpyHostToDevice,
-                                 cache->stream),
+                                 stream),
                              "huber_weighted_chunk_cuda cudaMemcpy(stack)");
-        throw_if_cuda_failed(cudaMemcpyAsync(
-                                 cache->ref_mean,
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(
+                                 ref_mean_device,
                                  ref_mean_host,
                                  plane_bytes,
                                  cudaMemcpyHostToDevice,
-                                 cache->stream),
+                                 stream),
                              "huber_weighted_chunk_cuda cudaMemcpy(ref_mean)");
-        throw_if_cuda_failed(cudaMemcpyAsync(
-                                 cache->ref_std,
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(
+                                 ref_std_device,
                                  ref_std_host,
                                  plane_bytes,
                                  cudaMemcpyHostToDevice,
-                                 cache->stream),
+                                 stream),
                              "huber_weighted_chunk_cuda cudaMemcpy(ref_std)");
         if (weights_host != nullptr) {
-            throw_if_cuda_failed(cudaMemcpyAsync(
+            hnw::cuda::throw_if_failed(cudaMemcpyAsync(
                                      weights_device,
                                      weights_host,
                                      weights_bytes,
                                      cudaMemcpyHostToDevice,
-                                     cache->stream),
+                                     stream),
                                  "huber_weighted_chunk_cuda cudaMemcpy(weights)");
         }
 
         const int blocks =
             static_cast<int>((plane_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
-        huber_weighted_chunk_kernel<T><<<blocks, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            static_cast<const T*>(cache->stack),
-            cache->ref_mean,
-            cache->ref_std,
+        huber_weighted_chunk_kernel<T><<<blocks, THREADS_PER_BLOCK, 0, stream>>>(
+            static_cast<const T*>(stack_device),
+            ref_mean_device,
+            ref_std_device,
             weights_device,
-            cache->weighted_sum,
-            cache->weight_total,
+            weighted_sum_device,
+            weight_total_device,
             n_frames,
             plane_size,
             huber_c);
-        throw_if_cuda_failed(cudaGetLastError(), op_name);
+        hnw::cuda::throw_if_failed(cudaGetLastError(), op_name);
 
-        throw_if_cuda_failed(cudaMemcpyAsync(
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(
                                  weighted_sum_host,
-                                 cache->weighted_sum,
+                                 weighted_sum_device,
                                  plane_bytes,
                                  cudaMemcpyDeviceToHost,
-                                 cache->stream),
+                                 stream),
                              "huber_weighted_chunk_cuda cudaMemcpy(weighted_sum)");
-        throw_if_cuda_failed(cudaMemcpyAsync(
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(
                                  weight_total_host,
-                                 cache->weight_total,
+                                 weight_total_device,
                                  plane_bytes,
                                  cudaMemcpyDeviceToHost,
-                                 cache->stream),
+                                 stream),
                              "huber_weighted_chunk_cuda cudaMemcpy(weight_total)");
-        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream),
+        hnw::cuda::throw_if_failed(cudaStreamSynchronize(stream),
                              "huber_weighted_chunk_cuda cudaStreamSynchronize");
     } catch (...) {
-        reset_cuda_host_io_cache_after_error(cache);
+        workspace.reset_after_error();
         throw;
     }
 }

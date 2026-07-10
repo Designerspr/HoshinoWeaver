@@ -1,6 +1,8 @@
 #pragma once
 
 // Shared device-only helpers for CUDA wavelet and star-detection kernels.
+#include "common/cuda_runtime_utils.cuh"
+
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -92,10 +94,7 @@ __constant__ double DB8_REC_HI[DB8_FILTER_LEN] = {
 };
 
 void throw_if_cuda_failed(const cudaError_t error, const char* context) {
-    if (error != cudaSuccess) {
-        throw std::runtime_error(
-            std::string(context) + ": " + cudaGetErrorString(error));
-    }
+    hnw::cuda::throw_if_failed(error, context);
 }
 
 class DeviceBuffer {

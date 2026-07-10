@@ -1,4 +1,5 @@
 #include "common/compat.h"
+#include "common/cuda_host_io_workspace.cuh"
 
 #include <cuda_runtime.h>
 
@@ -13,7 +14,7 @@ namespace {
 
 constexpr int THREADS_PER_BLOCK = 256;
 
-struct StarMaskDogCudaHostIoCache {
+struct StarMaskDogBuffers {
     void* image = nullptr;
     float* gray = nullptr;
     float* tmp = nullptr;
@@ -35,207 +36,10 @@ struct StarMaskDogCudaHostIoCache {
     double* block_sum = nullptr;
     double* block_sq = nullptr;
     cudaStream_t stream = nullptr;
-    size_t image_capacity = 0;
-    size_t gray_capacity = 0;
-    size_t tmp_capacity = 0;
-    size_t blur_small_capacity = 0;
-    size_t blur_large_capacity = 0;
-    size_t dog_capacity = 0;
-    size_t kernel_small_capacity = 0;
-    size_t kernel_large_capacity = 0;
-    size_t mask_capacity = 0;
-    size_t scratch_capacity = 0;
-    size_t output_capacity = 0;
-    size_t luma_capacity = 0;
-    size_t luma_tmp_capacity = 0;
-    size_t lab_a_capacity = 0;
-    size_t lab_b_capacity = 0;
-    size_t shrunk_capacity = 0;
-    size_t box_tmp_capacity = 0;
-    size_t box_blurred_capacity = 0;
-    size_t block_sum_capacity = 0;
-    size_t block_sq_capacity = 0;
-    int device = -1;
-
-    ~StarMaskDogCudaHostIoCache() {
-        int current_device = -1;
-        const cudaError_t get_device_error = cudaGetDevice(&current_device);
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(device);
-        }
-        cudaFree(image);
-        cudaFree(gray);
-        cudaFree(tmp);
-        cudaFree(blur_small);
-        cudaFree(blur_large);
-        cudaFree(dog);
-        cudaFree(kernel_small);
-        cudaFree(kernel_large);
-        cudaFree(mask);
-        cudaFree(scratch);
-        cudaFree(output);
-        cudaFree(luma);
-        cudaFree(luma_tmp);
-        cudaFree(lab_a);
-        cudaFree(lab_b);
-        cudaFree(shrunk);
-        cudaFree(box_tmp);
-        cudaFree(box_blurred);
-        cudaFree(block_sum);
-        cudaFree(block_sq);
-        if (stream != nullptr) {
-            cudaStreamDestroy(stream);
-        }
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(current_device);
-        }
-    }
 };
 
-thread_local StarMaskDogCudaHostIoCache star_mask_dog_cache;
-
 void throw_if_cuda_failed(const cudaError_t error, const char* context) {
-    if (error != cudaSuccess) {
-        throw std::runtime_error(std::string(context) + ": " + cudaGetErrorString(error));
-    }
-}
-
-void ensure_device_buffer(void** ptr,
-                          size_t* capacity,
-                          const size_t required_bytes,
-                          const char* context) {
-    if (required_bytes <= *capacity) {
-        return;
-    }
-    if (*ptr != nullptr) {
-        cudaFree(*ptr);
-        *ptr = nullptr;
-        *capacity = 0;
-    }
-    void* new_ptr = nullptr;
-    throw_if_cuda_failed(cudaMalloc(&new_ptr, required_bytes), context);
-    *ptr = new_ptr;
-    *capacity = required_bytes;
-}
-
-void ensure_float_buffer(float** ptr,
-                         size_t* capacity,
-                         const size_t required_bytes,
-                         const char* context) {
-    void* raw_ptr = static_cast<void*>(*ptr);
-    ensure_device_buffer(&raw_ptr, capacity, required_bytes, context);
-    *ptr = static_cast<float*>(raw_ptr);
-}
-
-void ensure_double_buffer(double** ptr,
-                          size_t* capacity,
-                          const size_t required_bytes,
-                          const char* context) {
-    void* raw_ptr = static_cast<void*>(*ptr);
-    ensure_device_buffer(&raw_ptr, capacity, required_bytes, context);
-    *ptr = static_cast<double*>(raw_ptr);
-}
-
-void clear_cuda_host_io_cache(StarMaskDogCudaHostIoCache* cache) {
-    cudaFree(cache->image);
-    cudaFree(cache->gray);
-    cudaFree(cache->tmp);
-    cudaFree(cache->blur_small);
-    cudaFree(cache->blur_large);
-    cudaFree(cache->dog);
-    cudaFree(cache->kernel_small);
-    cudaFree(cache->kernel_large);
-    cudaFree(cache->mask);
-    cudaFree(cache->scratch);
-    cudaFree(cache->output);
-    cudaFree(cache->luma);
-    cudaFree(cache->luma_tmp);
-    cudaFree(cache->lab_a);
-    cudaFree(cache->lab_b);
-    cudaFree(cache->shrunk);
-    cudaFree(cache->box_tmp);
-    cudaFree(cache->box_blurred);
-    cudaFree(cache->block_sum);
-    cudaFree(cache->block_sq);
-    cache->image = nullptr;
-    cache->gray = nullptr;
-    cache->tmp = nullptr;
-    cache->blur_small = nullptr;
-    cache->blur_large = nullptr;
-    cache->dog = nullptr;
-    cache->kernel_small = nullptr;
-    cache->kernel_large = nullptr;
-    cache->mask = nullptr;
-    cache->scratch = nullptr;
-    cache->output = nullptr;
-    cache->luma = nullptr;
-    cache->luma_tmp = nullptr;
-    cache->lab_a = nullptr;
-    cache->lab_b = nullptr;
-    cache->shrunk = nullptr;
-    cache->box_tmp = nullptr;
-    cache->box_blurred = nullptr;
-    cache->block_sum = nullptr;
-    cache->block_sq = nullptr;
-    cache->image_capacity = 0;
-    cache->gray_capacity = 0;
-    cache->tmp_capacity = 0;
-    cache->blur_small_capacity = 0;
-    cache->blur_large_capacity = 0;
-    cache->dog_capacity = 0;
-    cache->kernel_small_capacity = 0;
-    cache->kernel_large_capacity = 0;
-    cache->mask_capacity = 0;
-    cache->scratch_capacity = 0;
-    cache->output_capacity = 0;
-    cache->luma_capacity = 0;
-    cache->luma_tmp_capacity = 0;
-    cache->lab_a_capacity = 0;
-    cache->lab_b_capacity = 0;
-    cache->shrunk_capacity = 0;
-    cache->box_tmp_capacity = 0;
-    cache->box_blurred_capacity = 0;
-    cache->block_sum_capacity = 0;
-    cache->block_sq_capacity = 0;
-    if (cache->stream != nullptr) {
-        cudaStreamDestroy(cache->stream);
-        cache->stream = nullptr;
-    }
-    cache->device = -1;
-}
-
-void ensure_stream(StarMaskDogCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        return;
-    }
-    throw_if_cuda_failed(cudaStreamCreateWithFlags(&cache->stream, cudaStreamNonBlocking),
-                         "star_mask_dog_cuda cudaStreamCreate");
-}
-
-void prepare_cuda_host_io_cache(StarMaskDogCudaHostIoCache* cache) {
-    int current_device = -1;
-    throw_if_cuda_failed(cudaGetDevice(&current_device), "star_mask_dog_cuda cudaGetDevice");
-    if (cache->device == current_device) {
-        ensure_stream(cache);
-        return;
-    }
-    if (cache->device >= 0) {
-        const int restore_device = current_device;
-        throw_if_cuda_failed(cudaSetDevice(cache->device),
-                             "star_mask_dog_cuda cudaSetDevice(old)");
-        clear_cuda_host_io_cache(cache);
-        throw_if_cuda_failed(cudaSetDevice(restore_device),
-                             "star_mask_dog_cuda cudaSetDevice(restore)");
-    }
-    cache->device = current_device;
-    ensure_stream(cache);
-}
-
-void reset_cuda_host_io_cache_after_error(StarMaskDogCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        cudaStreamSynchronize(cache->stream);
-    }
-    clear_cuda_host_io_cache(cache);
+    hnw::cuda::throw_if_failed(error, context);
 }
 
 template <typename T>
@@ -674,7 +478,7 @@ __global__ void dilate_cross_kernel(const uint8_t* input,
     output[idx] = keep ? 1 : 0;
 }
 
-void launch_morphology(StarMaskDogCudaHostIoCache* cache,
+void launch_morphology(StarMaskDogBuffers* cache,
                        const int height,
                        const int width,
                        const int blocks,
@@ -714,9 +518,12 @@ void launch_star_mask_dog_cuda_impl(const T* image_host,
                                     const float threshold_ratio,
                                     const int open_ksize,
                                     const int dilate_ksize) {
-    auto* cache = &star_mask_dog_cache;
+    auto workspace = hnw::cuda::acquire_host_io_workspace(
+        "star_mask_dog_cuda cudaGetDevice");
+    StarMaskDogBuffers buffers;
+    auto* cache = &buffers;
     try {
-        prepare_cuda_host_io_cache(cache);
+        cache->stream = workspace.stream();
         const int64_t plane_size = static_cast<int64_t>(height) * width;
         const int64_t total = plane_size * channels;
         const int blocks = static_cast<int>((plane_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
@@ -727,22 +534,30 @@ void launch_star_mask_dog_cuda_impl(const T* image_host,
         const size_t small_kernel_bytes = static_cast<size_t>(2 * small_radius + 1) * sizeof(float);
         const size_t large_kernel_bytes = static_cast<size_t>(2 * large_radius + 1) * sizeof(float);
 
-        ensure_device_buffer(&cache->image, &cache->image_capacity, image_bytes, "star_mask_dog cudaMalloc image");
-        ensure_float_buffer(&cache->gray, &cache->gray_capacity, plane_float_bytes, "star_mask_dog cudaMalloc gray");
-        ensure_float_buffer(&cache->tmp, &cache->tmp_capacity, plane_float_bytes, "star_mask_dog cudaMalloc tmp");
-        ensure_float_buffer(&cache->blur_small, &cache->blur_small_capacity, plane_float_bytes, "star_mask_dog cudaMalloc blur_small");
-        ensure_float_buffer(&cache->blur_large, &cache->blur_large_capacity, plane_float_bytes, "star_mask_dog cudaMalloc blur_large");
-        ensure_float_buffer(&cache->dog, &cache->dog_capacity, plane_float_bytes, "star_mask_dog cudaMalloc dog");
-        ensure_float_buffer(&cache->kernel_small, &cache->kernel_small_capacity, small_kernel_bytes, "star_mask_dog cudaMalloc small_kernel");
-        ensure_float_buffer(&cache->kernel_large, &cache->kernel_large_capacity, large_kernel_bytes, "star_mask_dog cudaMalloc large_kernel");
-        void* mask_raw = static_cast<void*>(cache->mask);
-        ensure_device_buffer(&mask_raw, &cache->mask_capacity, mask_bytes, "star_mask_dog cudaMalloc mask");
-        cache->mask = static_cast<uint8_t*>(mask_raw);
-        void* scratch_raw = static_cast<void*>(cache->scratch);
-        ensure_device_buffer(&scratch_raw, &cache->scratch_capacity, mask_bytes, "star_mask_dog cudaMalloc scratch");
-        cache->scratch = static_cast<uint8_t*>(scratch_raw);
-        ensure_double_buffer(&cache->block_sum, &cache->block_sum_capacity, reduction_bytes, "star_mask_dog cudaMalloc block_sum");
-        ensure_double_buffer(&cache->block_sq, &cache->block_sq_capacity, reduction_bytes, "star_mask_dog cudaMalloc block_sq");
+        cache->image = workspace.device_buffer(
+            image_bytes, "star_mask_dog cudaMalloc image");
+        cache->gray = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_mask_dog cudaMalloc gray"));
+        cache->tmp = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_mask_dog cudaMalloc tmp"));
+        cache->blur_small = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_mask_dog cudaMalloc blur_small"));
+        cache->blur_large = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_mask_dog cudaMalloc blur_large"));
+        cache->dog = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_mask_dog cudaMalloc dog"));
+        cache->kernel_small = static_cast<float*>(workspace.device_buffer(
+            small_kernel_bytes, "star_mask_dog cudaMalloc small_kernel"));
+        cache->kernel_large = static_cast<float*>(workspace.device_buffer(
+            large_kernel_bytes, "star_mask_dog cudaMalloc large_kernel"));
+        cache->mask = static_cast<uint8_t*>(workspace.device_buffer(
+            mask_bytes, "star_mask_dog cudaMalloc mask"));
+        cache->scratch = static_cast<uint8_t*>(workspace.device_buffer(
+            mask_bytes, "star_mask_dog cudaMalloc scratch"));
+        cache->block_sum = static_cast<double*>(workspace.device_buffer(
+            reduction_bytes, "star_mask_dog cudaMalloc block_sum"));
+        cache->block_sq = static_cast<double*>(workspace.device_buffer(
+            reduction_bytes, "star_mask_dog cudaMalloc block_sq"));
 
         throw_if_cuda_failed(cudaMemcpyAsync(cache->image, image_host, image_bytes, cudaMemcpyHostToDevice, cache->stream),
                              "star_mask_dog_cuda copy image");
@@ -800,7 +615,7 @@ void launch_star_mask_dog_cuda_impl(const T* image_host,
                              "star_mask_dog_cuda copy mask");
         throw_if_cuda_failed(cudaStreamSynchronize(cache->stream), "star_mask_dog_cuda synchronize");
     } catch (...) {
-        reset_cuda_host_io_cache_after_error(cache);
+        workspace.reset_after_error();
         throw;
     }
 }
@@ -823,9 +638,12 @@ void launch_star_shrink_dog_process_cuda_impl(const T* image_host,
                                               const int shrink_times,
                                               const float shrink_ratio,
                                               const int deringing_ksize) {
-    auto* cache = &star_mask_dog_cache;
+    auto workspace = hnw::cuda::acquire_host_io_workspace(
+        "star_shrink_dog_cuda cudaGetDevice");
+    StarMaskDogBuffers buffers;
+    auto* cache = &buffers;
     try {
-        prepare_cuda_host_io_cache(cache);
+        cache->stream = workspace.stream();
         const int64_t plane_size = static_cast<int64_t>(height) * width;
         const int64_t total = plane_size * channels;
         const int blocks_plane =
@@ -840,30 +658,46 @@ void launch_star_shrink_dog_process_cuda_impl(const T* image_host,
         const size_t small_kernel_bytes = static_cast<size_t>(2 * small_radius + 1) * sizeof(float);
         const size_t large_kernel_bytes = static_cast<size_t>(2 * large_radius + 1) * sizeof(float);
 
-        ensure_device_buffer(&cache->image, &cache->image_capacity, image_bytes, "star_shrink_dog cudaMalloc image");
-        ensure_device_buffer(&cache->output, &cache->output_capacity, image_bytes, "star_shrink_dog cudaMalloc output");
-        ensure_float_buffer(&cache->gray, &cache->gray_capacity, plane_float_bytes, "star_shrink_dog cudaMalloc gray");
-        ensure_float_buffer(&cache->tmp, &cache->tmp_capacity, plane_float_bytes, "star_shrink_dog cudaMalloc tmp");
-        ensure_float_buffer(&cache->blur_small, &cache->blur_small_capacity, plane_float_bytes, "star_shrink_dog cudaMalloc blur_small");
-        ensure_float_buffer(&cache->blur_large, &cache->blur_large_capacity, plane_float_bytes, "star_shrink_dog cudaMalloc blur_large");
-        ensure_float_buffer(&cache->dog, &cache->dog_capacity, plane_float_bytes, "star_shrink_dog cudaMalloc dog");
-        ensure_float_buffer(&cache->kernel_small, &cache->kernel_small_capacity, small_kernel_bytes, "star_shrink_dog cudaMalloc small_kernel");
-        ensure_float_buffer(&cache->kernel_large, &cache->kernel_large_capacity, large_kernel_bytes, "star_shrink_dog cudaMalloc large_kernel");
-        void* mask_raw = static_cast<void*>(cache->mask);
-        ensure_device_buffer(&mask_raw, &cache->mask_capacity, mask_bytes, "star_shrink_dog cudaMalloc mask");
-        cache->mask = static_cast<uint8_t*>(mask_raw);
-        void* scratch_raw = static_cast<void*>(cache->scratch);
-        ensure_device_buffer(&scratch_raw, &cache->scratch_capacity, mask_bytes, "star_shrink_dog cudaMalloc scratch");
-        cache->scratch = static_cast<uint8_t*>(scratch_raw);
-        ensure_double_buffer(&cache->block_sum, &cache->block_sum_capacity, reduction_bytes, "star_shrink_dog cudaMalloc block_sum");
-        ensure_double_buffer(&cache->block_sq, &cache->block_sq_capacity, reduction_bytes, "star_shrink_dog cudaMalloc block_sq");
-        ensure_float_buffer(&cache->luma, &cache->luma_capacity, plane_float_bytes, "star_shrink_dog cudaMalloc luma");
-        ensure_float_buffer(&cache->luma_tmp, &cache->luma_tmp_capacity, plane_float_bytes, "star_shrink_dog cudaMalloc luma_tmp");
-        ensure_float_buffer(&cache->lab_a, &cache->lab_a_capacity, plane_float_bytes, "star_shrink_dog cudaMalloc lab_a");
-        ensure_float_buffer(&cache->lab_b, &cache->lab_b_capacity, plane_float_bytes, "star_shrink_dog cudaMalloc lab_b");
-        ensure_float_buffer(&cache->shrunk, &cache->shrunk_capacity, total_float_bytes, "star_shrink_dog cudaMalloc shrunk");
-        ensure_float_buffer(&cache->box_tmp, &cache->box_tmp_capacity, total_float_bytes, "star_shrink_dog cudaMalloc box_tmp");
-        ensure_float_buffer(&cache->box_blurred, &cache->box_blurred_capacity, total_float_bytes, "star_shrink_dog cudaMalloc box_blurred");
+        cache->image = workspace.device_buffer(
+            image_bytes, "star_shrink_dog cudaMalloc image");
+        cache->output = workspace.device_buffer(
+            image_bytes, "star_shrink_dog cudaMalloc output");
+        cache->gray = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink_dog cudaMalloc gray"));
+        cache->tmp = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink_dog cudaMalloc tmp"));
+        cache->blur_small = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink_dog cudaMalloc blur_small"));
+        cache->blur_large = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink_dog cudaMalloc blur_large"));
+        cache->dog = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink_dog cudaMalloc dog"));
+        cache->kernel_small = static_cast<float*>(workspace.device_buffer(
+            small_kernel_bytes, "star_shrink_dog cudaMalloc small_kernel"));
+        cache->kernel_large = static_cast<float*>(workspace.device_buffer(
+            large_kernel_bytes, "star_shrink_dog cudaMalloc large_kernel"));
+        cache->mask = static_cast<uint8_t*>(workspace.device_buffer(
+            mask_bytes, "star_shrink_dog cudaMalloc mask"));
+        cache->scratch = static_cast<uint8_t*>(workspace.device_buffer(
+            mask_bytes, "star_shrink_dog cudaMalloc scratch"));
+        cache->block_sum = static_cast<double*>(workspace.device_buffer(
+            reduction_bytes, "star_shrink_dog cudaMalloc block_sum"));
+        cache->block_sq = static_cast<double*>(workspace.device_buffer(
+            reduction_bytes, "star_shrink_dog cudaMalloc block_sq"));
+        cache->luma = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink_dog cudaMalloc luma"));
+        cache->luma_tmp = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink_dog cudaMalloc luma_tmp"));
+        cache->lab_a = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink_dog cudaMalloc lab_a"));
+        cache->lab_b = static_cast<float*>(workspace.device_buffer(
+            plane_float_bytes, "star_shrink_dog cudaMalloc lab_b"));
+        cache->shrunk = static_cast<float*>(workspace.device_buffer(
+            total_float_bytes, "star_shrink_dog cudaMalloc shrunk"));
+        cache->box_tmp = static_cast<float*>(workspace.device_buffer(
+            total_float_bytes, "star_shrink_dog cudaMalloc box_tmp"));
+        cache->box_blurred = static_cast<float*>(workspace.device_buffer(
+            total_float_bytes, "star_shrink_dog cudaMalloc box_blurred"));
 
         throw_if_cuda_failed(cudaMemcpyAsync(cache->image, image_host, image_bytes, cudaMemcpyHostToDevice, cache->stream),
                              "star_shrink_dog_cuda copy image");
@@ -988,7 +822,7 @@ void launch_star_shrink_dog_process_cuda_impl(const T* image_host,
                              "star_shrink_dog_cuda copy output");
         throw_if_cuda_failed(cudaStreamSynchronize(cache->stream), "star_shrink_dog_cuda synchronize");
     } catch (...) {
-        reset_cuda_host_io_cache_after_error(cache);
+        workspace.reset_after_error();
         throw;
     }
 }

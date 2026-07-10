@@ -1,4 +1,5 @@
 #include "common/compat.h"
+#include "common/cuda_host_io_workspace.cuh"
 
 #include <cuda_runtime.h>
 
@@ -12,138 +13,6 @@
 namespace {
 
 constexpr int THREADS_PER_BLOCK = 256;
-
-struct SigmaClipCudaHostIoCache {
-    void* stack = nullptr;
-    void* mask = nullptr;
-    double* out_sum = nullptr;
-    double* out_sq = nullptr;
-    double* out_n = nullptr;
-    cudaStream_t stream = nullptr;
-    size_t stack_capacity = 0;
-    size_t mask_capacity = 0;
-    size_t out_sum_capacity = 0;
-    size_t out_sq_capacity = 0;
-    size_t out_n_capacity = 0;
-    int device = -1;
-
-    ~SigmaClipCudaHostIoCache() {
-        int current_device = -1;
-        const cudaError_t get_device_error = cudaGetDevice(&current_device);
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(device);
-        }
-        cudaFree(stack);
-        cudaFree(mask);
-        cudaFree(out_sum);
-        cudaFree(out_sq);
-        cudaFree(out_n);
-        if (stream != nullptr) {
-            cudaStreamDestroy(stream);
-        }
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(current_device);
-        }
-    }
-};
-
-thread_local SigmaClipCudaHostIoCache sigma_clip_host_io_cache;
-
-void throw_if_cuda_failed(const cudaError_t error, const char* context) {
-    if (error != cudaSuccess) {
-        throw std::runtime_error(
-            std::string(context) + ": " + cudaGetErrorString(error));
-    }
-}
-
-void ensure_device_buffer(void** ptr,
-                          size_t* capacity,
-                          const size_t required_bytes,
-                          const char* context) {
-    if (required_bytes <= *capacity) {
-        return;
-    }
-    if (*ptr != nullptr) {
-        cudaFree(*ptr);
-        *ptr = nullptr;
-        *capacity = 0;
-    }
-    void* new_ptr = nullptr;
-    throw_if_cuda_failed(cudaMalloc(&new_ptr, required_bytes), context);
-    *ptr = new_ptr;
-    *capacity = required_bytes;
-}
-
-void ensure_double_buffer(double** ptr,
-                          size_t* capacity,
-                          const size_t required_bytes,
-                          const char* context) {
-    void* raw_ptr = static_cast<void*>(*ptr);
-    ensure_device_buffer(&raw_ptr, capacity, required_bytes, context);
-    *ptr = static_cast<double*>(raw_ptr);
-}
-
-void clear_device_cache(SigmaClipCudaHostIoCache* cache) {
-    cudaFree(cache->stack);
-    cudaFree(cache->mask);
-    cudaFree(cache->out_sum);
-    cudaFree(cache->out_sq);
-    cudaFree(cache->out_n);
-    cache->stack = nullptr;
-    cache->mask = nullptr;
-    cache->out_sum = nullptr;
-    cache->out_sq = nullptr;
-    cache->out_n = nullptr;
-    cache->stack_capacity = 0;
-    cache->mask_capacity = 0;
-    cache->out_sum_capacity = 0;
-    cache->out_sq_capacity = 0;
-    cache->out_n_capacity = 0;
-}
-
-void clear_cuda_host_io_cache(SigmaClipCudaHostIoCache* cache) {
-    clear_device_cache(cache);
-    if (cache->stream != nullptr) {
-        cudaStreamDestroy(cache->stream);
-        cache->stream = nullptr;
-    }
-    cache->device = -1;
-}
-
-void ensure_stream(SigmaClipCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        return;
-    }
-    throw_if_cuda_failed(cudaStreamCreateWithFlags(&cache->stream, cudaStreamNonBlocking),
-                         "sigma_clip_fused_chunk_cuda cudaStreamCreate");
-}
-
-void prepare_cuda_host_io_cache(SigmaClipCudaHostIoCache* cache) {
-    int current_device = -1;
-    throw_if_cuda_failed(cudaGetDevice(&current_device),
-                         "sigma_clip_fused_chunk_cuda cudaGetDevice");
-    if (cache->device == current_device) {
-        ensure_stream(cache);
-        return;
-    }
-    if (cache->device >= 0) {
-        const int restore_device = current_device;
-        throw_if_cuda_failed(cudaSetDevice(cache->device),
-                             "sigma_clip_fused_chunk_cuda cudaSetDevice(old)");
-        clear_cuda_host_io_cache(cache);
-        throw_if_cuda_failed(cudaSetDevice(restore_device),
-                             "sigma_clip_fused_chunk_cuda cudaSetDevice(restore)");
-    }
-    cache->device = current_device;
-    ensure_stream(cache);
-}
-
-void reset_cuda_host_io_cache_after_error(SigmaClipCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        cudaStreamSynchronize(cache->stream);
-    }
-    clear_cuda_host_io_cache(cache);
-}
 
 template <typename T>
 __device__ inline double dtype_max_value() {
@@ -306,69 +175,53 @@ void launch_sigma_clip_fused_chunk_cuda_impl(
         throw std::invalid_argument("sigma_clip_fused_chunk_cuda: stack is too large");
     }
 
-    SigmaClipCudaHostIoCache* cache = &sigma_clip_host_io_cache;
+    auto workspace = hnw::cuda::acquire_host_io_workspace(
+        "sigma_clip_fused_chunk_cuda cudaGetDevice");
     try {
-        prepare_cuda_host_io_cache(cache);
-
         const size_t stack_bytes = stack_count * sizeof(T);
         const size_t mask_bytes = stack_count * sizeof(uint8_t);
         const size_t out_bytes = static_cast<size_t>(plane_size) * sizeof(double);
-        ensure_device_buffer(
-            &cache->stack,
-            &cache->stack_capacity,
-            stack_bytes,
-            "sigma_clip_fused_chunk_cuda cudaMalloc(stack)");
-        ensure_double_buffer(
-            &cache->out_sum,
-            &cache->out_sum_capacity,
-            out_bytes,
-            "sigma_clip_fused_chunk_cuda cudaMalloc(out_sum)");
-        ensure_double_buffer(
-            &cache->out_sq,
-            &cache->out_sq_capacity,
-            out_bytes,
-            "sigma_clip_fused_chunk_cuda cudaMalloc(out_sq)");
-        ensure_double_buffer(
-            &cache->out_n,
-            &cache->out_n_capacity,
-            out_bytes,
-            "sigma_clip_fused_chunk_cuda cudaMalloc(out_n)");
+        cudaStream_t stream = workspace.stream();
+        void* stack_device = workspace.device_buffer(
+            stack_bytes, "sigma_clip_fused_chunk_cuda cudaMalloc(stack)");
+        auto* out_sum_device = static_cast<double*>(workspace.device_buffer(
+            out_bytes, "sigma_clip_fused_chunk_cuda cudaMalloc(out_sum)"));
+        auto* out_sq_device = static_cast<double*>(workspace.device_buffer(
+            out_bytes, "sigma_clip_fused_chunk_cuda cudaMalloc(out_sq)"));
+        auto* out_n_device = static_cast<double*>(workspace.device_buffer(
+            out_bytes, "sigma_clip_fused_chunk_cuda cudaMalloc(out_n)"));
 
         uint8_t* mask_device = nullptr;
         if (mask_host != nullptr) {
-            ensure_device_buffer(
-                &cache->mask,
-                &cache->mask_capacity,
-                mask_bytes,
-                "sigma_clip_fused_chunk_cuda cudaMalloc(mask)");
-            mask_device = static_cast<uint8_t*>(cache->mask);
+            mask_device = static_cast<uint8_t*>(workspace.device_buffer(
+                mask_bytes, "sigma_clip_fused_chunk_cuda cudaMalloc(mask)"));
         }
 
-        throw_if_cuda_failed(cudaMemcpyAsync(
-                                 cache->stack,
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(
+                                 stack_device,
                                  stack_host,
                                  stack_bytes,
                                  cudaMemcpyHostToDevice,
-                                 cache->stream),
+                                 stream),
                              "sigma_clip_fused_chunk_cuda cudaMemcpy(stack)");
         if (mask_host != nullptr) {
-            throw_if_cuda_failed(cudaMemcpyAsync(
+            hnw::cuda::throw_if_failed(cudaMemcpyAsync(
                                      mask_device,
                                      mask_host,
                                      mask_bytes,
                                      cudaMemcpyHostToDevice,
-                                     cache->stream),
+                                     stream),
                                  "sigma_clip_fused_chunk_cuda cudaMemcpy(mask)");
         }
 
         const int blocks =
             static_cast<int>((plane_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
-        sigma_clip_fused_chunk_kernel<T><<<blocks, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            static_cast<const T*>(cache->stack),
+        sigma_clip_fused_chunk_kernel<T><<<blocks, THREADS_PER_BLOCK, 0, stream>>>(
+            static_cast<const T*>(stack_device),
             mask_device,
-            cache->out_sum,
-            cache->out_sq,
-            cache->out_n,
+            out_sum_device,
+            out_sq_device,
+            out_n_device,
             n_frames,
             plane_size,
             rej_high,
@@ -376,33 +229,33 @@ void launch_sigma_clip_fused_chunk_cuda_impl(
             max_iter,
             skip_zero_rgb,
             channels);
-        throw_if_cuda_failed(cudaGetLastError(), op_name);
+        hnw::cuda::throw_if_failed(cudaGetLastError(), op_name);
 
-        throw_if_cuda_failed(cudaMemcpyAsync(
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(
                                  out_sum_host,
-                                 cache->out_sum,
+                                 out_sum_device,
                                  out_bytes,
                                  cudaMemcpyDeviceToHost,
-                                 cache->stream),
+                                 stream),
                              "sigma_clip_fused_chunk_cuda cudaMemcpy(out_sum)");
-        throw_if_cuda_failed(cudaMemcpyAsync(
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(
                                  out_sq_host,
-                                 cache->out_sq,
+                                 out_sq_device,
                                  out_bytes,
                                  cudaMemcpyDeviceToHost,
-                                 cache->stream),
+                                 stream),
                              "sigma_clip_fused_chunk_cuda cudaMemcpy(out_sq)");
-        throw_if_cuda_failed(cudaMemcpyAsync(
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(
                                  out_n_host,
-                                 cache->out_n,
+                                 out_n_device,
                                  out_bytes,
                                  cudaMemcpyDeviceToHost,
-                                 cache->stream),
+                                 stream),
                              "sigma_clip_fused_chunk_cuda cudaMemcpy(out_n)");
-        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream),
+        hnw::cuda::throw_if_failed(cudaStreamSynchronize(stream),
                              "sigma_clip_fused_chunk_cuda cudaStreamSynchronize");
     } catch (...) {
-        reset_cuda_host_io_cache_after_error(cache);
+        workspace.reset_after_error();
         throw;
     }
 }

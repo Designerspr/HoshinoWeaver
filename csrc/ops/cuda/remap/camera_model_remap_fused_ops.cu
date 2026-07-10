@@ -1,4 +1,5 @@
 #include "common/compat.h"
+#include "common/cuda_host_io_workspace.cuh"
 
 #include <cuda_runtime.h>
 
@@ -10,142 +11,6 @@
 #include <type_traits>
 
 namespace {
-
-struct RemapCudaHostIoCache {
-    void* image = nullptr;
-    void* out = nullptr;
-    void* pinned_image = nullptr;
-    void* pinned_out = nullptr;
-    cudaStream_t stream = nullptr;
-    size_t image_capacity = 0;
-    size_t out_capacity = 0;
-    size_t pinned_image_capacity = 0;
-    size_t pinned_out_capacity = 0;
-    int device = -1;
-
-    ~RemapCudaHostIoCache() {
-        int current_device = -1;
-        const cudaError_t get_device_error = cudaGetDevice(&current_device);
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(device);
-        }
-        cudaFree(image);
-        cudaFree(out);
-        cudaFreeHost(pinned_image);
-        cudaFreeHost(pinned_out);
-        if (stream != nullptr) {
-            cudaStreamDestroy(stream);
-        }
-        if (get_device_error == cudaSuccess && device >= 0 && current_device != device) {
-            cudaSetDevice(current_device);
-        }
-    }
-};
-
-thread_local RemapCudaHostIoCache remap_host_io_cache;
-
-void throw_if_cuda_failed(const cudaError_t error, const char* context) {
-    if (error != cudaSuccess) {
-        throw std::runtime_error(
-            std::string(context) + ": " + cudaGetErrorString(error));
-    }
-}
-
-void ensure_device_buffer(void** ptr,
-                          size_t* capacity,
-                          const size_t required_bytes,
-                          const char* context) {
-    if (required_bytes <= *capacity) {
-        return;
-    }
-
-    if (*ptr != nullptr) {
-        cudaFree(*ptr);
-        *ptr = nullptr;
-        *capacity = 0;
-    }
-    void* new_ptr = nullptr;
-    throw_if_cuda_failed(cudaMalloc(&new_ptr, required_bytes), context);
-    *ptr = new_ptr;
-    *capacity = required_bytes;
-}
-
-void ensure_pinned_host_buffer(void** ptr,
-                               size_t* capacity,
-                               const size_t required_bytes,
-                               const char* context) {
-    if (required_bytes <= *capacity) {
-        return;
-    }
-
-    if (*ptr != nullptr) {
-        cudaFreeHost(*ptr);
-        *ptr = nullptr;
-        *capacity = 0;
-    }
-    void* new_ptr = nullptr;
-    throw_if_cuda_failed(cudaMallocHost(&new_ptr, required_bytes), context);
-    *ptr = new_ptr;
-    *capacity = required_bytes;
-}
-
-void clear_device_buffer_cache(RemapCudaHostIoCache* cache) {
-    cudaFree(cache->image);
-    cudaFree(cache->out);
-    cudaFreeHost(cache->pinned_image);
-    cudaFreeHost(cache->pinned_out);
-    cache->image = nullptr;
-    cache->out = nullptr;
-    cache->pinned_image = nullptr;
-    cache->pinned_out = nullptr;
-    cache->image_capacity = 0;
-    cache->out_capacity = 0;
-    cache->pinned_image_capacity = 0;
-    cache->pinned_out_capacity = 0;
-}
-
-void clear_cuda_host_io_cache(RemapCudaHostIoCache* cache) {
-    clear_device_buffer_cache(cache);
-    if (cache->stream != nullptr) {
-        cudaStreamDestroy(cache->stream);
-        cache->stream = nullptr;
-    }
-}
-
-void ensure_stream(RemapCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        return;
-    }
-    throw_if_cuda_failed(cudaStreamCreateWithFlags(&cache->stream, cudaStreamNonBlocking),
-                         "camera_model_remap cudaStreamCreate");
-}
-
-void prepare_cuda_host_io_cache(RemapCudaHostIoCache* cache) {
-    int current_device = -1;
-    throw_if_cuda_failed(cudaGetDevice(&current_device),
-                         "camera_model_remap cudaGetDevice");
-    if (cache->device == current_device) {
-        ensure_stream(cache);
-        return;
-    }
-    if (cache->device >= 0) {
-        int restore_device = current_device;
-        throw_if_cuda_failed(cudaSetDevice(cache->device),
-                             "camera_model_remap cudaSetDevice(old)");
-        clear_cuda_host_io_cache(cache);
-        throw_if_cuda_failed(cudaSetDevice(restore_device),
-                             "camera_model_remap cudaSetDevice(restore)");
-    }
-    cache->device = current_device;
-    ensure_stream(cache);
-}
-
-void reset_cuda_host_io_cache_after_error(RemapCudaHostIoCache* cache) {
-    if (cache->stream != nullptr) {
-        cudaStreamSynchronize(cache->stream);
-    }
-    clear_cuda_host_io_cache(cache);
-}
 
 template <typename T>
 __device__ inline T cast_output(float value) {
@@ -345,32 +210,23 @@ void launch_camera_model_remap_fused_impl(
     const size_t src_bytes = src_total * sizeof(T);
     const size_t out_bytes = out_total * sizeof(T);
 
+    auto workspace = hnw::cuda::acquire_host_io_workspace(
+        "camera_model_remap cudaGetDevice");
     try {
-        prepare_cuda_host_io_cache(&remap_host_io_cache);
-        ensure_device_buffer(&remap_host_io_cache.image,
-                             &remap_host_io_cache.image_capacity,
-                             src_bytes,
-                             "camera_model_remap cudaMalloc(image)");
-        ensure_device_buffer(&remap_host_io_cache.out,
-                             &remap_host_io_cache.out_capacity,
-                             out_bytes,
-                             "camera_model_remap cudaMalloc(out)");
-        T* image_device = static_cast<T*>(remap_host_io_cache.image);
-        T* out_device = static_cast<T*>(remap_host_io_cache.out);
-        cudaStream_t stream = remap_host_io_cache.stream;
-        ensure_pinned_host_buffer(&remap_host_io_cache.pinned_image,
-                                  &remap_host_io_cache.pinned_image_capacity,
-                                  src_bytes,
-                                  "camera_model_remap cudaMallocHost(image)");
-        ensure_pinned_host_buffer(&remap_host_io_cache.pinned_out,
-                                  &remap_host_io_cache.pinned_out_capacity,
-                                  out_bytes,
-                                  "camera_model_remap cudaMallocHost(out)");
-        std::memcpy(remap_host_io_cache.pinned_image, image_host, src_bytes);
-        const T* image_copy_src = static_cast<const T*>(remap_host_io_cache.pinned_image);
-        T* out_copy_dst = static_cast<T*>(remap_host_io_cache.pinned_out);
+        T* image_device = static_cast<T*>(workspace.device_buffer(
+            src_bytes, "camera_model_remap cudaMalloc(image)"));
+        T* out_device = static_cast<T*>(workspace.device_buffer(
+            out_bytes, "camera_model_remap cudaMalloc(out)"));
+        cudaStream_t stream = workspace.stream();
+        void* pinned_image = workspace.pinned_buffer(
+            src_bytes, "camera_model_remap cudaMallocHost(image)");
+        void* pinned_out = workspace.pinned_buffer(
+            out_bytes, "camera_model_remap cudaMallocHost(out)");
+        std::memcpy(pinned_image, image_host, src_bytes);
+        const T* image_copy_src = static_cast<const T*>(pinned_image);
+        T* out_copy_dst = static_cast<T*>(pinned_out);
 
-        throw_if_cuda_failed(cudaMemcpyAsync(image_device, image_copy_src, src_bytes,
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(image_device, image_copy_src, src_bytes,
                                              cudaMemcpyHostToDevice, stream),
                              "camera_model_remap cudaMemcpyAsync(image)");
 
@@ -415,16 +271,16 @@ void launch_camera_model_remap_fused_impl(
             dst_dist_coeffs[2],
             dst_dist_coeffs[3],
             dst_dist_coeffs[4]);
-        throw_if_cuda_failed(cudaGetLastError(),
+        hnw::cuda::throw_if_failed(cudaGetLastError(),
                              "camera_model_remap kernel launch");
-        throw_if_cuda_failed(cudaMemcpyAsync(out_copy_dst, out_device, out_bytes,
+        hnw::cuda::throw_if_failed(cudaMemcpyAsync(out_copy_dst, out_device, out_bytes,
                                              cudaMemcpyDeviceToHost, stream),
                              "camera_model_remap cudaMemcpyAsync(out)");
-        throw_if_cuda_failed(cudaStreamSynchronize(stream),
+        hnw::cuda::throw_if_failed(cudaStreamSynchronize(stream),
                              "camera_model_remap cudaStreamSynchronize");
-        std::memcpy(out_host, remap_host_io_cache.pinned_out, out_bytes);
+        std::memcpy(out_host, pinned_out, out_bytes);
     } catch (...) {
-        reset_cuda_host_io_cache_after_error(&remap_host_io_cache);
+        workspace.reset_after_error();
         throw;
     }
 }
