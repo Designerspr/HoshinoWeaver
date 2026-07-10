@@ -215,7 +215,7 @@ Preset 参考：
 4. 在 `hoshicore/_custom_op/ops/` 增加 Python 包装与 numpy fallback
 5. 在 `hoshicore/_custom_op/backend_registry.py` 注册 `BackendCandidate`
 6. 在 `hoshicore/_custom_op/api.py` + `__init__.py` 导出
-7. 补 focused tests（`tests/test_custom_ops.py`）
+7. 补 focused tests（`tests/custom_ops/test_<logical_op>.py`）
 8. 补 microbenchmark（`bench/cpu/kernels.py`）
 
 `BackendCandidate` 用于运行时判断当前包是否实际包含 native kernel。若 CMake /

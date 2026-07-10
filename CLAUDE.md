@@ -124,7 +124,7 @@ PySide6 with `qasync` event loop integration. The GUI dynamically generates para
 
 ### Adding a New Custom Op (C++ kernel)
 
-See `csrc/README.md` "新增算子" section for the full checklist. Key steps: C++ impl in `csrc/ops/cpu/<name>/` or `csrc/ops/cuda/<name>/` → bind in `module.cpp` → Python wrapper with fallback in `_custom_op/ops/` → tests in `test_custom_ops.py`.
+See `csrc/README.md` "新增算子" section for the full checklist. Key steps: C++ impl in `csrc/ops/cpu/<name>/` or `csrc/ops/cuda/<name>/` → bind in `module.cpp` → Python wrapper with fallback in `_custom_op/ops/` → focused tests in `tests/custom_ops/`.
 
 ## Tech Stack
 
