@@ -7,6 +7,7 @@ from typing import Callable
 
 import numpy as np
 
+from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
@@ -27,6 +28,11 @@ def _compiled_backend_available(logical_op: str) -> tuple[bool, str | None]:
         _fallback_preference(),
         load_module=_load_compiled_module_result,
     )
+
+
+def sigma_clip_iterative_chunk_native_available() -> bool:
+    available, _ = _compiled_backend_available("sigma_clip_iterative_chunk")
+    return available
 
 
 def _validate_inputs(
@@ -180,6 +186,7 @@ def sigma_clip_iterative_chunk_compiled(
         raise RuntimeError("compiled custom op backend is unavailable")
     stack, total_sum, total_sq, total_n, mask = _validate_inputs(
         stack, total_sum, total_sq, total_n, mask)
+    _apply_compiled_threads("sigma_clip_iterative_chunk", stack)
     return module.sigma_clip_iterative_chunk(
         stack, total_sum, total_sq, total_n,
         rej_high, rej_low, max_iter, mask,
@@ -335,6 +342,7 @@ def sigma_clip_fused_chunk_compiled(
     if module is None or not hasattr(module, "sigma_clip_fused_chunk"):
         raise RuntimeError("compiled custom op backend is unavailable")
     stack, mask = _validate_fused_inputs(stack, mask, skip_zero_rgb, channels)
+    _apply_compiled_threads("sigma_clip_fused_chunk", stack)
     return module.sigma_clip_fused_chunk(stack, rej_high, rej_low, max_iter, mask,
                                          skip_zero_rgb, channels)
 
@@ -385,7 +393,7 @@ def _select_sigma_clip_fused_chunk_cpu_fallback(
         "sigma_clip_fused_chunk",
         "auto",
         load_module=_load_compiled_module_result,
-        build_info={"cuda": False},
+        exclude_backends={"cuda_host_io"},
     )
     if (
         selection.native

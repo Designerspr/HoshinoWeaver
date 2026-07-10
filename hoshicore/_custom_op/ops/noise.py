@@ -344,10 +344,7 @@ def equalize_noise_correct(
     max_value: float,
     highlight_preserve: float,
 ) -> np.ndarray:
-    backend_name, backend = _select_equalize_noise_backend(_fallback_preference())
-    if backend_name == "compiled":
-        max_arr, _ = _validate_equalize_noise_inputs(max_img, filled_std_img)
-        _apply_compiled_threads("equalize_noise_correct", max_arr)
+    _, backend = _select_equalize_noise_backend(_fallback_preference())
     return backend(
         max_img,
         filled_std_img,

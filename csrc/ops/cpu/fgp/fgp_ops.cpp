@@ -1,4 +1,5 @@
 #include "fgp_ops.h"
+#include "common/py_array_utils.h"
 
 #include <cmath>
 #include <cstdint>
@@ -28,6 +29,9 @@ void validate_accumulator_shapes(const py::array& sum_mu,
                                  const py::array& n,
                                  const py::array& fresh,
                                  const char* op_name) {
+    hnw::require_mutable_c_array(sum_mu, op_name, "sum_mu");
+    hnw::require_mutable_c_array(square_sum, op_name, "square_sum");
+    hnw::require_mutable_c_array(n, op_name, "n");
     if (sum_mu.ndim() != fresh.ndim() || square_sum.ndim() != fresh.ndim() ||
         n.ndim() != fresh.ndim()) {
         throw std::invalid_argument(std::string(op_name) + ": ndim mismatch");
@@ -365,15 +369,15 @@ void huber_weighted_accumulate_inplace_kernel(
 
 template <typename FreshT, typename SumT, typename SquareT>
 void dispatch_accumulate_count_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
-    py::array_t<SquareT, py::array::c_style | py::array::forcecast> square_sum,
+    hnw::MutableCArray<SumT> sum_mu,
+    hnw::MutableCArray<SquareT> square_sum,
     py::array n,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& fresh,
     const uint64_t weight,
     const bool skip_zero_rgb,
     const ssize_t channels) {
     if (py::isinstance<py::array_t<uint16_t>>(n)) {
-        auto count = n.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint16_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -384,7 +388,7 @@ void dispatch_accumulate_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint32_t>>(n)) {
-        auto count = n.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint32_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -395,7 +399,7 @@ void dispatch_accumulate_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint64_t>>(n)) {
-        auto count = n.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint64_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -406,7 +410,7 @@ void dispatch_accumulate_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<double>>(n)) {
-        auto count = n.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<double>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -421,7 +425,7 @@ void dispatch_accumulate_count_dtype(
 
 template <typename FreshT, typename SumT>
 void dispatch_accumulate_square_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
+    hnw::MutableCArray<SumT> sum_mu,
     py::array square_sum,
     py::array n,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& fresh,
@@ -431,7 +435,7 @@ void dispatch_accumulate_square_dtype(
     if (py::isinstance<py::array_t<uint32_t>>(square_sum)) {
         dispatch_accumulate_count_dtype<FreshT, SumT, uint32_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint32_t>>(),
             n,
             fresh,
             weight, skip_zero_rgb, channels);
@@ -440,7 +444,7 @@ void dispatch_accumulate_square_dtype(
     if (py::isinstance<py::array_t<uint64_t>>(square_sum)) {
         dispatch_accumulate_count_dtype<FreshT, SumT, uint64_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint64_t>>(),
             n,
             fresh,
             weight, skip_zero_rgb, channels);
@@ -449,7 +453,7 @@ void dispatch_accumulate_square_dtype(
     if (py::isinstance<py::array_t<double>>(square_sum)) {
         dispatch_accumulate_count_dtype<FreshT, SumT, double>(
             sum_mu,
-            square_sum.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<double>>(),
             n,
             fresh,
             weight, skip_zero_rgb, channels);
@@ -469,7 +473,7 @@ void dispatch_accumulate_sum_dtype(
     const ssize_t channels) {
     if (py::isinstance<py::array_t<uint16_t>>(sum_mu)) {
         dispatch_accumulate_square_dtype<FreshT, uint16_t>(
-            sum_mu.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint16_t>>(),
             square_sum,
             n,
             fresh,
@@ -478,7 +482,7 @@ void dispatch_accumulate_sum_dtype(
     }
     if (py::isinstance<py::array_t<uint32_t>>(sum_mu)) {
         dispatch_accumulate_square_dtype<FreshT, uint32_t>(
-            sum_mu.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint32_t>>(),
             square_sum,
             n,
             fresh,
@@ -487,7 +491,7 @@ void dispatch_accumulate_sum_dtype(
     }
     if (py::isinstance<py::array_t<uint64_t>>(sum_mu)) {
         dispatch_accumulate_square_dtype<FreshT, uint64_t>(
-            sum_mu.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint64_t>>(),
             square_sum,
             n,
             fresh,
@@ -496,7 +500,7 @@ void dispatch_accumulate_sum_dtype(
     }
     if (py::isinstance<py::array_t<double>>(sum_mu)) {
         dispatch_accumulate_square_dtype<FreshT, double>(
-            sum_mu.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<double>>(),
             square_sum,
             n,
             fresh,
@@ -508,14 +512,14 @@ void dispatch_accumulate_sum_dtype(
 
 template <typename SumT, typename SquareT>
 void dispatch_add_count_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
-    py::array_t<SquareT, py::array::c_style | py::array::forcecast> square_sum,
+    hnw::MutableCArray<SumT> sum_mu,
+    hnw::MutableCArray<SquareT> square_sum,
     py::array n,
     const py::array& other_sum_mu,
     const py::array& other_square_sum,
     const py::array& other_n) {
     if (py::isinstance<py::array_t<uint16_t>>(n)) {
-        auto count = n.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint16_t>>();
         auto other_count =
             other_n.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>();
         auto other_sum =
@@ -533,7 +537,7 @@ void dispatch_add_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint32_t>>(n)) {
-        auto count = n.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint32_t>>();
         auto other_count =
             other_n.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>();
         auto other_sum =
@@ -551,7 +555,7 @@ void dispatch_add_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint64_t>>(n)) {
-        auto count = n.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint64_t>>();
         auto other_count =
             other_n.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>();
         auto other_sum =
@@ -569,7 +573,7 @@ void dispatch_add_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<double>>(n)) {
-        auto count = n.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<double>>();
         auto other_count =
             other_n.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
         auto other_sum =
@@ -591,7 +595,7 @@ void dispatch_add_count_dtype(
 
 template <typename SumT>
 void dispatch_add_square_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
+    hnw::MutableCArray<SumT> sum_mu,
     py::array square_sum,
     py::array n,
     const py::array& other_sum_mu,
@@ -600,7 +604,7 @@ void dispatch_add_square_dtype(
     if (py::isinstance<py::array_t<uint32_t>>(square_sum)) {
         dispatch_add_count_dtype<SumT, uint32_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint32_t>>(),
             n,
             other_sum_mu,
             other_square_sum,
@@ -610,7 +614,7 @@ void dispatch_add_square_dtype(
     if (py::isinstance<py::array_t<uint64_t>>(square_sum)) {
         dispatch_add_count_dtype<SumT, uint64_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint64_t>>(),
             n,
             other_sum_mu,
             other_square_sum,
@@ -620,7 +624,7 @@ void dispatch_add_square_dtype(
     if (py::isinstance<py::array_t<double>>(square_sum)) {
         dispatch_add_count_dtype<SumT, double>(
             sum_mu,
-            square_sum.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<double>>(),
             n,
             other_sum_mu,
             other_square_sum,
@@ -638,7 +642,7 @@ void dispatch_add_sum_dtype(py::array sum_mu,
                             const py::array& other_n) {
     if (py::isinstance<py::array_t<uint16_t>>(sum_mu)) {
         dispatch_add_square_dtype<uint16_t>(
-            sum_mu.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint16_t>>(),
             square_sum,
             n,
             other_sum_mu,
@@ -648,7 +652,7 @@ void dispatch_add_sum_dtype(py::array sum_mu,
     }
     if (py::isinstance<py::array_t<uint32_t>>(sum_mu)) {
         dispatch_add_square_dtype<uint32_t>(
-            sum_mu.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint32_t>>(),
             square_sum,
             n,
             other_sum_mu,
@@ -658,7 +662,7 @@ void dispatch_add_sum_dtype(py::array sum_mu,
     }
     if (py::isinstance<py::array_t<uint64_t>>(sum_mu)) {
         dispatch_add_square_dtype<uint64_t>(
-            sum_mu.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint64_t>>(),
             square_sum,
             n,
             other_sum_mu,
@@ -668,7 +672,7 @@ void dispatch_add_sum_dtype(py::array sum_mu,
     }
     if (py::isinstance<py::array_t<double>>(sum_mu)) {
         dispatch_add_square_dtype<double>(
-            sum_mu.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<double>>(),
             square_sum,
             n,
             other_sum_mu,
@@ -681,14 +685,14 @@ void dispatch_add_sum_dtype(py::array sum_mu,
 
 template <typename FreshT, typename SumT, typename SquareT>
 void dispatch_masked_mean_count_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
-    py::array_t<SquareT, py::array::c_style | py::array::forcecast> square_sum,
+    hnw::MutableCArray<SumT> sum_mu,
+    hnw::MutableCArray<SquareT> square_sum,
     py::array n,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& fresh,
     const py::array_t<uint8_t, py::array::c_style | py::array::forcecast>& mask,
     const bool skip_zero_rgb) {
     if (py::isinstance<py::array_t<uint16_t>>(n)) {
-        auto count = n.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint16_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -700,7 +704,7 @@ void dispatch_masked_mean_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint32_t>>(n)) {
-        auto count = n.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint32_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -712,7 +716,7 @@ void dispatch_masked_mean_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint64_t>>(n)) {
-        auto count = n.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint64_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -724,7 +728,7 @@ void dispatch_masked_mean_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<double>>(n)) {
-        auto count = n.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<double>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -740,7 +744,7 @@ void dispatch_masked_mean_count_dtype(
 
 template <typename FreshT, typename SumT>
 void dispatch_masked_mean_square_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
+    hnw::MutableCArray<SumT> sum_mu,
     py::array square_sum,
     py::array n,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& fresh,
@@ -749,7 +753,7 @@ void dispatch_masked_mean_square_dtype(
     if (py::isinstance<py::array_t<uint32_t>>(square_sum)) {
         dispatch_masked_mean_count_dtype<FreshT, SumT, uint32_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint32_t>>(),
             n,
             fresh,
             mask, skip_zero_rgb);
@@ -758,7 +762,7 @@ void dispatch_masked_mean_square_dtype(
     if (py::isinstance<py::array_t<uint64_t>>(square_sum)) {
         dispatch_masked_mean_count_dtype<FreshT, SumT, uint64_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint64_t>>(),
             n,
             fresh,
             mask, skip_zero_rgb);
@@ -767,7 +771,7 @@ void dispatch_masked_mean_square_dtype(
     if (py::isinstance<py::array_t<double>>(square_sum)) {
         dispatch_masked_mean_count_dtype<FreshT, SumT, double>(
             sum_mu,
-            square_sum.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<double>>(),
             n,
             fresh,
             mask, skip_zero_rgb);
@@ -786,7 +790,7 @@ void dispatch_masked_mean_sum_dtype(
     const bool skip_zero_rgb) {
     if (py::isinstance<py::array_t<uint16_t>>(sum_mu)) {
         dispatch_masked_mean_square_dtype<FreshT, uint16_t>(
-            sum_mu.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint16_t>>(),
             square_sum,
             n,
             fresh,
@@ -795,7 +799,7 @@ void dispatch_masked_mean_sum_dtype(
     }
     if (py::isinstance<py::array_t<uint32_t>>(sum_mu)) {
         dispatch_masked_mean_square_dtype<FreshT, uint32_t>(
-            sum_mu.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint32_t>>(),
             square_sum,
             n,
             fresh,
@@ -804,7 +808,7 @@ void dispatch_masked_mean_sum_dtype(
     }
     if (py::isinstance<py::array_t<uint64_t>>(sum_mu)) {
         dispatch_masked_mean_square_dtype<FreshT, uint64_t>(
-            sum_mu.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint64_t>>(),
             square_sum,
             n,
             fresh,
@@ -813,7 +817,7 @@ void dispatch_masked_mean_sum_dtype(
     }
     if (py::isinstance<py::array_t<double>>(sum_mu)) {
         dispatch_masked_mean_square_dtype<FreshT, double>(
-            sum_mu.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<double>>(),
             square_sum,
             n,
             fresh,
@@ -825,8 +829,8 @@ void dispatch_masked_mean_sum_dtype(
 
 template <typename FreshT, typename SumT, typename SquareT>
 void dispatch_sigma_clip_count_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
-    py::array_t<SquareT, py::array::c_style | py::array::forcecast> square_sum,
+    hnw::MutableCArray<SumT> sum_mu,
+    hnw::MutableCArray<SquareT> square_sum,
     py::array n,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& fresh,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& rej_high,
@@ -834,7 +838,7 @@ void dispatch_sigma_clip_count_dtype(
     const bool skip_zero_rgb,
     const ssize_t channels) {
     if (py::isinstance<py::array_t<uint16_t>>(n)) {
-        auto count = n.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint16_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -846,7 +850,7 @@ void dispatch_sigma_clip_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint32_t>>(n)) {
-        auto count = n.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint32_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -858,7 +862,7 @@ void dispatch_sigma_clip_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint64_t>>(n)) {
-        auto count = n.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint64_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -870,7 +874,7 @@ void dispatch_sigma_clip_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<double>>(n)) {
-        auto count = n.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<double>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -886,7 +890,7 @@ void dispatch_sigma_clip_count_dtype(
 
 template <typename FreshT, typename SumT>
 void dispatch_sigma_clip_square_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
+    hnw::MutableCArray<SumT> sum_mu,
     py::array square_sum,
     py::array n,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& fresh,
@@ -897,7 +901,7 @@ void dispatch_sigma_clip_square_dtype(
     if (py::isinstance<py::array_t<uint32_t>>(square_sum)) {
         dispatch_sigma_clip_count_dtype<FreshT, SumT, uint32_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint32_t>>(),
             n,
             fresh,
             rej_high,
@@ -907,7 +911,7 @@ void dispatch_sigma_clip_square_dtype(
     if (py::isinstance<py::array_t<uint64_t>>(square_sum)) {
         dispatch_sigma_clip_count_dtype<FreshT, SumT, uint64_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint64_t>>(),
             n,
             fresh,
             rej_high,
@@ -917,7 +921,7 @@ void dispatch_sigma_clip_square_dtype(
     if (py::isinstance<py::array_t<double>>(square_sum)) {
         dispatch_sigma_clip_count_dtype<FreshT, SumT, double>(
             sum_mu,
-            square_sum.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<double>>(),
             n,
             fresh,
             rej_high,
@@ -939,7 +943,7 @@ void dispatch_sigma_clip_sum_dtype(
     const ssize_t channels) {
     if (py::isinstance<py::array_t<uint16_t>>(sum_mu)) {
         dispatch_sigma_clip_square_dtype<FreshT, uint16_t>(
-            sum_mu.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint16_t>>(),
             square_sum,
             n,
             fresh,
@@ -949,7 +953,7 @@ void dispatch_sigma_clip_sum_dtype(
     }
     if (py::isinstance<py::array_t<uint32_t>>(sum_mu)) {
         dispatch_sigma_clip_square_dtype<FreshT, uint32_t>(
-            sum_mu.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint32_t>>(),
             square_sum,
             n,
             fresh,
@@ -959,7 +963,7 @@ void dispatch_sigma_clip_sum_dtype(
     }
     if (py::isinstance<py::array_t<uint64_t>>(sum_mu)) {
         dispatch_sigma_clip_square_dtype<FreshT, uint64_t>(
-            sum_mu.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint64_t>>(),
             square_sum,
             n,
             fresh,
@@ -969,7 +973,7 @@ void dispatch_sigma_clip_sum_dtype(
     }
     if (py::isinstance<py::array_t<double>>(sum_mu)) {
         dispatch_sigma_clip_square_dtype<FreshT, double>(
-            sum_mu.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<double>>(),
             square_sum,
             n,
             fresh,
@@ -982,8 +986,8 @@ void dispatch_sigma_clip_sum_dtype(
 
 template <typename FreshT, typename SumT, typename SquareT>
 void dispatch_sigma_clip_masked_count_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
-    py::array_t<SquareT, py::array::c_style | py::array::forcecast> square_sum,
+    hnw::MutableCArray<SumT> sum_mu,
+    hnw::MutableCArray<SquareT> square_sum,
     py::array n,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& fresh,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& rej_high,
@@ -991,7 +995,7 @@ void dispatch_sigma_clip_masked_count_dtype(
     const py::array_t<uint8_t, py::array::c_style | py::array::forcecast>& mask,
     const bool skip_zero_rgb) {
     if (py::isinstance<py::array_t<uint16_t>>(n)) {
-        auto count = n.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint16_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -1004,7 +1008,7 @@ void dispatch_sigma_clip_masked_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint32_t>>(n)) {
-        auto count = n.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint32_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -1017,7 +1021,7 @@ void dispatch_sigma_clip_masked_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<uint64_t>>(n)) {
-        auto count = n.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<uint64_t>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -1030,7 +1034,7 @@ void dispatch_sigma_clip_masked_count_dtype(
         return;
     }
     if (py::isinstance<py::array_t<double>>(n)) {
-        auto count = n.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        auto count = n.cast<hnw::MutableCArray<double>>();
         auto sum_info = sum_mu.request();
         auto square_info = square_sum.request();
         auto count_info = count.request();
@@ -1047,7 +1051,7 @@ void dispatch_sigma_clip_masked_count_dtype(
 
 template <typename FreshT, typename SumT>
 void dispatch_sigma_clip_masked_square_dtype(
-    py::array_t<SumT, py::array::c_style | py::array::forcecast> sum_mu,
+    hnw::MutableCArray<SumT> sum_mu,
     py::array square_sum,
     py::array n,
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& fresh,
@@ -1058,7 +1062,7 @@ void dispatch_sigma_clip_masked_square_dtype(
     if (py::isinstance<py::array_t<uint32_t>>(square_sum)) {
         dispatch_sigma_clip_masked_count_dtype<FreshT, SumT, uint32_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint32_t>>(),
             n,
             fresh,
             rej_high,
@@ -1069,7 +1073,7 @@ void dispatch_sigma_clip_masked_square_dtype(
     if (py::isinstance<py::array_t<uint64_t>>(square_sum)) {
         dispatch_sigma_clip_masked_count_dtype<FreshT, SumT, uint64_t>(
             sum_mu,
-            square_sum.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<uint64_t>>(),
             n,
             fresh,
             rej_high,
@@ -1080,7 +1084,7 @@ void dispatch_sigma_clip_masked_square_dtype(
     if (py::isinstance<py::array_t<double>>(square_sum)) {
         dispatch_sigma_clip_masked_count_dtype<FreshT, SumT, double>(
             sum_mu,
-            square_sum.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            square_sum.cast<hnw::MutableCArray<double>>(),
             n,
             fresh,
             rej_high,
@@ -1103,7 +1107,7 @@ void dispatch_sigma_clip_masked_sum_dtype(
     const bool skip_zero_rgb) {
     if (py::isinstance<py::array_t<uint16_t>>(sum_mu)) {
         dispatch_sigma_clip_masked_square_dtype<FreshT, uint16_t>(
-            sum_mu.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint16_t>>(),
             square_sum,
             n,
             fresh,
@@ -1114,7 +1118,7 @@ void dispatch_sigma_clip_masked_sum_dtype(
     }
     if (py::isinstance<py::array_t<uint32_t>>(sum_mu)) {
         dispatch_sigma_clip_masked_square_dtype<FreshT, uint32_t>(
-            sum_mu.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint32_t>>(),
             square_sum,
             n,
             fresh,
@@ -1125,7 +1129,7 @@ void dispatch_sigma_clip_masked_sum_dtype(
     }
     if (py::isinstance<py::array_t<uint64_t>>(sum_mu)) {
         dispatch_sigma_clip_masked_square_dtype<FreshT, uint64_t>(
-            sum_mu.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<uint64_t>>(),
             square_sum,
             n,
             fresh,
@@ -1136,7 +1140,7 @@ void dispatch_sigma_clip_masked_sum_dtype(
     }
     if (py::isinstance<py::array_t<double>>(sum_mu)) {
         dispatch_sigma_clip_masked_square_dtype<FreshT, double>(
-            sum_mu.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
+            sum_mu.cast<hnw::MutableCArray<double>>(),
             square_sum,
             n,
             fresh,
@@ -1158,9 +1162,9 @@ void dispatch_huber_weighted_accumulate(
     const double huber_c,
     const double frame_weight) {
     auto weighted_sum_t =
-        weighted_sum.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        weighted_sum.cast<hnw::MutableCArray<double>>();
     auto weight_total_t =
-        weight_total.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        weight_total.cast<hnw::MutableCArray<double>>();
     auto weighted_sum_info = weighted_sum_t.request();
     auto weight_total_info = weight_total_t.request();
     auto fresh_info = fresh.request();
@@ -1258,6 +1262,10 @@ void validate_huber_shapes(const py::array& weighted_sum,
                            const py::array& fresh,
                            const py::array& ref_mean,
                            const py::array& ref_std) {
+    hnw::require_mutable_c_array(
+        weighted_sum, "huber_weighted_accumulate", "weighted_sum");
+    hnw::require_mutable_c_array(
+        weight_total, "huber_weighted_accumulate", "weight_total");
     if (py::str(weighted_sum.dtype()).cast<std::string>() != "float64" ||
         py::str(weight_total.dtype()).cast<std::string>() != "float64") {
         throw std::invalid_argument(

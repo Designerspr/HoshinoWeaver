@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Collection, Mapping
 
 from hoshicore._custom_op._dispatch import load_compiled_module
 
@@ -156,6 +156,7 @@ def select_backend(
     *,
     load_module: ModuleLoader = load_compiled_module,
     build_info: Mapping[str, Any] | None = None,
+    exclude_backends: Collection[str] = (),
 ) -> BackendSelection:
     if preference == "numpy":
         return BackendSelection(None, None, "numpy backend forced by preference")
@@ -170,7 +171,10 @@ def select_backend(
 
     missing_kernel: str | None = None
     missing_build_flag: str | None = None
+    excluded = frozenset(exclude_backends)
     for candidate in sorted(candidates, key=lambda item: item.priority, reverse=True):
+        if candidate.backend in excluded:
+            continue
         if not _has_static_attr(module, candidate.kernel_name):
             missing_kernel = candidate.kernel_name
             continue
@@ -189,6 +193,14 @@ def select_backend(
             module,
             f"compiled backend missing build flag: {missing_build_flag}",
         )
+    if excluded:
+        excluded_names = ", ".join(sorted(excluded))
+        return BackendSelection(
+            None,
+            module,
+            f"no available backend candidate for {logical_op} after excluding: "
+            f"{excluded_names}",
+        )
     return BackendSelection(None, module, f"no available backend candidate for {logical_op}")
 
 
@@ -198,12 +210,14 @@ def native_backend_available(
     *,
     load_module: ModuleLoader = load_compiled_module,
     build_info: Mapping[str, Any] | None = None,
+    exclude_backends: Collection[str] = (),
 ) -> tuple[bool, str | None]:
     selection = select_backend(
         logical_op,
         preference,
         load_module=load_module,
         build_info=build_info,
+        exclude_backends=exclude_backends,
     )
     return selection.native, selection.reason
 

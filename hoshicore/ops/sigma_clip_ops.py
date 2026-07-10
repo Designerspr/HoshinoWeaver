@@ -34,12 +34,13 @@ from loguru import logger
 
 from .._custom_op import median_reduce_chunk as custom_median_reduce_chunk
 from .._custom_op.ops.fgp import (
-    huber_weighted_chunk_compiled_available as custom_huber_weighted_chunk_available,
-    huber_weighted_chunk_compiled_or_none as custom_huber_weighted_chunk_or_none,
+    huber_weighted_chunk_native_available as custom_huber_weighted_chunk_available,
+    try_huber_weighted_chunk_native as custom_huber_weighted_chunk_or_none,
 )
 from .._custom_op.ops.sigma_clip import (
+    sigma_clip_fused_chunk as custom_sigma_clip_fused_chunk,
     sigma_clip_iterative_chunk as custom_sigma_clip_iterative_chunk,
-    _load_compiled_module_result as _sc_load_compiled,
+    sigma_clip_iterative_chunk_native_available,
 )
 from ..component.data_container import FastGaussianParam, FloatImage
 from ..component.frame_buffer import (BaseFrameBuffer, DiskFrameBuffer,
@@ -302,13 +303,13 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
 
         # Check if C++ kernel can be used for this chunk
         first_frame_dtype = fgp_total.source_dtype
-        use_cpp = (
-            self._cpp_kernel_available()
+        use_native = (
+            self._native_kernel_available()
             and first_frame_dtype in (np.dtype('uint8'), np.dtype('uint16'))
         )
 
         clip_merger = None
-        if not use_cpp:
+        if not use_native:
             clip_merger = SigmaClippingMerger(
                 ref_img=fgp_chunk,
                 rej_high=rej_high,
@@ -322,28 +323,27 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
             'static_mask': static_mask_chunk,
             'accepted': None,
             '_mask_cache': {},
-            '_use_cpp': use_cpp,
-            '_cpp_done': False,
+            '_use_native': use_native,
+            '_native_done': False,
         }
 
     @staticmethod
-    def _cpp_kernel_available() -> bool:
-        module, _ = _sc_load_compiled()
-        return module is not None and hasattr(module, "sigma_clip_iterative_chunk")
+    def _native_kernel_available() -> bool:
+        return sigma_clip_iterative_chunk_native_available()
 
     def _max_passes(self, configs):
         return configs['max_iter']
 
     def _run_pass(self, state, chunk_stack):
         """Override: use C++ kernel for all iterations in one call."""
-        if state['_use_cpp'] and not state['_cpp_done']:
-            self._run_pass_cpp(state, chunk_stack)
+        if state['_use_native'] and not state['_native_done']:
+            self._run_pass_native(state, chunk_stack)
             return
         # Fallback: per-frame merge (one pass)
         for frame_idx, (chunk_data, chunk_weight) in enumerate(chunk_stack):
             self._merge_chunk(state, chunk_data, chunk_weight, frame_idx)
 
-    def _run_pass_cpp(self, state, chunk_stack):
+    def _run_pass_native(self, state, chunk_stack):
         """C++ path: stack all frames, call kernel with skip_zero_rgb."""
         n_frames = len(chunk_stack)
         first_data = chunk_stack[0][0]
@@ -396,7 +396,7 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
         )
         accepted.apply_zero_var(fgp_chunk)
         state['accepted'] = accepted
-        state['_cpp_done'] = True
+        state['_native_done'] = True
 
     def _merge_chunk(self, state, chunk_data, chunk_weight, frame_idx):
         cache = state['_mask_cache']
@@ -409,7 +409,7 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
                                    skip_zero_rgb=is_rgb)
 
     def _check_convergence(self, state, pass_idx):
-        if state['_cpp_done']:
+        if state['_native_done']:
             return True
 
         fgp_chunk = state['fgp_chunk']
@@ -567,8 +567,6 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
         return 1
 
     def _run_pass(self, state, chunk_stack):
-        from .._custom_op.ops.sigma_clip import sigma_clip_fused_chunk
-
         n_frames = len(chunk_stack)
         first_data = chunk_stack[0][0]
         h, w = first_data.shape[:2]
@@ -596,7 +594,7 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
             ).copy()
 
         # Call fused kernel (computes mean + iterative clip)
-        acc_sum, acc_sq, acc_n = sigma_clip_fused_chunk(
+        acc_sum, acc_sq, acc_n = custom_sigma_clip_fused_chunk(
             stack_2d, self._configs['rej_high'], self._configs['rej_low'],
             self._configs['max_iter'], mask=chunk_mask,
             skip_zero_rgb=is_rgb, channels=channels)

@@ -98,9 +98,5 @@ def _select_median_filter_backend(
 
 
 def median_filter_2d(image: np.ndarray, ksize: int) -> np.ndarray:
-    backend_name, backend = _select_median_filter_backend(_fallback_preference())
-    if backend_name == "compiled":
-        image_arr = _validate_image(image)
-        _apply_compiled_threads("median_filter_2d", image_arr)
-        return backend(image_arr, ksize)
+    _, backend = _select_median_filter_backend(_fallback_preference())
     return backend(image, ksize)

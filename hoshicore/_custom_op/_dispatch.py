@@ -37,13 +37,19 @@ def fallback_preference() -> str:
 
 
 def is_cuda_runtime_unavailable_error(exc: RuntimeError) -> bool:
+    module, _ = load_compiled_module()
+    unavailable_type = (
+        getattr(module, "CudaRuntimeUnavailableError", None)
+        if module is not None
+        else None
+    )
+    if unavailable_type is not None and isinstance(exc, unavailable_type):
+        return True
     message = str(exc).lower()
     return (
         "no cuda-capable device is detected" in message
         or "cuda driver version is insufficient" in message
         or "cuda initialization error" in message
-        or "cudaunknown" in message
-        or "cuda unknown" in message
         or "device is busy" in message
         or "device unavailable" in message
         or "no kernel image is available" in message
@@ -87,11 +93,7 @@ def cuda_memory_info() -> dict[str, Any]:
     }
 
 
-_LAST_APPLIED_COMPILED_THREADS: int | None = None
-
-
 def apply_compiled_threads(op_name: str, sample: np.ndarray) -> None:
-    global _LAST_APPLIED_COMPILED_THREADS
     module, _ = load_compiled_module()
     if module is None:
         return
@@ -106,7 +108,4 @@ def apply_compiled_threads(op_name: str, sample: np.ndarray) -> None:
         dtype=sample.dtype,
         build_info=build,
     )
-    if threads == _LAST_APPLIED_COMPILED_THREADS:
-        return
-    if module.set_openmp_threads(int(threads)):
-        _LAST_APPLIED_COMPILED_THREADS = int(threads)
+    module.set_openmp_threads(int(threads))

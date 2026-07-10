@@ -1,4 +1,5 @@
 #include "max_ops.h"
+#include "common/py_array_utils.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -96,7 +97,7 @@ void threshold_max_merge_inplace_kernel(
 
 template <typename T>
 py::array_t<T> max_combine_inplace_impl(
-    py::array_t<T, py::array::c_style | py::array::forcecast> base,
+    hnw::MutableCArray<T> base,
     const py::array_t<T, py::array::c_style | py::array::forcecast>& fresh) {
     if (base.ndim() != fresh.ndim()) {
         throw std::invalid_argument("max_combine: ndim mismatch");
@@ -118,7 +119,7 @@ py::array_t<T> max_combine_inplace_impl(
 
 template <typename T>
 py::array_t<T> threshold_max_merge_inplace_impl(
-    py::array_t<T, py::array::c_style | py::array::forcecast> result,
+    hnw::MutableCArray<T> result,
     const py::array_t<T, py::array::c_style | py::array::forcecast>& frame,
     const py::array_t<T, py::array::c_style | py::array::forcecast>& mean_img,
     const py::array_t<T, py::array::c_style | py::array::forcecast>& std_img,
@@ -143,6 +144,7 @@ py::array_t<T> threshold_max_merge_inplace_impl(
 }
 
 py::array max_combine_dispatch(py::array base, const py::array& fresh) {
+    hnw::require_mutable_c_array(base, "max_combine", "base");
     if (py::str(base.dtype()).cast<std::string>() !=
         py::str(fresh.dtype()).cast<std::string>()) {
         throw std::invalid_argument("max_combine: dtype mismatch");
@@ -150,32 +152,32 @@ py::array max_combine_dispatch(py::array base, const py::array& fresh) {
 
     if (py::isinstance<py::array_t<uint8_t>>(base)) {
         return max_combine_inplace_impl<uint8_t>(
-            base.cast<py::array_t<uint8_t>>(),
+            base.cast<hnw::MutableCArray<uint8_t>>(),
             fresh.cast<py::array_t<uint8_t>>());
     }
     if (py::isinstance<py::array_t<uint16_t>>(base)) {
         return max_combine_inplace_impl<uint16_t>(
-            base.cast<py::array_t<uint16_t>>(),
+            base.cast<hnw::MutableCArray<uint16_t>>(),
             fresh.cast<py::array_t<uint16_t>>());
     }
     if (py::isinstance<py::array_t<uint32_t>>(base)) {
         return max_combine_inplace_impl<uint32_t>(
-            base.cast<py::array_t<uint32_t>>(),
+            base.cast<hnw::MutableCArray<uint32_t>>(),
             fresh.cast<py::array_t<uint32_t>>());
     }
     if (py::isinstance<py::array_t<uint64_t>>(base)) {
         return max_combine_inplace_impl<uint64_t>(
-            base.cast<py::array_t<uint64_t>>(),
+            base.cast<hnw::MutableCArray<uint64_t>>(),
             fresh.cast<py::array_t<uint64_t>>());
     }
     if (py::isinstance<py::array_t<float>>(base)) {
         return max_combine_inplace_impl<float>(
-            base.cast<py::array_t<float>>(),
+            base.cast<hnw::MutableCArray<float>>(),
             fresh.cast<py::array_t<float>>());
     }
     if (py::isinstance<py::array_t<double>>(base)) {
         return max_combine_inplace_impl<double>(
-            base.cast<py::array_t<double>>(),
+            base.cast<hnw::MutableCArray<double>>(),
             fresh.cast<py::array_t<double>>());
     }
 
@@ -188,6 +190,7 @@ py::array threshold_max_merge_dispatch(py::array result,
                                        const py::array& std_img,
                                        const double n_sigma,
                                        py::object weight_obj) {
+    hnw::require_mutable_c_array(result, "threshold_max_merge", "result");
     const double weight = weight_obj.is_none() ? 1.0 : weight_obj.cast<double>();
     const std::string result_dtype = py::str(result.dtype()).cast<std::string>();
     if (result_dtype != py::str(frame.dtype()).cast<std::string>() ||
@@ -198,7 +201,7 @@ py::array threshold_max_merge_dispatch(py::array result,
 
     if (py::isinstance<py::array_t<float>>(result)) {
         return threshold_max_merge_inplace_impl<float>(
-            result.cast<py::array_t<float>>(),
+            result.cast<hnw::MutableCArray<float>>(),
             frame.cast<py::array_t<float>>(),
             mean_img.cast<py::array_t<float>>(),
             std_img.cast<py::array_t<float>>(),
@@ -207,7 +210,7 @@ py::array threshold_max_merge_dispatch(py::array result,
     }
     if (py::isinstance<py::array_t<double>>(result)) {
         return threshold_max_merge_inplace_impl<double>(
-            result.cast<py::array_t<double>>(),
+            result.cast<hnw::MutableCArray<double>>(),
             frame.cast<py::array_t<double>>(),
             mean_img.cast<py::array_t<double>>(),
             std_img.cast<py::array_t<double>>(),

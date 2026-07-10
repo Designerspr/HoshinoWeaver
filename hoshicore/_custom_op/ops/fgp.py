@@ -303,11 +303,7 @@ def fgp_accumulate(base: Any, fresh: np.ndarray, weight: Any = None,
     int_weight = _validate_integer_weight(weight)
     if weight is not None and int_weight is None:
         return _python_fallback(base, np.asarray(fresh), weight)
-    backend_name, backend = _select_fgp_backend(_fallback_preference())
-    if backend_name == "compiled":
-        sum_mu, _, _ = _validate_target(base)
-        fresh_arr = _validate_fresh(sum_mu, fresh)
-        _apply_compiled_threads("fgp_accumulate", fresh_arr)
+    _, backend = _select_fgp_backend(_fallback_preference())
     return backend(base, fresh, int_weight, skip_zero_rgb=skip_zero_rgb)
 
 
@@ -359,11 +355,7 @@ def _select_fgp_add_backend(preference: str) -> tuple[str, Callable[[Any, Any], 
 
 
 def fgp_add(base: Any, other: Any) -> Any:
-    backend_name, backend = _select_fgp_add_backend(_fallback_preference())
-    if backend_name == "compiled":
-        sum_mu, _, _ = _validate_target(base)
-        _validate_peer(other, sum_mu.shape, op_name="fgp_add")
-        _apply_compiled_threads("fgp_add", sum_mu)
+    _, backend = _select_fgp_add_backend(_fallback_preference())
     return backend(base, other)
 
 
@@ -490,21 +482,7 @@ def huber_weighted_accumulate(
             huber_c,
             weight,
         )
-    backend_name, backend = _select_huber_backend(_fallback_preference())
-    if backend_name == "compiled":
-        weighted_sum, _ = _validate_huber_target(base)
-        fresh_arr = _validate_fresh(
-            weighted_sum,
-            fresh,
-            op_name="huber_weighted_accumulate",
-        )
-        _validate_ref_stats(
-            fresh_arr,
-            ref_mean,
-            ref_std,
-            op_name="huber_weighted_accumulate",
-        )
-        _apply_compiled_threads("huber_weighted_accumulate", fresh_arr)
+    _, backend = _select_huber_backend(_fallback_preference())
     return backend(base, fresh, ref_mean, ref_std, huber_c, scalar_weight)
 
 
@@ -635,7 +613,7 @@ def huber_weighted_chunk(
         return huber_weighted_chunk_numpy(stack, ref_mean, ref_std, huber_c, weights)
 
 
-def huber_weighted_chunk_compiled_or_none(
+def try_huber_weighted_chunk_native(
     stack: np.ndarray,
     ref_mean: np.ndarray,
     ref_std: np.ndarray,
@@ -654,7 +632,7 @@ def huber_weighted_chunk_compiled_or_none(
         return None
 
 
-def huber_weighted_chunk_compiled_available() -> bool:
+def huber_weighted_chunk_native_available() -> bool:
     backend_name, _ = _select_huber_chunk_backend(_fallback_preference())
     return backend_name == "cuda"
 

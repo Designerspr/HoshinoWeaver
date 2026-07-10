@@ -148,8 +148,8 @@ def _mock_cuda_backend(
             return backend_registry.BackendSelection(
                 None, None, "numpy backend forced by preference")
         if logical_op_arg == logical_op:
-            build_info = kwargs.get("build_info")
-            if isinstance(build_info, dict) and not build_info.get("cuda", True):
+            excluded_backends = kwargs.get("exclude_backends", ())
+            if "cuda_host_io" in excluded_backends:
                 if cpu_available:
                     return cpu_selection
                 return backend_registry.BackendSelection(

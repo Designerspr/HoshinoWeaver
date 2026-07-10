@@ -408,7 +408,7 @@ def _camera_model_remap_cpu_fallback_available() -> bool:
         "camera_model_remap",
         "auto",
         load_module=_load_compiled_module_result,
-        build_info={"cuda": False},
+        exclude_backends={"cuda_host_io"},
     )
     if (
         selection.native

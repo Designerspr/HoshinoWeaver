@@ -238,7 +238,7 @@ def _selected_backend_for_chunk_op(op_cls: type[BaseOp]) -> Any | None:
         return select_backend(
             logical_op,
             fallback_preference(),
-            build_info={"cuda": False},
+            exclude_backends={"cuda_host_io"},
         )
     return selection
 
