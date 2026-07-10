@@ -1,6 +1,7 @@
 #include "calibration_ops.h"
 
-#include "common/compat.h"
+#include "common/cpu_compat.h"
+#include "common/py_array_utils.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -12,31 +13,6 @@
 #include <pybind11/numpy.h>
 
 namespace {
-
-#ifndef HNW_ENABLE_OMP_SIMD
-#define HNW_ENABLE_OMP_SIMD 0
-#endif
-
-#if defined(_MSC_VER)
-#define HNW_RESTRICT __restrict
-#elif defined(__GNUC__) || defined(__clang__)
-#define HNW_RESTRICT __restrict__
-#else
-#define HNW_RESTRICT
-#endif
-
-void validate_same_shape(const py::array& first,
-                         const py::array& second,
-                         const char* op_name) {
-    if (first.ndim() != second.ndim()) {
-        throw std::invalid_argument(std::string(op_name) + ": ndim mismatch");
-    }
-    for (ssize_t idx = 0; idx < first.ndim(); ++idx) {
-        if (first.shape(idx) != second.shape(idx)) {
-            throw std::invalid_argument(std::string(op_name) + ": shape mismatch");
-        }
-    }
-}
 
 template <typename T>
 constexpr double max_value_for() {
@@ -134,7 +110,7 @@ template <typename T>
 py::array_t<T> calibration_subtract_impl(
     const py::array_t<T, py::array::c_style | py::array::forcecast>& frame,
     const py::array_t<T, py::array::c_style | py::array::forcecast>& reference) {
-    validate_same_shape(frame, reference, "calibration_subtract");
+    hnw::require_same_shape(frame, reference, "calibration_subtract");
     auto frame_info = frame.request();
     auto ref_info = reference.request();
     py::array_t<T> out(frame_info.shape);
@@ -147,7 +123,7 @@ template <typename T>
 py::array_t<T> calibration_divide_impl(
     const py::array_t<T, py::array::c_style | py::array::forcecast>& frame,
     const py::array_t<T, py::array::c_style | py::array::forcecast>& reference) {
-    validate_same_shape(frame, reference, "calibration_divide");
+    hnw::require_same_shape(frame, reference, "calibration_divide");
     auto frame_info = frame.request();
     auto ref_info = reference.request();
     py::array_t<T> out(frame_info.shape);
@@ -159,10 +135,8 @@ py::array_t<T> calibration_divide_impl(
 
 py::array calibration_subtract_dispatch(const py::array& frame,
                                         const py::array& reference) {
+    hnw::require_same_dtype(frame, reference, "calibration_subtract");
     const std::string frame_dtype = py::str(frame.dtype()).cast<std::string>();
-    if (frame_dtype != py::str(reference.dtype()).cast<std::string>()) {
-        throw std::invalid_argument("calibration_subtract: dtype mismatch");
-    }
 
     if (py::isinstance<py::array_t<unsigned char>>(frame)) {
         return calibration_subtract_impl<unsigned char>(
@@ -195,10 +169,8 @@ py::array calibration_subtract_dispatch(const py::array& frame,
 
 py::array calibration_divide_dispatch(const py::array& frame,
                                       const py::array& reference) {
+    hnw::require_same_dtype(frame, reference, "calibration_divide");
     const std::string frame_dtype = py::str(frame.dtype()).cast<std::string>();
-    if (frame_dtype != py::str(reference.dtype()).cast<std::string>()) {
-        throw std::invalid_argument("calibration_divide: dtype mismatch");
-    }
 
     if (py::isinstance<py::array_t<unsigned char>>(frame)) {
         return calibration_divide_impl<unsigned char>(

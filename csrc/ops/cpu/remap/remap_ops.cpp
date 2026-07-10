@@ -1,6 +1,6 @@
 #include "remap_ops.h"
 
-#include "common/compat.h"
+#include "common/cpu_compat.h"
 
 #include <algorithm>
 #include <array>
@@ -14,14 +14,6 @@
 #include <pybind11/numpy.h>
 
 namespace {
-
-#if defined(_MSC_VER)
-#define HNW_RESTRICT __restrict
-#elif defined(__GNUC__) || defined(__clang__)
-#define HNW_RESTRICT __restrict__
-#else
-#define HNW_RESTRICT
-#endif
 
 std::array<float, 5> parse_dist_coeffs(const py::object& dist_obj,
                                        const char* name,

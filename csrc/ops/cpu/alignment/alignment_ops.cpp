@@ -1,6 +1,6 @@
 #include "alignment_ops.h"
 
-#include "common/compat.h"
+#include "common/cpu_compat.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,14 +14,6 @@
 #include <pybind11/numpy.h>
 
 namespace {
-
-#if defined(_MSC_VER)
-#define HNW_RESTRICT __restrict
-#elif defined(__GNUC__) || defined(__clang__)
-#define HNW_RESTRICT __restrict__
-#else
-#define HNW_RESTRICT
-#endif
 
 constexpr ssize_t FEATURE_BINS = 120;
 constexpr double FEATURE_STEP = 3.14159265358979323846 / 60.0;

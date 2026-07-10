@@ -1,5 +1,7 @@
-#include "common/compat.h"
 #include "noise_ops.h"
+
+#include "common/cpu_compat.h"
+#include "common/py_array_utils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,44 +14,6 @@
 #include <pybind11/numpy.h>
 
 namespace {
-
-#ifndef HNW_ENABLE_OMP_SIMD
-#define HNW_ENABLE_OMP_SIMD 0
-#endif
-
-#if defined(_MSC_VER)
-#define HNW_RESTRICT __restrict
-#elif defined(__GNUC__) || defined(__clang__)
-#define HNW_RESTRICT __restrict__
-#else
-#define HNW_RESTRICT
-#endif
-
-void validate_same_shape(const py::array& first,
-                         const py::array& second,
-                         const char* op_name) {
-    if (first.ndim() != second.ndim()) {
-        throw std::invalid_argument(std::string(op_name) + ": ndim mismatch");
-    }
-    for (ssize_t i = 0; i < first.ndim(); ++i) {
-        if (first.shape(i) != second.shape(i)) {
-            throw std::invalid_argument(std::string(op_name) + ": shape mismatch");
-        }
-    }
-}
-
-void validate_same_shape_info(const py::buffer_info& first,
-                              const py::buffer_info& second,
-                              const char* op_name) {
-    if (first.ndim != second.ndim) {
-        throw std::invalid_argument(std::string(op_name) + ": ndim mismatch");
-    }
-    for (ssize_t i = 0; i < first.ndim; ++i) {
-        if (first.shape[i] != second.shape[i]) {
-            throw std::invalid_argument(std::string(op_name) + ": shape mismatch");
-        }
-    }
-}
 
 double select_quantile(std::vector<double>& values, const double q) {
     if (values.empty()) {
@@ -134,7 +98,7 @@ py::array_t<T> equalize_noise_correct_impl(
     const double c_n_eff,
     const double max_value,
     const double highlight_preserve) {
-    validate_same_shape(max_img, filled_std_img, "equalize_noise_correct");
+    hnw::require_same_shape(max_img, filled_std_img, "equalize_noise_correct");
     if (!(highlight_preserve >= 0.0 && highlight_preserve < 1.0)) {
         throw std::invalid_argument(
             "equalize_noise_correct: highlight_preserve must be in [0, 1)");
@@ -161,10 +125,8 @@ py::array equalize_noise_correct_dispatch(
     const double c_n_eff,
     const double max_value,
     const double highlight_preserve) {
+    hnw::require_same_dtype(max_img, filled_std_img, "equalize_noise_correct");
     const std::string max_dtype = py::str(max_img.dtype()).cast<std::string>();
-    if (max_dtype != py::str(filled_std_img.dtype()).cast<std::string>()) {
-        throw std::invalid_argument("equalize_noise_correct: dtype mismatch");
-    }
 
     if (py::isinstance<py::array_t<float>>(max_img)) {
         return equalize_noise_correct_impl<float>(
@@ -284,7 +246,7 @@ py::array_t<T> noise_fill_local_mean_impl(
     const py::array_t<T, py::array::c_style | py::array::forcecast>& img,
     const py::array_t<bool, py::array::c_style | py::array::forcecast>& mask,
     const int64_t kernel_size) {
-    validate_same_shape(img, mask, "noise_fill_local_mean");
+    hnw::require_same_shape(img, mask, "noise_fill_local_mean");
     if (img.ndim() != 2 && img.ndim() != 3) {
         throw std::invalid_argument("noise_fill_local_mean: expected 2D or 3D array");
     }
@@ -334,8 +296,8 @@ py::object noise_equalization_params_impl(
     auto mean_info = mean_img.request();
     auto std_info = std_img.request();
     auto n_info = n_img.request();
-    validate_same_shape_info(max_info, mean_info, "noise_equalization_params");
-    validate_same_shape_info(max_info, std_info, "noise_equalization_params");
+    hnw::require_same_shape(max_info, mean_info, "noise_equalization_params");
+    hnw::require_same_shape(max_info, std_info, "noise_equalization_params");
     if (max_info.ndim != 2 && max_info.ndim != 3) {
         throw std::invalid_argument("noise_equalization_params: expected 2D or 3D array");
     }
@@ -483,11 +445,9 @@ py::object noise_equalization_params_dispatch(
     const double top_fraction,
     const double sigma_reject,
     const bool minus_only) {
+    hnw::require_same_dtype(max_img, mean_img, "noise_equalization_params");
+    hnw::require_same_dtype(max_img, std_img, "noise_equalization_params");
     const std::string max_dtype = py::str(max_img.dtype()).cast<std::string>();
-    if (max_dtype != py::str(mean_img.dtype()).cast<std::string>()
-        || max_dtype != py::str(std_img.dtype()).cast<std::string>()) {
-        throw std::invalid_argument("noise_equalization_params: dtype mismatch");
-    }
 
     if (py::isinstance<py::array_t<float>>(max_img)) {
         return noise_equalization_params_impl<float>(

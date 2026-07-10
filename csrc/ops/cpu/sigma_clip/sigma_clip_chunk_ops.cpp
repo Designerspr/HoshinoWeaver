@@ -10,21 +10,9 @@
 
 #include <pybind11/numpy.h>
 
-#include "common/compat.h"
+#include "common/cpu_compat.h"
 
 namespace {
-
-#ifndef HNW_ENABLE_OMP_SIMD
-#define HNW_ENABLE_OMP_SIMD 0
-#endif
-
-#if defined(_MSC_VER)
-#define HNW_RESTRICT __restrict
-#elif defined(__GNUC__) || defined(__clang__)
-#define HNW_RESTRICT __restrict__
-#else
-#define HNW_RESTRICT
-#endif
 
 template <typename T>
 inline bool is_pixel_zero_rgb_chunk(const T* HNW_RESTRICT ptr,

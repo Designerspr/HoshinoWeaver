@@ -1,5 +1,7 @@
 #include "filter_ops.h"
 
+#include "common/cpu_compat.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -12,14 +14,6 @@
 namespace {
 
 constexpr ssize_t MAX_MEDIAN_FILTER_KSIZE = 65535;
-
-#if defined(_MSC_VER)
-#define HNW_RESTRICT __restrict
-#elif defined(__GNUC__) || defined(__clang__)
-#define HNW_RESTRICT __restrict__
-#else
-#define HNW_RESTRICT
-#endif
 
 inline ssize_t clamp_index(ssize_t value, ssize_t low, ssize_t high) {
     return std::max(low, std::min(value, high));

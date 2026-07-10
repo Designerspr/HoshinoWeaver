@@ -1,4 +1,5 @@
 #include "max_ops.h"
+#include "common/cpu_compat.h"
 #include "common/py_array_utils.h"
 
 #include <algorithm>
@@ -11,37 +12,12 @@
 
 namespace {
 
-#ifndef HNW_ENABLE_OMP_SIMD
-#define HNW_ENABLE_OMP_SIMD 0
-#endif
-
-#if defined(_MSC_VER)
-#define HNW_RESTRICT __restrict
-#elif defined(__GNUC__) || defined(__clang__)
-#define HNW_RESTRICT __restrict__
-#else
-#define HNW_RESTRICT
-#endif
-
 template <typename T>
 inline T elementwise_max(T lhs, T rhs) {
     if constexpr (std::is_floating_point_v<T>) {
         return std::max(lhs, rhs);
     } else {
         return lhs > rhs ? lhs : rhs;
-    }
-}
-
-void validate_same_shape(const py::array& first,
-                         const py::array& second,
-                         const char* op_name) {
-    if (first.ndim() != second.ndim()) {
-        throw std::invalid_argument(std::string(op_name) + ": ndim mismatch");
-    }
-    for (ssize_t i = 0; i < first.ndim(); ++i) {
-        if (first.shape(i) != second.shape(i)) {
-            throw std::invalid_argument(std::string(op_name) + ": shape mismatch");
-        }
     }
 }
 
@@ -99,14 +75,7 @@ template <typename T>
 py::array_t<T> max_combine_inplace_impl(
     hnw::MutableCArray<T> base,
     const py::array_t<T, py::array::c_style | py::array::forcecast>& fresh) {
-    if (base.ndim() != fresh.ndim()) {
-        throw std::invalid_argument("max_combine: ndim mismatch");
-    }
-    for (ssize_t i = 0; i < base.ndim(); ++i) {
-        if (base.shape(i) != fresh.shape(i)) {
-            throw std::invalid_argument("max_combine: shape mismatch");
-        }
-    }
+    hnw::require_same_shape(base, fresh, "max_combine");
 
     auto base_info = base.request();
     auto fresh_info = fresh.request();
@@ -125,9 +94,9 @@ py::array_t<T> threshold_max_merge_inplace_impl(
     const py::array_t<T, py::array::c_style | py::array::forcecast>& std_img,
     const double n_sigma,
     const double weight) {
-    validate_same_shape(result, frame, "threshold_max_merge");
-    validate_same_shape(result, mean_img, "threshold_max_merge");
-    validate_same_shape(result, std_img, "threshold_max_merge");
+    hnw::require_same_shape(result, frame, "threshold_max_merge");
+    hnw::require_same_shape(result, mean_img, "threshold_max_merge");
+    hnw::require_same_shape(result, std_img, "threshold_max_merge");
 
     auto result_info = result.request();
     auto frame_info = frame.request();
@@ -145,10 +114,7 @@ py::array_t<T> threshold_max_merge_inplace_impl(
 
 py::array max_combine_dispatch(py::array base, const py::array& fresh) {
     hnw::require_mutable_c_array(base, "max_combine", "base");
-    if (py::str(base.dtype()).cast<std::string>() !=
-        py::str(fresh.dtype()).cast<std::string>()) {
-        throw std::invalid_argument("max_combine: dtype mismatch");
-    }
+    hnw::require_same_dtype(base, fresh, "max_combine");
 
     if (py::isinstance<py::array_t<uint8_t>>(base)) {
         return max_combine_inplace_impl<uint8_t>(
@@ -192,12 +158,10 @@ py::array threshold_max_merge_dispatch(py::array result,
                                        py::object weight_obj) {
     hnw::require_mutable_c_array(result, "threshold_max_merge", "result");
     const double weight = weight_obj.is_none() ? 1.0 : weight_obj.cast<double>();
+    hnw::require_same_dtype(result, frame, "threshold_max_merge");
+    hnw::require_same_dtype(result, mean_img, "threshold_max_merge");
+    hnw::require_same_dtype(result, std_img, "threshold_max_merge");
     const std::string result_dtype = py::str(result.dtype()).cast<std::string>();
-    if (result_dtype != py::str(frame.dtype()).cast<std::string>() ||
-        result_dtype != py::str(mean_img.dtype()).cast<std::string>() ||
-        result_dtype != py::str(std_img.dtype()).cast<std::string>()) {
-        throw std::invalid_argument("threshold_max_merge: dtype mismatch");
-    }
 
     if (py::isinstance<py::array_t<float>>(result)) {
         return threshold_max_merge_inplace_impl<float>(

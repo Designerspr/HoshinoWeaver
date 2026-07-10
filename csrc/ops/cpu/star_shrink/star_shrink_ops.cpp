@@ -1,5 +1,6 @@
-#include "common/compat.h"
 #include "star_shrink_ops.h"
+
+#include "common/cpu_compat.h"
 
 #include <algorithm>
 #include <array>
@@ -13,14 +14,6 @@
 #include <pybind11/numpy.h>
 
 namespace {
-
-#if defined(_MSC_VER)
-#define HNW_RESTRICT __restrict
-#elif defined(__GNUC__) || defined(__clang__)
-#define HNW_RESTRICT __restrict__
-#else
-#define HNW_RESTRICT
-#endif
 
 struct LabPixel {
     float l;
