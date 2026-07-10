@@ -13,6 +13,14 @@ When adding or modifying any feature, check whether the following need updating:
 - `CLAUDE.md` — if architecture, base classes, or invariants changed
 - Inline docstrings / YAML comments in affected files
 
+## Agent Tooling Notes
+
+- This repository uses UTF-8 source files. Do not assume Windows PowerShell 5.1 will display UTF-8 correctly.
+- When terminal output looks garbled, prefer reading text files with Python using `encoding="utf-8"` or use `Get-Content -Encoding utf8` explicitly.
+- Treat terminal mojibake as a display issue first. If Python can decode the file as UTF-8, trust the file bytes over the terminal rendering.
+- For patching and search, prefer stable ASCII anchors such as function names, variable names, filenames, and numeric constants. Avoid relying on localized comments or mojibake text as patch context.
+- In frequently edited debug/dev scripts, prefer English comments, docstrings, and log messages unless there is a strong reason to keep localized text.
+
 ## Commands
 
 ```bash
