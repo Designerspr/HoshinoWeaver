@@ -34,7 +34,11 @@ add_library(hnw_ops_cpu_detection STATIC
 )
 
 add_library(hnw_ops_cpu_fgp STATIC
+    ops/cpu/fgp/fgp_accumulate_ops.cpp
+    ops/cpu/fgp/fgp_merge_ops.cpp
     ops/cpu/fgp/fgp_ops.cpp
+    ops/cpu/fgp/huber_accumulate_ops.cpp
+    ops/cpu/fgp/sigma_clip_merge_ops.cpp
 )
 
 add_library(hnw_ops_cpu_filter STATIC
