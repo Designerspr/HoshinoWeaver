@@ -22,51 +22,51 @@ add_library(hnw_ops_common STATIC
 )
 
 add_library(hnw_ops_cpu_calibration STATIC
-    ops/calibration/calibration_ops.cpp
+    ops/cpu/calibration/calibration_ops.cpp
 )
 
 add_library(hnw_ops_cpu_alignment STATIC
-    ops/alignment/alignment_ops.cpp
+    ops/cpu/alignment/alignment_ops.cpp
 )
 
 add_library(hnw_ops_cpu_detection STATIC
-    ops/detection/detection_ops.cpp
+    ops/cpu/detection/detection_ops.cpp
 )
 
 add_library(hnw_ops_cpu_fgp STATIC
-    ops/fgp/fgp_ops.cpp
+    ops/cpu/fgp/fgp_ops.cpp
 )
 
 add_library(hnw_ops_cpu_filter STATIC
-    ops/filter/filter_ops.cpp
+    ops/cpu/filter/filter_ops.cpp
 )
 
 add_library(hnw_ops_cpu_max STATIC
-    ops/max/max_ops.cpp
+    ops/cpu/max/max_ops.cpp
 )
 
 add_library(hnw_ops_cpu_median STATIC
-    ops/median/median_ops.cpp
+    ops/cpu/median/median_ops.cpp
 )
 
 add_library(hnw_ops_cpu_noise STATIC
-    ops/noise/noise_ops.cpp
+    ops/cpu/noise/noise_ops.cpp
 )
 
 add_library(hnw_ops_cpu_remap STATIC
-    ops/remap/remap_ops.cpp
+    ops/cpu/remap/remap_ops.cpp
 )
 
 add_library(hnw_ops_cpu_sigma_clip STATIC
-    ops/sigma_clip/sigma_clip_chunk_ops.cpp
+    ops/cpu/sigma_clip/sigma_clip_chunk_ops.cpp
 )
 
 add_library(hnw_ops_cpu_star_shrink STATIC
-    ops/star_shrink/star_shrink_ops.cpp
+    ops/cpu/star_shrink/star_shrink_ops.cpp
 )
 
 add_library(hnw_ops_cpu_wavelet STATIC
-    ops/wavelet/wavelet_ops.cpp
+    ops/cpu/wavelet/wavelet_ops.cpp
 )
 
 set(hnw_cpu_targets
