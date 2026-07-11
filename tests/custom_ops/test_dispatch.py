@@ -65,7 +65,7 @@ class TestCustomOpDispatchHelpers(unittest.TestCase):
                 RuntimeError("cudaGetDevice: no CUDA-capable device is detected")
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             is_cuda_runtime_unavailable_error(
                 RuntimeError(
                     "kernel launch: no kernel image is available for execution on the device"
@@ -93,6 +93,72 @@ class TestCustomOpDispatchHelpers(unittest.TestCase):
                     RuntimeError("structured CUDA runtime failure")
                 )
             )
+
+    def test_cuda_memory_probe_propagates_runtime_errors(self) -> None:
+        module = mock.Mock()
+        module.cuda_memory_info.side_effect = RuntimeError(
+            "cudaMemGetInfo: out of memory"
+        )
+        with mock.patch.object(
+            custom_op_dispatch,
+            "load_compiled_module",
+            return_value=(module, None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "out of memory"):
+                custom_op_dispatch.cuda_memory_info()
+
+    def test_cuda_memory_probe_rejects_incomplete_available_payload(self) -> None:
+        module = mock.Mock()
+        module.cuda_memory_info.return_value = {
+            "available": True,
+            "status": "available",
+        }
+        with mock.patch.object(
+            custom_op_dispatch,
+            "load_compiled_module",
+            return_value=(module, None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing byte counts"):
+                custom_op_dispatch.cuda_memory_info()
+
+    def test_cuda_memory_probe_raises_structured_error(self) -> None:
+        module = mock.Mock()
+        module.cuda_memory_info.return_value = {
+            "available": False,
+            "status": "error",
+            "reason_code": "cuda_runtime_error",
+            "error_code": 2,
+            "category": "resource",
+            "reason": "out of memory",
+        }
+        with mock.patch.object(
+            custom_op_dispatch,
+            "load_compiled_module",
+            return_value=(module, None),
+        ):
+            with self.assertRaisesRegex(
+                custom_op_dispatch.CudaProbeError, "out of memory"
+            ) as caught:
+                custom_op_dispatch.cuda_memory_info()
+
+        self.assertEqual(caught.exception.error_code, 2)
+        self.assertEqual(caught.exception.category, "resource")
+
+    def test_cuda_memory_probe_rejects_inconsistent_status(self) -> None:
+        module = mock.Mock()
+        module.cuda_memory_info.return_value = {
+            "available": True,
+            "status": "error",
+            "free_bytes": 1024,
+            "total_bytes": 2048,
+        }
+        with mock.patch.object(
+            custom_op_dispatch,
+            "load_compiled_module",
+            return_value=(module, None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "inconsistent"):
+                custom_op_dispatch.cuda_memory_info()
 
     def test_sigma_clip_cpu_entrypoints_apply_compiled_threads(self) -> None:
         module = mock.Mock()

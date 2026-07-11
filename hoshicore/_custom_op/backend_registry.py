@@ -6,9 +6,14 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Collection, Mapping
 
-from hoshicore._custom_op._dispatch import load_compiled_module
+from hoshicore._custom_op._dispatch import (
+    cuda_memory_info,
+    is_cuda_runtime_unavailable_error,
+    load_compiled_module,
+)
 
 ModuleLoader = Callable[[], tuple[Any | None, str | None]]
+CudaProbe = Callable[[], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -25,10 +30,34 @@ class BackendCandidate:
 
 
 @dataclass(frozen=True)
+class BackendDecision:
+    logical_op: str
+    backend: str
+    kernel_name: str | None
+    placement: str
+    fallback: str | None
+    native: bool
+    reason_code: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "logical_op": self.logical_op,
+            "backend": self.backend,
+            "kernel_name": self.kernel_name,
+            "placement": self.placement,
+            "fallback": self.fallback,
+            "native": self.native,
+            "reason_code": self.reason_code,
+        }
+
+
+@dataclass(frozen=True)
 class BackendSelection:
     candidate: BackendCandidate | None
     module: Any | None
     reason: str | None = None
+    reason_code: str = "unspecified"
+    decision: BackendDecision | None = None
 
     @property
     def native(self) -> bool:
@@ -39,6 +68,28 @@ class BackendSelection:
         if self.candidate is None:
             return "numpy"
         return self.candidate.backend
+
+    def to_decision(self, logical_op: str) -> BackendDecision:
+        candidate = self.candidate
+        if candidate is None:
+            return BackendDecision(
+                logical_op=logical_op,
+                backend="numpy",
+                kernel_name=None,
+                placement="host_to_host",
+                fallback=None,
+                native=False,
+                reason_code=self.reason_code,
+            )
+        return BackendDecision(
+            logical_op=logical_op,
+            backend=candidate.backend,
+            kernel_name=candidate.kernel_name,
+            placement=candidate.placement,
+            fallback=candidate.fallback,
+            native=self.native,
+            reason_code=self.reason_code,
+        )
 
 
 _CANDIDATES: tuple[BackendCandidate, ...] = (
@@ -68,6 +119,7 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "cuda_host_io",
         "star_shrink_process_cuda",
         priority=10,
+        fallback="openmp_cpu",
         build_flag="cuda",
     ),
     BackendCandidate("star_shrink_process", "openmp_cpu", "star_shrink_process"),
@@ -99,6 +151,7 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "cuda_host_io",
         "sigma_clip_fused_chunk_cuda",
         priority=10,
+        fallback="openmp_cpu",
         build_flag="cuda",
     ),
     BackendCandidate("sigma_clip_fused_chunk", "openmp_cpu", "sigma_clip_fused_chunk"),
@@ -113,6 +166,7 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "cuda_host_io",
         "wavelet_dec_rec_cuda_core",
         priority=10,
+        fallback="openmp_cpu",
         build_flag="cuda",
     ),
     BackendCandidate("wavelet_dec_rec", "openmp_cpu", "wavelet_dec_rec_cpu"),
@@ -133,6 +187,7 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "cuda_host_io",
         "camera_model_remap",
         priority=10,
+        fallback="openmp_cpu",
         build_flag="cuda",
     ),
     BackendCandidate("camera_model_remap", "openmp_cpu", "camera_model_remap_cpu"),
@@ -159,15 +214,30 @@ def select_backend(
     exclude_backends: Collection[str] = (),
 ) -> BackendSelection:
     if preference == "numpy":
-        return BackendSelection(None, None, "numpy backend forced by preference")
+        return BackendSelection(
+            None,
+            None,
+            "numpy backend forced by preference",
+            "forced_numpy",
+        )
 
     candidates = registered_backend_candidates(logical_op)
     if not candidates:
-        return BackendSelection(None, None, f"no backend candidate registered for {logical_op}")
+        return BackendSelection(
+            None,
+            None,
+            f"no backend candidate registered for {logical_op}",
+            "logical_op_unregistered",
+        )
 
     module, module_error = load_module()
     if module is None:
-        return BackendSelection(None, None, module_error or "compiled backend unavailable")
+        return BackendSelection(
+            None,
+            None,
+            module_error or "compiled backend unavailable",
+            "compiled_module_unavailable",
+        )
 
     missing_kernel: str | None = None
     missing_build_flag: str | None = None
@@ -183,15 +253,21 @@ def select_backend(
             if info and not info.get(candidate.build_flag):
                 missing_build_flag = candidate.build_flag
                 continue
-        return BackendSelection(candidate, module, None)
+        return BackendSelection(candidate, module, None, "selected_native")
 
     if missing_kernel is not None:
-        return BackendSelection(None, module, f"compiled backend missing kernel: {missing_kernel}")
+        return BackendSelection(
+            None,
+            module,
+            f"compiled backend missing kernel: {missing_kernel}",
+            "kernel_unavailable",
+        )
     if missing_build_flag is not None:
         return BackendSelection(
             None,
             module,
             f"compiled backend missing build flag: {missing_build_flag}",
+            "build_flag_unavailable",
         )
     if excluded:
         excluded_names = ", ".join(sorted(excluded))
@@ -200,8 +276,121 @@ def select_backend(
             module,
             f"no available backend candidate for {logical_op} after excluding: "
             f"{excluded_names}",
+            "backends_excluded",
         )
-    return BackendSelection(None, module, f"no available backend candidate for {logical_op}")
+    return BackendSelection(
+        None,
+        module,
+        f"no available backend candidate for {logical_op}",
+        "backend_unavailable",
+    )
+
+
+def resolve_backend(
+    logical_op: str,
+    preference: str = "auto",
+    *,
+    load_module: ModuleLoader = load_compiled_module,
+    build_info: Mapping[str, Any] | None = None,
+    exclude_backends: Collection[str] = (),
+    cuda_probe: CudaProbe = cuda_memory_info,
+) -> BackendSelection:
+    selection = select_backend(
+        logical_op,
+        preference,
+        load_module=load_module,
+        build_info=build_info,
+        exclude_backends=exclude_backends,
+    )
+    decision = selection.to_decision(logical_op)
+    if (
+        not selection.native
+        or selection.candidate is None
+        or selection.candidate.backend != "cuda_host_io"
+    ):
+        return BackendSelection(
+            selection.candidate,
+            selection.module,
+            selection.reason,
+            selection.reason_code,
+            decision,
+        )
+
+    probe = cuda_probe()
+    if probe.get("available") is True:
+        return BackendSelection(
+            selection.candidate,
+            selection.module,
+            selection.reason,
+            selection.reason_code,
+            decision,
+        )
+    status = probe.get("status")
+    if status != "explicitly_unavailable":
+        raise RuntimeError("CUDA runtime probe failed without an unavailable status")
+
+    excluded = set(exclude_backends)
+    excluded.add("cuda_host_io")
+    fallback_selection = select_backend(
+        logical_op,
+        "auto",
+        load_module=load_module,
+        build_info=build_info,
+        exclude_backends=excluded,
+    )
+    fallback_decision = fallback_selection.to_decision(logical_op)
+    fallback_decision = BackendDecision(
+        logical_op=fallback_decision.logical_op,
+        backend=fallback_decision.backend,
+        kernel_name=fallback_decision.kernel_name,
+        placement=fallback_decision.placement,
+        fallback=fallback_decision.fallback,
+        native=fallback_decision.native,
+        reason_code="cuda_runtime_unavailable",
+    )
+    return BackendSelection(
+        fallback_selection.candidate,
+        fallback_selection.module,
+        probe.get("reason") or fallback_selection.reason,
+        "cuda_runtime_unavailable",
+        fallback_decision,
+    )
+
+
+def resolve_after_runtime_unavailable(
+    logical_op: str,
+    failed_backend: str,
+    exc: RuntimeError,
+    *,
+    load_module: ModuleLoader = load_compiled_module,
+    build_info: Mapping[str, Any] | None = None,
+) -> BackendSelection:
+    if failed_backend != "cuda_host_io" or not is_cuda_runtime_unavailable_error(exc):
+        raise exc
+    selection = resolve_backend(
+        logical_op,
+        "auto",
+        load_module=load_module,
+        build_info=build_info,
+        exclude_backends={failed_backend},
+    )
+    decision = selection.to_decision(logical_op)
+    decision = BackendDecision(
+        logical_op=decision.logical_op,
+        backend=decision.backend,
+        kernel_name=decision.kernel_name,
+        placement=decision.placement,
+        fallback=decision.fallback,
+        native=decision.native,
+        reason_code="cuda_runtime_unavailable",
+    )
+    return BackendSelection(
+        selection.candidate,
+        selection.module,
+        str(exc),
+        "cuda_runtime_unavailable",
+        decision,
+    )
 
 
 def native_backend_available(

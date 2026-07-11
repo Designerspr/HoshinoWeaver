@@ -81,6 +81,9 @@ py::dict cuda_memory_info_dict() {
 #else
     py::dict info;
     info["available"] = false;
+    info["status"] = "unavailable";
+    info["reason_code"] = "cuda_not_built";
+    info["category"] = "build";
     info["reason"] = "CUDA backend is not built";
     return info;
 #endif

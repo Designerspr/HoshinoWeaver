@@ -14,8 +14,7 @@ inline bool runtime_unavailable(const cudaError_t error) {
     return error == cudaErrorNoDevice ||
            error == cudaErrorInsufficientDriver ||
            error == cudaErrorInitializationError ||
-           error == cudaErrorDevicesUnavailable ||
-           error == cudaErrorNoKernelImageForDevice;
+           error == cudaErrorDevicesUnavailable;
 }
 
 inline void throw_if_failed(const cudaError_t error, const char* context) {

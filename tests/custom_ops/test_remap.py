@@ -582,7 +582,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, "native CPU remap bug"):
                             camera_model_remap(**kwargs)
 
-    def test_camera_model_remap_falls_back_for_unsupported_cuda_device(self) -> None:
+    def test_camera_model_remap_propagates_unsupported_kernel_image(self) -> None:
         image = np.arange(18, dtype=np.uint8).reshape(3, 3, 2)
         rotation = np.eye(3, dtype=np.float32)
         kwargs = {
@@ -599,8 +599,6 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
             "cy_dst": 1.0,
             "rotation_dst_to_src": rotation,
         }
-        expected = np.full((2, 2, 2), 9, dtype=np.uint8)
-
         with mock.patch.object(
                 remap_ops,
                 "_select_camera_model_remap_backend",
@@ -609,15 +607,9 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
             with mock.patch.object(
                     remap_ops,
                     "_camera_model_remap_cpu_fallback_available",
-                    return_value=True):
-                with mock.patch.object(
-                        remap_ops,
-                        "camera_model_remap_cpu_compiled",
-                        return_value=expected) as cpu_fallback:
-                    got = camera_model_remap(**kwargs)
-
-        np.testing.assert_array_equal(got, expected)
-        cpu_fallback.assert_called_once()
+                    side_effect=AssertionError("CPU fallback should not be queried")):
+                with self.assertRaisesRegex(RuntimeError, "no kernel image"):
+                    camera_model_remap(**kwargs)
 
     def test_camera_model_remap_raises_for_cuda_allocation_failure(self) -> None:
         image = np.arange(18, dtype=np.uint8).reshape(3, 3, 2)

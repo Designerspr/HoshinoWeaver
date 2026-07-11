@@ -1,3 +1,4 @@
+import json
 from unittest import mock
 
 
@@ -226,3 +227,140 @@ class TestBackendRegistry(CustomOpsTestCase):
         self.assertTrue(selection.native)
         self.assertEqual(selection.backend, "openmp_cpu")
         self.assertEqual(selection.candidate.kernel_name, "wavelet_dec_rec_cpu")
+
+    def test_backend_decision_is_serializable_and_sanitized(self) -> None:
+        class Module:
+            def median_reduce_chunk(self):
+                return None
+
+        selection = backend_registry.select_backend(
+            "median_reduce_chunk",
+            load_module=lambda: (Module(), None),
+        )
+
+        payload = selection.to_decision("median_reduce_chunk").to_dict()
+
+        json.dumps(payload)
+        self.assertEqual(payload["backend"], "openmp_cpu")
+        self.assertEqual(payload["reason_code"], "selected_native")
+        self.assertNotIn("module", payload)
+        self.assertNotIn("reason_detail", payload)
+
+    def test_runtime_resolver_keeps_available_cuda_candidate(self) -> None:
+        class Module:
+            def camera_model_remap(self):
+                return None
+
+            def camera_model_remap_cpu(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        selection = backend_registry.resolve_backend(
+            "camera_model_remap",
+            load_module=lambda: (Module(), None),
+            cuda_probe=lambda: {
+                "available": True,
+                "status": "available",
+                "free_bytes": 1024,
+                "total_bytes": 2048,
+            },
+        )
+
+        self.assertEqual(selection.backend, "cuda_host_io")
+        self.assertIsNotNone(selection.decision)
+        self.assertEqual(selection.decision.reason_code, "selected_native")
+
+    def test_runtime_resolver_falls_back_to_cpu_when_cuda_unavailable(self) -> None:
+        class Module:
+            def camera_model_remap(self):
+                return None
+
+            def camera_model_remap_cpu(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        selection = backend_registry.resolve_backend(
+            "camera_model_remap",
+            load_module=lambda: (Module(), None),
+            cuda_probe=lambda: {
+                "available": False,
+                "status": "explicitly_unavailable",
+                "reason": "mock no device",
+            },
+        )
+
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(selection.reason_code, "cuda_runtime_unavailable")
+        self.assertEqual(selection.decision.reason_code, "cuda_runtime_unavailable")
+
+    def test_runtime_resolver_does_not_hide_probe_errors(self) -> None:
+        class Module:
+            def huber_weighted_chunk_cuda(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        with self.assertRaisesRegex(RuntimeError, "out of memory"):
+            backend_registry.resolve_backend(
+                "huber_weighted_chunk",
+                load_module=lambda: (Module(), None),
+                cuda_probe=lambda: (_ for _ in ()).throw(
+                    RuntimeError("cudaMemGetInfo: out of memory")
+                ),
+            )
+
+    def test_runtime_resolver_rejects_generic_unavailable_status(self) -> None:
+        class Module:
+            def camera_model_remap(self):
+                return None
+
+            def camera_model_remap_cpu(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        with self.assertRaisesRegex(RuntimeError, "without an unavailable status"):
+            backend_registry.resolve_backend(
+                "camera_model_remap",
+                load_module=lambda: (Module(), None),
+                cuda_probe=lambda: {
+                    "available": False,
+                    "status": "unavailable",
+                    "reason": "out of memory",
+                },
+            )
+
+    def test_forced_numpy_skips_module_load_and_cuda_probe(self) -> None:
+        loader = mock.Mock(side_effect=AssertionError("module should not load"))
+        probe = mock.Mock(side_effect=AssertionError("CUDA should not probe"))
+
+        selection = backend_registry.resolve_backend(
+            "camera_model_remap",
+            "numpy",
+            load_module=loader,
+            cuda_probe=probe,
+        )
+
+        self.assertEqual(selection.backend, "numpy")
+        self.assertEqual(selection.decision.reason_code, "forced_numpy")
+        loader.assert_not_called()
+        probe.assert_not_called()
+
+    def test_runtime_retry_rejects_resource_errors_before_reresolve(self) -> None:
+        loader = mock.Mock(side_effect=AssertionError("resolver should not run"))
+
+        with self.assertRaisesRegex(RuntimeError, "out of memory"):
+            backend_registry.resolve_after_runtime_unavailable(
+                "sigma_clip_fused_chunk",
+                "cuda_host_io",
+                RuntimeError("cudaMalloc: out of memory"),
+                load_module=loader,
+            )
+
+        loader.assert_not_called()

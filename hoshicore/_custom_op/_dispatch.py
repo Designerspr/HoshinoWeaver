@@ -18,6 +18,23 @@ class CustomOpUnavailableError(RuntimeError):
     """Raised when a native backend is unavailable and production may fallback."""
 
 
+class CudaProbeError(RuntimeError):
+    """Raised when a structured CUDA runtime probe reports a real error."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str,
+        error_code: int | None,
+        category: str,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.error_code = error_code
+        self.category = category
+
+
 def debug_enabled() -> bool:
     return os.environ.get("HNW_CUSTOM_OPS_DEBUG", "0") not in {"", "0", "false", "False"}
 
@@ -52,8 +69,6 @@ def is_cuda_runtime_unavailable_error(exc: RuntimeError) -> bool:
         or "cuda initialization error" in message
         or "device is busy" in message
         or "device unavailable" in message
-        or "no kernel image is available" in message
-        or "no binary for gpu" in message
     )
 
 
@@ -77,20 +92,44 @@ def compiled_build_info() -> dict[str, Any]:
 def cuda_memory_info() -> dict[str, Any]:
     module, error = load_compiled_module()
     if module is None:
-        return {"available": False, "reason": error or "compiled backend unavailable"}
+        return {
+            "available": False,
+            "status": "unavailable",
+            "reason_code": "module_unavailable",
+            "category": "build",
+            "reason": error or "compiled backend unavailable",
+        }
     if not hasattr(module, "cuda_memory_info"):
         return {
             "available": False,
+            "status": "unavailable",
+            "reason_code": "probe_unavailable",
+            "category": "build",
             "reason": "compiled backend does not expose CUDA memory info",
         }
-    try:
-        payload = module.cuda_memory_info()
-    except RuntimeError as exc:
-        return {"available": False, "reason": str(exc)}
-    return payload if isinstance(payload, dict) else {
-        "available": False,
-        "reason": "invalid CUDA memory info payload",
-    }
+    payload = module.cuda_memory_info()
+    if not isinstance(payload, dict) or not isinstance(payload.get("available"), bool):
+        raise RuntimeError("invalid CUDA memory info payload")
+    status = payload.get("status")
+    if status not in {"available", "unavailable", "explicitly_unavailable", "error"}:
+        raise RuntimeError("invalid CUDA memory info status")
+    if payload["available"] != (status == "available"):
+        raise RuntimeError("inconsistent CUDA memory info availability status")
+    if status == "error":
+        error_code = payload.get("error_code")
+        if error_code is not None and not isinstance(error_code, int):
+            raise RuntimeError("invalid CUDA memory info error code")
+        raise CudaProbeError(
+            str(payload.get("reason") or "CUDA runtime probe failed"),
+            reason_code=str(payload.get("reason_code") or "cuda_runtime_error"),
+            error_code=error_code,
+            category=str(payload.get("category") or "runtime"),
+        )
+    if payload["available"] and not all(
+        isinstance(payload.get(key), int) for key in ("free_bytes", "total_bytes")
+    ):
+        raise RuntimeError("available CUDA memory info is missing byte counts")
+    return payload
 
 
 def apply_compiled_threads(op_name: str, sample: np.ndarray) -> None:

@@ -2,29 +2,62 @@
 
 #include "common/compat.h"
 #include "common/cuda_host_io_workspace.cuh"
+#include "common/cuda_runtime_utils.cuh"
 
 #include <cuda_runtime.h>
+
+namespace {
+
+py::dict cuda_unavailable_info(const cudaError_t error) {
+    py::dict info;
+    info["available"] = false;
+    info["status"] = "explicitly_unavailable";
+    info["reason_code"] = "cuda_runtime_unavailable";
+    info["category"] = "availability";
+    info["error_code"] = static_cast<int>(error);
+    info["reason"] = cudaGetErrorString(error);
+    return info;
+}
+
+py::dict cuda_error_info(const cudaError_t error) {
+    py::dict info;
+    info["available"] = false;
+    info["status"] = "error";
+    info["reason_code"] = "cuda_runtime_error";
+    info["category"] =
+        error == cudaErrorMemoryAllocation ? "resource" : "runtime";
+    info["error_code"] = static_cast<int>(error);
+    info["reason"] = cudaGetErrorString(error);
+    return info;
+}
+
+}  // namespace
 
 py::dict cuda_memory_info_cuda_dict() {
     py::dict info;
     int device = -1;
     cudaError_t error = cudaGetDevice(&device);
     if (error != cudaSuccess) {
-        info["available"] = false;
-        info["reason"] = cudaGetErrorString(error);
-        return info;
+        if (hnw::cuda::runtime_unavailable(error)) {
+            return cuda_unavailable_info(error);
+        }
+        return cuda_error_info(error);
     }
 
     size_t free_bytes = 0;
     size_t total_bytes = 0;
     error = cudaMemGetInfo(&free_bytes, &total_bytes);
     if (error != cudaSuccess) {
-        info["available"] = false;
-        info["reason"] = cudaGetErrorString(error);
-        return info;
+        if (hnw::cuda::runtime_unavailable(error)) {
+            return cuda_unavailable_info(error);
+        }
+        return cuda_error_info(error);
     }
 
     info["available"] = true;
+    info["status"] = "available";
+    info["reason_code"] = "cuda_available";
+    info["category"] = "available";
     info["device"] = device;
     info["free_bytes"] = static_cast<unsigned long long>(free_bytes);
     info["total_bytes"] = static_cast<unsigned long long>(total_bytes);
