@@ -418,6 +418,7 @@ def test_runtime_planner_keeps_hints_when_chunk_rows_is_explicit(
 ):
     path = tmp_path / "frame.tif"
     tifffile.imwrite(str(path), np.zeros((128, 10), dtype=np.uint16))
+    monkeypatch.delenv("HNW_CUSTOM_OPS_FALLBACK", raising=False)
     _mock_cuda_memory(monkeypatch, budget=6400)
     _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
 
@@ -437,6 +438,7 @@ def test_runtime_planner_keeps_hints_when_chunk_rows_is_explicit(
 def test_runtime_planner_backend_hints_are_serializable(tmp_path, monkeypatch):
     path = tmp_path / "frame.tif"
     tifffile.imwrite(str(path), np.zeros((128, 10), dtype=np.uint16))
+    monkeypatch.delenv("HNW_CUSTOM_OPS_FALLBACK", raising=False)
     _mock_cuda_memory(monkeypatch, budget=6400)
     _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
 
