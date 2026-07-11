@@ -9,14 +9,13 @@ from typing import Any, Callable
 import numpy as np
 
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import compiled_build_info as _compiled_build_info
-from hoshicore._custom_op._dispatch import debug_enabled as _debug_enabled
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
-from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
+from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
-from hoshicore._custom_op.backend_registry import select_backend as _select_backend
+from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
+from hoshicore._custom_op.backend_registry import resolve_backend as _resolve_backend
 
 
 _debug_log = partial(debug_log, "fgp")
@@ -572,24 +571,29 @@ def huber_weighted_chunk_compiled_cuda(
         stack_arr, ref_mean_arr, ref_std_arr, float(huber_c), weights_arr)
 
 
-@lru_cache(maxsize=2)
 def _select_huber_chunk_backend(
     preference: str,
-) -> tuple[str, Callable[..., tuple[np.ndarray, np.ndarray]]]:
-    selection = _select_backend(
+) -> BackendSelection:
+    selection = _resolve_backend(
         "huber_weighted_chunk",
         preference,
         load_module=_load_compiled_module_result,
     )
-    if selection.native and selection.candidate is not None:
-        if selection.candidate.kernel_name == "huber_weighted_chunk_cuda":
-            return "cuda", huber_weighted_chunk_compiled_cuda
-        raise RuntimeError(
-            f"unknown huber_weighted_chunk backend candidate: {selection.candidate}"
-        )
     if selection.reason:
         _debug_log(f"compiled backend unavailable, reason: {selection.reason}")
-    return "numpy", huber_weighted_chunk_numpy
+    return selection
+
+
+def _huber_chunk_backend(
+    selection: BackendSelection,
+) -> tuple[str, Callable[..., tuple[np.ndarray, np.ndarray]]]:
+    if not selection.native or selection.candidate is None:
+        return "numpy", huber_weighted_chunk_numpy
+    if selection.candidate.kernel_name == "huber_weighted_chunk_cuda":
+        return "cuda", huber_weighted_chunk_compiled_cuda
+    raise RuntimeError(
+        f"unknown huber_weighted_chunk backend candidate: {selection.candidate}"
+    )
 
 
 def huber_weighted_chunk(
@@ -599,18 +603,23 @@ def huber_weighted_chunk(
     huber_c: float,
     weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    backend_name, backend = _select_huber_chunk_backend(_fallback_preference())
+    selection = _select_huber_chunk_backend(_fallback_preference())
+    backend_name, backend = _huber_chunk_backend(selection)
     if backend_name != "cuda":
         return backend(stack, ref_mean, ref_std, huber_c, weights)
     try:
         return backend(stack, ref_mean, ref_std, huber_c, weights)
     except RuntimeError as exc:
-        if not is_cuda_runtime_unavailable_error(exc):
-            raise
+        resolve_after_runtime_unavailable(
+            "huber_weighted_chunk",
+            "cuda_host_io",
+            exc,
+            load_module=_load_compiled_module_result,
+        )
         _debug_log(
             f"compiled CUDA backend unavailable at runtime, falling back to numpy: {exc}"
         )
-        return huber_weighted_chunk_numpy(stack, ref_mean, ref_std, huber_c, weights)
+    return huber_weighted_chunk_numpy(stack, ref_mean, ref_std, huber_c, weights)
 
 
 def try_huber_weighted_chunk_native(
@@ -620,20 +629,26 @@ def try_huber_weighted_chunk_native(
     huber_c: float,
     weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    backend_name, backend = _select_huber_chunk_backend(_fallback_preference())
+    selection = _select_huber_chunk_backend(_fallback_preference())
+    backend_name, backend = _huber_chunk_backend(selection)
     if backend_name != "cuda":
         return None
     try:
         return backend(stack, ref_mean, ref_std, huber_c, weights)
     except RuntimeError as exc:
-        if not is_cuda_runtime_unavailable_error(exc):
-            raise
+        resolve_after_runtime_unavailable(
+            "huber_weighted_chunk",
+            "cuda_host_io",
+            exc,
+            load_module=_load_compiled_module_result,
+        )
         _debug_log(f"compiled CUDA backend unavailable at runtime: {exc}")
         return None
 
 
 def huber_weighted_chunk_native_available() -> bool:
-    backend_name, _ = _select_huber_chunk_backend(_fallback_preference())
+    selection = _select_huber_chunk_backend(_fallback_preference())
+    backend_name, _ = _huber_chunk_backend(selection)
     return backend_name == "cuda"
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import lru_cache, partial
+from functools import partial
 from typing import Callable
 
 import numpy as np
@@ -10,10 +10,11 @@ import numpy as np
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
-from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
+from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
-from hoshicore._custom_op.backend_registry import select_backend as _select_backend
+from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
+from hoshicore._custom_op.backend_registry import resolve_backend as _resolve_backend
 
 
 _debug_log = partial(debug_log, "sigma_clip")
@@ -365,45 +366,31 @@ def sigma_clip_fused_chunk_compiled_cuda(
         stack, rej_high, rej_low, max_iter, mask, skip_zero_rgb, channels)
 
 
-@lru_cache(maxsize=2)
 def _select_sigma_clip_fused_chunk_backend(
     preference: str,
-) -> tuple[str, Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]]]:
-    selection = _select_backend(
+) -> BackendSelection:
+    selection = _resolve_backend(
         "sigma_clip_fused_chunk",
         preference,
         load_module=_load_compiled_module_result,
     )
-    if selection.native and selection.candidate is not None:
-        if selection.candidate.kernel_name == "sigma_clip_fused_chunk_cuda":
-            return "cuda", sigma_clip_fused_chunk_compiled_cuda
-        if selection.candidate.kernel_name == "sigma_clip_fused_chunk":
-            return "cpu", sigma_clip_fused_chunk_compiled
-        raise RuntimeError(
-            f"unknown sigma_clip_fused_chunk backend candidate: {selection.candidate}"
-        )
     if selection.reason:
         _debug_log(f"compiled backend unavailable, reason: {selection.reason}")
-    return "numpy", sigma_clip_fused_chunk_numpy
+    return selection
 
 
-def _select_sigma_clip_fused_chunk_cpu_fallback(
-) -> Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]] | None:
-    selection = _select_backend(
-        "sigma_clip_fused_chunk",
-        "auto",
-        load_module=_load_compiled_module_result,
-        exclude_backends={"cuda_host_io"},
+def _sigma_clip_fused_chunk_backend(
+    selection: BackendSelection,
+) -> tuple[str, Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]]]:
+    if not selection.native or selection.candidate is None:
+        return "numpy", sigma_clip_fused_chunk_numpy
+    if selection.candidate.kernel_name == "sigma_clip_fused_chunk_cuda":
+        return "cuda", sigma_clip_fused_chunk_compiled_cuda
+    if selection.candidate.kernel_name == "sigma_clip_fused_chunk":
+        return "cpu", sigma_clip_fused_chunk_compiled
+    raise RuntimeError(
+        f"unknown sigma_clip_fused_chunk backend candidate: {selection.candidate}"
     )
-    if (
-        selection.native
-        and selection.candidate is not None
-        and selection.candidate.kernel_name == "sigma_clip_fused_chunk"
-    ):
-        return sigma_clip_fused_chunk_compiled
-    if selection.reason:
-        _debug_log(f"compiled CPU backend unavailable after CUDA fallback, reason: {selection.reason}")
-    return None
 
 
 def sigma_clip_fused_chunk(
@@ -429,8 +416,8 @@ def sigma_clip_fused_chunk(
     Returns:
         (accepted_sum, accepted_sq, accepted_n) as float64 arrays
     """
-    backend_name, backend = _select_sigma_clip_fused_chunk_backend(
-        _fallback_preference())
+    selection = _select_sigma_clip_fused_chunk_backend(_fallback_preference())
+    backend_name, backend = _sigma_clip_fused_chunk_backend(selection)
     if backend_name != "cuda":
         return backend(
             stack, rej_high, rej_low, max_iter, mask,
@@ -440,16 +427,19 @@ def sigma_clip_fused_chunk(
             stack, rej_high, rej_low, max_iter, mask,
             skip_zero_rgb, channels)
     except RuntimeError as exc:
-        if not is_cuda_runtime_unavailable_error(exc):
-            raise
+        fallback_selection = resolve_after_runtime_unavailable(
+            "sigma_clip_fused_chunk",
+            "cuda_host_io",
+            exc,
+            load_module=_load_compiled_module_result,
+        )
         _debug_log(
             f"compiled CUDA backend unavailable at runtime, falling back to CPU: {exc}"
         )
-        cpu_backend = _select_sigma_clip_fused_chunk_cpu_fallback()
-        if cpu_backend is not None:
-            return cpu_backend(
-                stack, rej_high, rej_low, max_iter, mask,
-                skip_zero_rgb, channels)
-        return sigma_clip_fused_chunk_numpy(
-            stack, rej_high, rej_low, max_iter, mask,
-            skip_zero_rgb, channels)
+    fallback_name, fallback_backend = _sigma_clip_fused_chunk_backend(
+        fallback_selection)
+    if fallback_name == "cuda":
+        raise RuntimeError("CUDA backend remained selected after runtime exclusion")
+    return fallback_backend(
+        stack, rej_high, rej_low, max_iter, mask,
+        skip_zero_rgb, channels)

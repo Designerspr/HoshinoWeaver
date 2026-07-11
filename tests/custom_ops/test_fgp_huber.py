@@ -326,8 +326,7 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
             mock.Mock(),
         )
 
-        fgp_ops._select_huber_chunk_backend.cache_clear()
-        with mock.patch.object(fgp_ops, "_select_backend", return_value=cuda_selection):
+        with mock.patch.object(fgp_ops, "_resolve_backend", return_value=cuda_selection):
             with mock.patch.object(
                 fgp_ops,
                 "huber_weighted_chunk_compiled_cuda",
@@ -335,12 +334,115 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
                     "huber_weighted_chunk_cuda cudaGetDevice: no CUDA-capable device is detected"
                 ),
             ):
-                fgp_ops._select_huber_chunk_backend.cache_clear()
                 got = huber_weighted_chunk(stack, ref_mean, ref_std, 1.345)
-        fgp_ops._select_huber_chunk_backend.cache_clear()
 
         for actual, expected_arr in zip(got, expected, strict=True):
             np.testing.assert_allclose(actual, expected_arr, rtol=1e-6, atol=1e-6)
+
+    def test_huber_weighted_chunk_try_native_unavailable_returns_none(self) -> None:
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        ref_mean = np.linspace(2, 8, 6, dtype=np.float64)
+        ref_std = np.linspace(1, 3, 6, dtype=np.float64)
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                "huber_weighted_chunk_cuda",
+            ),
+            mock.Mock(),
+        )
+
+        with mock.patch.object(
+            fgp_ops, "_resolve_backend", return_value=cuda_selection
+        ):
+            with mock.patch.object(
+                fgp_ops,
+                "huber_weighted_chunk_compiled_cuda",
+                side_effect=RuntimeError(
+                    "cudaGetDevice: no CUDA-capable device is detected"
+                ),
+            ):
+                with mock.patch.object(
+                    fgp_ops,
+                    "resolve_after_runtime_unavailable",
+                    return_value=backend_registry.BackendSelection(None, mock.Mock()),
+                ):
+                    result = fgp_ops.try_huber_weighted_chunk_native(
+                        stack, ref_mean, ref_std, 1.345
+                    )
+
+        self.assertIsNone(result)
+
+    def test_huber_weighted_chunk_resource_error_propagates(self) -> None:
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        ref_mean = np.linspace(2, 8, 6, dtype=np.float64)
+        ref_std = np.linspace(1, 3, 6, dtype=np.float64)
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                "huber_weighted_chunk_cuda",
+            ),
+            mock.Mock(),
+        )
+
+        with mock.patch.object(
+            fgp_ops, "_resolve_backend", return_value=cuda_selection
+        ):
+            with mock.patch.object(
+                fgp_ops,
+                "huber_weighted_chunk_compiled_cuda",
+                side_effect=RuntimeError("kernel launch: invalid device pointer"),
+            ):
+                with mock.patch.object(
+                    fgp_ops,
+                    "huber_weighted_chunk_numpy",
+                    side_effect=AssertionError("numpy backend should not run"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "invalid device pointer"):
+                        fgp_ops.huber_weighted_chunk(
+                            stack, ref_mean, ref_std, 1.345
+                        )
+
+    def test_huber_weighted_chunk_does_not_cache_runtime_decision(self) -> None:
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        ref_mean = np.linspace(2, 8, 6, dtype=np.float64)
+        ref_std = np.linspace(1, 3, 6, dtype=np.float64)
+        numpy_selection = backend_registry.BackendSelection(None, mock.Mock())
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                "huber_weighted_chunk_cuda",
+            ),
+            mock.Mock(),
+        )
+        cuda_result = (
+            np.full(6, 10.0, dtype=np.float64),
+            np.full(6, 2.0, dtype=np.float64),
+        )
+
+        with mock.patch.object(
+            fgp_ops,
+            "_resolve_backend",
+            side_effect=[numpy_selection, cuda_selection],
+        ) as resolver:
+            first = fgp_ops.huber_weighted_chunk(
+                stack, ref_mean, ref_std, 1.345
+            )
+            with mock.patch.object(
+                fgp_ops,
+                "huber_weighted_chunk_compiled_cuda",
+                return_value=cuda_result,
+            ) as cuda_backend:
+                second = fgp_ops.huber_weighted_chunk(
+                    stack, ref_mean, ref_std, 1.345
+                )
+
+        self.assertEqual(resolver.call_count, 2)
+        cuda_backend.assert_called_once()
+        self.assertEqual(first[0].shape, (6,))
+        np.testing.assert_array_equal(second[0], cuda_result[0])
 
     def test_mean_merger_works_with_fgp_accumulate(self) -> None:
         merger = MeanMerger(int_weight=False)

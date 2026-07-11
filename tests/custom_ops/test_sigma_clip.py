@@ -386,9 +386,8 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
             mock.Mock(),
         )
 
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
         with mock.patch.object(
-            sigma_clip_chunk_ops, "_select_backend", return_value=cuda_selection
+            sigma_clip_chunk_ops, "_resolve_backend", return_value=cuda_selection
         ):
             with mock.patch.object(
                 sigma_clip_chunk_ops,
@@ -397,15 +396,25 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                     "sigma_clip_fused_chunk_cuda cudaGetDevice: no CUDA-capable device is detected"
                 ),
             ):
-                sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
                 cpu_fallback = mock.Mock(return_value=expected)
                 with mock.patch.object(
                     sigma_clip_chunk_ops,
-                    "_select_sigma_clip_fused_chunk_cpu_fallback",
-                    return_value=cpu_fallback,
+                    "resolve_after_runtime_unavailable",
+                    return_value=backend_registry.BackendSelection(
+                        backend_registry.BackendCandidate(
+                            "sigma_clip_fused_chunk",
+                            "openmp_cpu",
+                            "sigma_clip_fused_chunk",
+                        ),
+                        mock.Mock(),
+                    ),
                 ):
-                    got = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+                    with mock.patch.object(
+                        sigma_clip_chunk_ops,
+                        "sigma_clip_fused_chunk_compiled",
+                        cpu_fallback,
+                    ):
+                        got = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
 
         for actual, expected_arr in zip(got, expected, strict=True):
             np.testing.assert_array_equal(actual, expected_arr)
@@ -425,9 +434,8 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
             mock.Mock(),
         )
 
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
         with mock.patch.object(
-            sigma_clip_chunk_ops, "_select_backend", return_value=cpu_selection
+            sigma_clip_chunk_ops, "_resolve_backend", return_value=cpu_selection
         ):
             with mock.patch.object(
                 sigma_clip_chunk_ops,
@@ -439,10 +447,8 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                     "sigma_clip_fused_chunk_numpy",
                     side_effect=AssertionError("numpy backend should not be called"),
                 ):
-                    sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
                     with self.assertRaisesRegex(RuntimeError, "native CPU bug"):
                         sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
 
     def test_sigma_clip_fused_chunk_cuda_runtime_falls_back_to_numpy(self) -> None:
         """Public fused dispatch falls back to numpy if CUDA and CPU are unavailable."""
@@ -460,9 +466,8 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
             mock.Mock(),
         )
 
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
         with mock.patch.object(
-            sigma_clip_chunk_ops, "_select_backend", return_value=cuda_selection
+            sigma_clip_chunk_ops, "_resolve_backend", return_value=cuda_selection
         ):
             with mock.patch.object(
                 sigma_clip_chunk_ops,
@@ -471,14 +476,16 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                     "sigma_clip_fused_chunk_cuda cudaGetDevice: no CUDA-capable device is detected"
                 ),
             ):
-                sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
                 with mock.patch.object(
                     sigma_clip_chunk_ops,
-                    "_select_sigma_clip_fused_chunk_cpu_fallback",
-                    return_value=None,
+                    "resolve_after_runtime_unavailable",
+                    return_value=backend_registry.BackendSelection(
+                        None,
+                        mock.Mock(),
+                        "mock CPU backend unavailable",
+                    ),
                 ):
                     got = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
 
         for actual, expected_arr in zip(got, expected, strict=True):
             np.testing.assert_array_equal(actual, expected_arr)
@@ -500,9 +507,8 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
             mock.Mock(),
         )
 
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
         with mock.patch.object(
-            sigma_clip_chunk_ops, "_select_backend", return_value=cuda_selection
+            sigma_clip_chunk_ops, "_resolve_backend", return_value=cuda_selection
         ):
             with mock.patch.object(
                 sigma_clip_chunk_ops,
@@ -511,27 +517,37 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                     "sigma_clip_fused_chunk_cuda cudaGetDevice: no CUDA-capable device is detected"
                 ),
             ):
-                sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
                 cpu_fallback = mock.Mock(
                     side_effect=ValueError("bad CPU fallback input")
                 )
                 with mock.patch.object(
                     sigma_clip_chunk_ops,
-                    "_select_sigma_clip_fused_chunk_cpu_fallback",
-                    return_value=cpu_fallback,
+                    "resolve_after_runtime_unavailable",
+                    return_value=backend_registry.BackendSelection(
+                        backend_registry.BackendCandidate(
+                            "sigma_clip_fused_chunk",
+                            "openmp_cpu",
+                            "sigma_clip_fused_chunk",
+                        ),
+                        mock.Mock(),
+                    ),
                 ):
                     with mock.patch.object(
                         sigma_clip_chunk_ops,
-                        "sigma_clip_fused_chunk_numpy",
-                        side_effect=AssertionError(
-                            "numpy backend should not be called"
-                        ),
+                        "sigma_clip_fused_chunk_compiled",
+                        cpu_fallback,
                     ):
-                        with self.assertRaisesRegex(
-                            ValueError, "bad CPU fallback input"
+                        with mock.patch.object(
+                            sigma_clip_chunk_ops,
+                            "sigma_clip_fused_chunk_numpy",
+                            side_effect=AssertionError(
+                                "numpy backend should not be called"
+                            ),
                         ):
-                            sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+                            with self.assertRaisesRegex(
+                                ValueError, "bad CPU fallback input"
+                            ):
+                                sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
 
     def test_sigma_clip_fused_chunk_cuda_fallback_propagates_cpu_runtime_error(
         self,
@@ -550,9 +566,8 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
             mock.Mock(),
         )
 
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
         with mock.patch.object(
-            sigma_clip_chunk_ops, "_select_backend", return_value=cuda_selection
+            sigma_clip_chunk_ops, "_resolve_backend", return_value=cuda_selection
         ):
             with mock.patch.object(
                 sigma_clip_chunk_ops,
@@ -561,20 +576,107 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                     "sigma_clip_fused_chunk_cuda cudaGetDevice: no CUDA-capable device is detected"
                 ),
             ):
-                sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
                 cpu_fallback = mock.Mock(side_effect=RuntimeError("native CPU bug"))
                 with mock.patch.object(
                     sigma_clip_chunk_ops,
-                    "_select_sigma_clip_fused_chunk_cpu_fallback",
-                    return_value=cpu_fallback,
+                    "resolve_after_runtime_unavailable",
+                    return_value=backend_registry.BackendSelection(
+                        backend_registry.BackendCandidate(
+                            "sigma_clip_fused_chunk",
+                            "openmp_cpu",
+                            "sigma_clip_fused_chunk",
+                        ),
+                        mock.Mock(),
+                    ),
                 ):
                     with mock.patch.object(
                         sigma_clip_chunk_ops,
-                        "sigma_clip_fused_chunk_numpy",
-                        side_effect=AssertionError(
-                            "numpy backend should not be called"
-                        ),
+                        "sigma_clip_fused_chunk_compiled",
+                        cpu_fallback,
                     ):
-                        with self.assertRaisesRegex(RuntimeError, "native CPU bug"):
-                            sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
-        sigma_clip_chunk_ops._select_sigma_clip_fused_chunk_backend.cache_clear()
+                        with mock.patch.object(
+                            sigma_clip_chunk_ops,
+                            "sigma_clip_fused_chunk_numpy",
+                            side_effect=AssertionError(
+                                "numpy backend should not be called"
+                            ),
+                        ):
+                            with self.assertRaisesRegex(RuntimeError, "native CPU bug"):
+                                sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
+
+    def test_sigma_clip_fused_chunk_does_not_cache_runtime_decision(self) -> None:
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        cpu_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "sigma_clip_fused_chunk",
+                "openmp_cpu",
+                "sigma_clip_fused_chunk",
+            ),
+            mock.Mock(),
+        )
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "sigma_clip_fused_chunk",
+                "cuda_host_io",
+                "sigma_clip_fused_chunk_cuda",
+            ),
+            mock.Mock(),
+        )
+        cpu_result = tuple(
+            np.full(6, value, dtype=np.float64) for value in (1.0, 2.0, 3.0)
+        )
+        cuda_result = tuple(
+            np.full(6, value, dtype=np.float64) for value in (4.0, 5.0, 6.0)
+        )
+
+        with mock.patch.object(
+            sigma_clip_chunk_ops,
+            "_resolve_backend",
+            side_effect=[cpu_selection, cuda_selection],
+        ) as resolver:
+            with mock.patch.object(
+                sigma_clip_chunk_ops,
+                "sigma_clip_fused_chunk_compiled",
+                return_value=cpu_result,
+            ):
+                with mock.patch.object(
+                    sigma_clip_chunk_ops,
+                    "sigma_clip_fused_chunk_compiled_cuda",
+                    return_value=cuda_result,
+                ) as cuda_backend:
+                    first = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
+                    second = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
+
+        self.assertEqual(resolver.call_count, 2)
+        cuda_backend.assert_called_once()
+        np.testing.assert_array_equal(first[0], cpu_result[0])
+        np.testing.assert_array_equal(second[0], cuda_result[0])
+
+    def test_sigma_clip_fused_chunk_cuda_resource_error_propagates(self) -> None:
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "sigma_clip_fused_chunk",
+                "cuda_host_io",
+                "sigma_clip_fused_chunk_cuda",
+            ),
+            mock.Mock(),
+        )
+
+        with mock.patch.object(
+            sigma_clip_chunk_ops,
+            "_resolve_backend",
+            return_value=cuda_selection,
+        ):
+            with mock.patch.object(
+                sigma_clip_chunk_ops,
+                "sigma_clip_fused_chunk_compiled_cuda",
+                side_effect=RuntimeError("cudaMalloc: out of memory"),
+            ):
+                with mock.patch.object(
+                    sigma_clip_chunk_ops,
+                    "sigma_clip_fused_chunk_numpy",
+                    side_effect=AssertionError("numpy backend should not run"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "out of memory"):
+                        sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
