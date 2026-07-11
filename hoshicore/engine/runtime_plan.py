@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import psutil
 from loguru import logger
 
 from .._custom_op._dispatch import cuda_memory_info
 from .._custom_op._dispatch import fallback_preference
-from .._custom_op.backend_registry import select_backend
+from .._custom_op.backend_registry import BackendDecision, resolve_backend
 from ..component.image_io import peek_shape
 from ..ops.base import BaseOp
 from .build import ValidatedDag
@@ -22,6 +22,7 @@ MEMORY_FIXED_OVERHEAD = 200 * 1024 * 1024
 DEFAULT_MIN_CHUNK_ROWS = 1
 DEFAULT_MAX_CHUNK_ROWS = 1024
 CHUNK_ROW_ALIGNMENT = 16
+CudaProbe = Callable[[], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,13 @@ class RuntimePlanDecision:
 class RuntimePlan:
     config_overrides: dict[str, Any] = field(default_factory=dict)
     decisions: list[RuntimePlanDecision] = field(default_factory=list)
+    backend_hints: dict[str, BackendDecision] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _ChunkPlannedNode:
+    node_name: str
+    op_cls: type[BaseOp]
 
 
 def plan_runtime(
@@ -50,24 +58,27 @@ def plan_runtime(
         return RuntimePlan()
 
     registry = op_registry or REGISTERED_OP
+    cuda_probe = _cached_cuda_probe()
+    backend_hints = _resolve_backend_hints(dag, registry, cuda_probe)
+    base_plan = RuntimePlan(backend_hints=backend_hints)
     chunk_ops = _find_chunk_planned_ops(dag, registry)
     if not chunk_ops:
-        return RuntimePlan()
+        return base_plan
 
     explicit_keys = explicit_config_keys or set()
     current_chunk_rows = effective_configs.get("chunk_rows")
     if "chunk_rows" in explicit_keys and current_chunk_rows != "auto":
-        return RuntimePlan()
+        return base_plan
 
     shape_info = _peek_input_shape(global_inputs)
     if shape_info is None:
-        return RuntimePlan()
+        return base_plan
     shape, dtype_bytes, n_frames = shape_info
     chunk_rows, budget_info = _plan_chunk_rows(
         shape, dtype_bytes, n_frames, effective_configs,
-        chunk_ops, preflight_report)
+        chunk_ops, backend_hints, preflight_report, cuda_probe)
     if chunk_rows is None:
-        return RuntimePlan()
+        return base_plan
 
     non_chunk_mem = preflight_report.non_chunk_mem if preflight_report else 0
     budget_reason = f", budget={budget_info}" if budget_info else ""
@@ -79,6 +90,7 @@ def plan_runtime(
     return RuntimePlan(
         config_overrides={"chunk_rows": chunk_rows},
         decisions=[RuntimePlanDecision("chunk_rows", chunk_rows, reason)],
+        backend_hints=backend_hints,
     )
 
 
@@ -89,6 +101,12 @@ def apply_runtime_plan(plan: RuntimePlan, effective_configs: dict[str, Any]) -> 
         logger.info(f"[RuntimePlan] {key}: {old_value} -> {value}")
     for decision in plan.decisions:
         logger.info(f"[RuntimePlan] {decision.reason}")
+    for node_name, hint in plan.backend_hints.items():
+        logger.info(
+            f"[RuntimePlan] node={node_name}, logical_op={hint.logical_op}, "
+            f"planned_backend={hint.backend}, kernel={hint.kernel_name}, "
+            f"reason_code={hint.reason_code}"
+        )
 
 
 def _planner_enabled(value: Any) -> bool:
@@ -100,16 +118,51 @@ def _planner_enabled(value: Any) -> bool:
 def _find_chunk_planned_ops(
     dag: ValidatedDag,
     registry: dict[str, type[BaseOp]],
-) -> list[type[BaseOp]]:
-    chunk_ops: list[type[BaseOp]] = []
+) -> list[_ChunkPlannedNode]:
+    chunk_ops: list[_ChunkPlannedNode] = []
     for node_name in dag.exec_order:
         node_spec = dag.nodes[node_name]
         op_cls = registry.get(node_spec["op"])
         if op_cls is None:
             continue
         if getattr(op_cls, "CHUNK_PLANNED", False):
-            chunk_ops.append(op_cls)
+            chunk_ops.append(_ChunkPlannedNode(node_name, op_cls))
     return chunk_ops
+
+
+def _resolve_backend_hints(
+    dag: ValidatedDag,
+    registry: dict[str, type[BaseOp]],
+    cuda_probe: CudaProbe,
+) -> dict[str, BackendDecision]:
+    hints: dict[str, BackendDecision] = {}
+    preference = fallback_preference()
+    for node_name in dag.exec_order:
+        node_spec = dag.nodes[node_name]
+        op_cls = registry.get(node_spec["op"])
+        if op_cls is None:
+            continue
+        logical_op = getattr(op_cls, "BACKEND_LOGICAL_OP", None)
+        if not logical_op:
+            continue
+        selection = resolve_backend(
+            logical_op,
+            preference,
+            cuda_probe=cuda_probe,
+        )
+        hints[node_name] = selection.decision or selection.to_decision(logical_op)
+    return hints
+
+
+def _cached_cuda_probe() -> CudaProbe:
+    cached: dict[str, dict[str, Any]] = {}
+
+    def probe() -> dict[str, Any]:
+        if "value" not in cached:
+            cached["value"] = cuda_memory_info()
+        return cached["value"]
+
+    return probe
 
 
 def _peek_input_shape(global_inputs: dict[str, Any]) -> tuple[tuple[int, ...], int, int] | None:
@@ -131,8 +184,10 @@ def _plan_chunk_rows(
     dtype_bytes: int,
     n_frames: int,
     configs: dict[str, Any],
-    chunk_ops: list[type[BaseOp]],
+    chunk_ops: list[_ChunkPlannedNode],
+    backend_hints: dict[str, BackendDecision],
     preflight_report: PreflightReport | None,
+    cuda_probe: CudaProbe,
 ) -> tuple[int | None, str | None]:
     if preflight_report is None:
         return None, None
@@ -147,15 +202,22 @@ def _plan_chunk_rows(
         return None, None
 
     cost_per_row = sum(
-        _chunk_cost_per_row(op_cls, n_frames, row_bytes, dtype_bytes)
-        for op_cls in chunk_ops
+        _chunk_cost_per_row(
+            chunk_op,
+            backend_hints,
+            n_frames,
+            row_bytes,
+            dtype_bytes,
+        )
+        for chunk_op in chunk_ops
     )
     if cost_per_row <= 0:
         return None, None
 
     # preflight 负责估算非 chunk 常驻内存；planner 只拿剩余预算分配 chunk_rows。
     cpu_budget = _memory_budget_bytes() - int(preflight_report.non_chunk_mem)
-    gpu_budget = _cuda_chunk_memory_budget_bytes(chunk_ops)
+    gpu_budget = _cuda_chunk_memory_budget_bytes(
+        chunk_ops, backend_hints, cuda_probe)
     chunk_budget = cpu_budget if gpu_budget is None else min(cpu_budget, gpu_budget)
     if chunk_budget <= 0:
         rows = DEFAULT_MIN_CHUNK_ROWS
@@ -178,74 +240,48 @@ def _memory_budget_bytes() -> int:
     return int(avail_mem * MEMORY_SAFETY_FACTOR) - MEMORY_FIXED_OVERHEAD
 
 
-def _cuda_chunk_memory_budget_bytes(chunk_ops: list[type[BaseOp]]) -> int | None:
-    if not _uses_cuda_host_io_chunk_backend(chunk_ops):
+def _cuda_chunk_memory_budget_bytes(
+    chunk_ops: list[_ChunkPlannedNode],
+    backend_hints: dict[str, BackendDecision],
+    cuda_probe: CudaProbe,
+) -> int | None:
+    if not _uses_cuda_host_io_chunk_backend(chunk_ops, backend_hints):
         return None
-    info = cuda_memory_info()
+    info = cuda_probe()
     if not info.get("available"):
         return None
     try:
         free_bytes = int(info["free_bytes"])
-    except (KeyError, TypeError, ValueError):
-        return None
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("available CUDA memory info has invalid free_bytes") from exc
     return int(free_bytes * MEMORY_SAFETY_FACTOR) - MEMORY_FIXED_OVERHEAD
 
 
-def _uses_cuda_host_io_chunk_backend(chunk_ops: list[type[BaseOp]]) -> bool:
-    for op_cls in chunk_ops:
-        selection = _selected_backend_for_chunk_op(op_cls)
-        if (
-            selection is not None
-            and selection.native
-            and selection.candidate is not None
-            and selection.candidate.backend == "cuda_host_io"
-        ):
+def _uses_cuda_host_io_chunk_backend(
+    chunk_ops: list[_ChunkPlannedNode],
+    backend_hints: dict[str, BackendDecision],
+) -> bool:
+    for chunk_op in chunk_ops:
+        hint = backend_hints.get(chunk_op.node_name)
+        if hint is not None and hint.native and hint.backend == "cuda_host_io":
             return True
     return False
 
 
 def _chunk_cost_per_row(
-    op_cls: type[BaseOp],
+    chunk_op: _ChunkPlannedNode,
+    backend_hints: dict[str, BackendDecision],
     n_frames: int,
     row_bytes: int,
     dtype_bytes: int,
 ) -> int:
+    op_cls = chunk_op.op_cls
     cost_for_backend = getattr(op_cls, "chunk_cost_per_row_for_backend", None)
     if cost_for_backend is None:
         return int(op_cls.chunk_cost_per_row(n_frames, row_bytes, dtype_bytes))
-    selection = _selected_backend_for_chunk_op(op_cls)
-    backend = "numpy"
-    if (
-        selection is not None
-        and selection.native
-        and selection.candidate is not None
-    ):
-        backend = selection.candidate.backend
+    hint = backend_hints.get(chunk_op.node_name)
+    backend = hint.backend if hint is not None and hint.native else "numpy"
     return int(cost_for_backend(backend, n_frames, row_bytes, dtype_bytes))
-
-
-def _selected_backend_for_chunk_op(op_cls: type[BaseOp]) -> Any | None:
-    logical_op = getattr(op_cls, "BACKEND_LOGICAL_OP", None)
-    if not logical_op:
-        return None
-    selection = select_backend(logical_op, fallback_preference())
-    if (
-        selection.native
-        and selection.candidate is not None
-        and selection.candidate.backend == "cuda_host_io"
-        and not _cuda_runtime_available()
-    ):
-        return select_backend(
-            logical_op,
-            fallback_preference(),
-            exclude_backends={"cuda_host_io"},
-        )
-    return selection
-
-
-def _cuda_runtime_available() -> bool:
-    info = cuda_memory_info()
-    return bool(info.get("available"))
 
 
 def _positive_int(value: Any, default: int) -> int:

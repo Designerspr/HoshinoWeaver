@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import tifffile
 
@@ -140,24 +142,39 @@ def _mock_cuda_backend(
         "openmp_cpu",
         f"{logical_op}_cpu",
     )
-    selection = backend_registry.BackendSelection(candidate, object())
-    cpu_selection = backend_registry.BackendSelection(cpu_candidate, object())
+    selection = backend_registry.BackendSelection(
+        candidate, object(), reason_code="selected_native")
+    cpu_selection = backend_registry.BackendSelection(
+        cpu_candidate, object(), reason_code="selected_native")
 
-    def select(logical_op_arg: str, preference: str = "auto", **kwargs):
+    def resolve(logical_op_arg: str, preference: str = "auto", **kwargs):
         if preference == "numpy":
             return backend_registry.BackendSelection(
-                None, None, "numpy backend forced by preference")
+                None,
+                None,
+                "numpy backend forced by preference",
+                "forced_numpy",
+            )
         if logical_op_arg == logical_op:
-            excluded_backends = kwargs.get("exclude_backends", ())
-            if "cuda_host_io" in excluded_backends:
+            probe = kwargs["cuda_probe"]()
+            if not probe.get("available"):
                 if cpu_available:
-                    return cpu_selection
+                    return backend_registry.BackendSelection(
+                        cpu_selection.candidate,
+                        cpu_selection.module,
+                        probe.get("reason"),
+                        "cuda_runtime_unavailable",
+                    )
                 return backend_registry.BackendSelection(
-                    None, object(), "mock CPU backend unavailable")
+                    None,
+                    object(),
+                    "mock CPU backend unavailable",
+                    "cuda_runtime_unavailable",
+                )
             return selection
         return backend_registry.BackendSelection(None, None, "mock unavailable")
 
-    monkeypatch.setattr(runtime_plan_module, "select_backend", select)
+    monkeypatch.setattr(runtime_plan_module, "resolve_backend", resolve)
 
 
 class NoChunkOp(BaseOp):
@@ -228,6 +245,7 @@ def test_runtime_planner_disabled_returns_empty(tmp_path):
 
     assert plan.config_overrides == {}
     assert plan.decisions == []
+    assert plan.backend_hints == {}
 
 
 def test_runtime_planner_sets_chunk_rows_when_enabled(tmp_path, monkeypatch):
@@ -309,6 +327,7 @@ def test_runtime_planner_uses_cuda_budget_for_cuda_chunk_op(tmp_path, monkeypatc
 
     assert plan.config_overrides["chunk_rows"] == 64
     assert "gpu=" in plan.decisions[0].reason
+    assert plan.backend_hints["chunk"].backend == "cuda_host_io"
 
 
 def test_runtime_planner_ignores_unavailable_cuda_budget(tmp_path, monkeypatch):
@@ -329,6 +348,7 @@ def test_runtime_planner_ignores_unavailable_cuda_budget(tmp_path, monkeypatch):
 
     assert plan.config_overrides["chunk_rows"] == 128
     assert "gpu=" not in plan.decisions[0].reason
+    assert plan.backend_hints["chunk"].backend == "numpy"
 
 
 def test_runtime_planner_uses_cpu_cost_when_cuda_runtime_unavailable(
@@ -364,6 +384,11 @@ def test_runtime_planner_uses_cpu_cost_when_cuda_runtime_unavailable(
 
     assert plan.config_overrides["chunk_rows"] == 64
     assert "gpu=" not in plan.decisions[0].reason
+    assert plan.backend_hints["chunk"].backend == "openmp_cpu"
+    assert (
+        plan.backend_hints["chunk"].reason_code
+        == "cuda_runtime_unavailable"
+    )
 
 
 def test_runtime_planner_ignores_cuda_budget_when_numpy_forced(tmp_path, monkeypatch):
@@ -384,6 +409,51 @@ def test_runtime_planner_ignores_cuda_budget_when_numpy_forced(tmp_path, monkeyp
 
     assert plan.config_overrides["chunk_rows"] == 128
     assert "gpu=" not in plan.decisions[0].reason
+    assert plan.backend_hints["chunk"].backend == "numpy"
+    assert plan.backend_hints["chunk"].reason_code == "forced_numpy"
+
+
+def test_runtime_planner_keeps_hints_when_chunk_rows_is_explicit(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((128, 10), dtype=np.uint16))
+    _mock_cuda_memory(monkeypatch, budget=6400)
+    _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
+
+    plan = plan_runtime(
+        _make_cuda_chunk_dag(),
+        {"runtime_planner": True, "chunk_rows": 32},
+        {"fnames": [str(path)] * 4},
+        op_registry={"FixedCudaChunkOp": FixedCudaChunkOp},
+        preflight_report=_report(),
+        explicit_config_keys={"chunk_rows"},
+    )
+
+    assert plan.config_overrides == {}
+    assert plan.backend_hints["chunk"].backend == "cuda_host_io"
+
+
+def test_runtime_planner_backend_hints_are_serializable(tmp_path, monkeypatch):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((128, 10), dtype=np.uint16))
+    _mock_cuda_memory(monkeypatch, budget=6400)
+    _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
+
+    plan = plan_runtime(
+        _make_cuda_chunk_dag(),
+        {"runtime_planner": True},
+        {"fnames": [str(path)] * 4},
+        op_registry={"FixedCudaChunkOp": FixedCudaChunkOp},
+        preflight_report=_report(),
+    )
+
+    payload = {
+        node_name: hint.to_dict()
+        for node_name, hint in plan.backend_hints.items()
+    }
+    json.dumps(payload)
+    assert "reason_detail" not in payload["chunk"]
 
 
 def test_runtime_planner_uses_numpy_chunk_cost_when_numpy_forced(tmp_path, monkeypatch):
