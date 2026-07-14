@@ -8,6 +8,9 @@ import pywt
 from loguru import logger
 from numpy.typing import NDArray
 
+MIN_STAR_AREA = 10
+STAR_FILTER_PERCENTILE = 10
+
 
 @dataclasses.dataclass
 class DetectedStars:
@@ -72,26 +75,14 @@ def detect_star_points(
         resize_factor /= 2
 
     logger.debug("Mask logical selection")
-    tmp_mask = cv2.resize(img_gray, None, fx=resize_factor, fy=resize_factor)
-    tmp_mask_10percent = np.percentile(tmp_mask, 10)
-    tmp_mask = (tmp_mask < min(tmp_mask_10percent, 0.15)).astype(
-        np.uint8) * 255
-    
-    dilate_size = int(max(img_shape) * 0.003 * resize_factor)
-    tmp_mask = 255 - cv2.dilate(
-        tmp_mask,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                  (dilate_size, dilate_size)))
-    tmp_mask = cv2.resize(tmp_mask, (img_shape[1], img_shape[0]))
     if mask is None:
-        mask = tmp_mask > 127
+        mask = np.ones(img_shape, dtype=bool)
+        logger.debug("Mask calculation Complete (auto mask disabled; using full image)")
     else:
-        mask = np.logical_and(tmp_mask > 127, mask > 0)
-    logger.debug("Mask calculation Complete")
+        mask = mask > 0
+        logger.debug("Mask calculation Complete (using external mask only)")
     mask_rate = np.sum(mask) * 100.0 / np.prod(mask.shape)
     logger.debug(f"mask rate: {mask_rate:.2f}")
-    if mask_rate < 50:
-        mask = np.ones(tmp_mask.shape, dtype="bool")
 
     while True:
         img_rec = _wavelet_dec_rec(img_blr, resize_factor=resize_factor) * mask
@@ -138,10 +129,13 @@ def detect_star_points(
                  rect[0]:rect[0] + rect[2] + 1] = 0
         intensities[i] = val[0]
 
-    valid_stars = np.logical_and(areas > 20, eccentricities < .8)
+    area_percentile = np.percentile(areas, STAR_FILTER_PERCENTILE)
+    intensity_percentile = np.percentile(intensities, STAR_FILTER_PERCENTILE)
+
+    valid_stars = np.logical_and(areas > MIN_STAR_AREA, eccentricities < .8)
     valid_stars = np.logical_and(
-        np.logical_and(valid_stars, areas > np.percentile(areas, 20)),
-        intensities > np.percentile(intensities, 20)
+        np.logical_and(valid_stars, areas > area_percentile),
+        intensities > intensity_percentile
     )
 
     star_pts = centroids[valid_stars]

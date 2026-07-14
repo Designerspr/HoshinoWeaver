@@ -19,14 +19,14 @@ from bench.common import (
 )
 from bench.data_tools.starfield import generate_starfield_frames
 from hoshicore.component.norma.alignment import match_star_pairs, optimize_alignment
-from hoshicore.component.norma.cache import GeometryView, StarDetectionCache
-from hoshicore.component.norma.detection import _wavelet_dec_rec
+from hoshicore.component.norma.detection import _wavelet_dec_rec, detect_star_points
 from hoshicore.component.norma.frame_align import (
+    AlignmentCameraCandidate,
     align_frame_camera_model,
     align_frame_homography,
-    make_geometry,
-    to_gray_f64,
 )
+from hoshicore.component.norma.optimization import CameraOptimizationPolicy
+from hoshicore.component.norma.geometry_view import make_geometry, to_gray_f64
 from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
 
 
@@ -208,8 +208,7 @@ def bench_geometry_stream(frames: list[np.ndarray]) -> None:
 def bench_detect_stream(frames: list[np.ndarray]) -> None:
     for frame in frames:
         gray = to_gray_f64(frame)
-        cache = StarDetectionCache(gray)
-        _ = cache.detected_stars
+        _ = detect_star_points(gray)
 
 
 def bench_detect_prepare_stream(frames: list[np.ndarray]) -> None:
@@ -230,9 +229,7 @@ def bench_detect_extract_stream(payloads: list[DetectPayload]) -> None:
 
 def bench_features_stream(frames: list[np.ndarray]) -> None:
     for frame in frames:
-        gray = to_gray_f64(frame)
-        cache = StarDetectionCache(gray)
-        _ = GeometryView.from_flat_projection(cache).features
+        _ = make_geometry(frame).features
 
 
 def precompute_geometries(frames: list[np.ndarray]):
@@ -256,14 +253,7 @@ def build_synthetic_camera(frame: np.ndarray) -> CameraModel:
 def bench_match_stream(frames: list[np.ndarray]) -> None:
     ref_geo, src_geos = precompute_geometries(frames)
     for src_geo in src_geos:
-        _ = match_star_pairs(
-            ref_geo.unit_vectors,
-            src_geo.unit_vectors,
-            ref_geo.volumes,
-            src_geo.volumes,
-            ref_geo.positions,
-            src_geo.positions,
-        )
+        _ = match_star_pairs(ref_geo, src_geo)
 
 
 def bench_warp_stream(frames: list[np.ndarray]) -> None:
@@ -271,15 +261,10 @@ def bench_warp_stream(frames: list[np.ndarray]) -> None:
     ref_geo, src_geos = precompute_geometries(frames)
     h, w = ref_arr.shape[:2]
     for frame, src_geo in zip(frames[1:], src_geos):
-        match = match_star_pairs(
-            ref_geo.unit_vectors,
-            src_geo.unit_vectors,
-            ref_geo.volumes,
-            src_geo.volumes,
-            ref_geo.positions,
-            src_geo.positions,
-        )
-        H = np.linalg.inv(match.init_homography)
+        match = match_star_pairs(ref_geo, src_geo)
+        if match.homography is None:
+            continue
+        H = np.linalg.inv(match.homography)
         _ = cv2.warpPerspective(frame, H, (w, h))
 
 
@@ -290,14 +275,7 @@ def bench_optimization_stream(frames: list[np.ndarray]) -> None:
     for frame in frames[1:]:
         src_geo = make_geometry(frame)
         src_camera = build_synthetic_camera(frame)
-        match = match_star_pairs(
-            ref_geo.unit_vectors,
-            src_geo.unit_vectors,
-            ref_geo.volumes,
-            src_geo.volumes,
-            ref_geo.positions,
-            src_geo.positions,
-        )
+        match = match_star_pairs(ref_geo, src_geo)
         _ = optimize_alignment(
             match,
             ref_camera,
@@ -317,14 +295,19 @@ def bench_camera_model_pipeline(frames: list[np.ndarray]) -> None:
     ref_arr = frames[0]
     ref_geo = make_geometry(ref_arr)
     ref_camera = build_synthetic_camera(ref_arr)
+    fixed_policy = CameraOptimizationPolicy()
+    ref_candidate = AlignmentCameraCandidate(ref_camera, fixed_policy,
+                                              "provided")
     for frame in frames[1:]:
         src_camera = build_synthetic_camera(frame)
+        src_candidate = AlignmentCameraCandidate(src_camera, fixed_policy,
+                                                  "provided")
         _ = align_frame_camera_model(
             frame,
             ref_geo,
             ref_arr,
-            ref_camera,
-            src_camera,
+            ref_candidate,
+            src_candidate,
             same_camera=True,
         )
 
@@ -337,21 +320,14 @@ def _prepare_remap_payloads(frames: list[np.ndarray]):
     for frame in frames[1:]:
         src_geo = make_geometry(frame)
         src_camera = build_synthetic_camera(frame)
-        match = match_star_pairs(
-            ref_geo.unit_vectors,
-            src_geo.unit_vectors,
-            ref_geo.volumes,
-            src_geo.volumes,
-            ref_geo.positions,
-            src_geo.positions,
-        )
+        match = match_star_pairs(ref_geo, src_geo)
         result = optimize_alignment(
             match,
             ref_camera,
             src_camera,
             same_camera=True,
         )
-        payloads.append((frame, result.camera2_refined, result.camera1_refined,
+        payloads.append((frame, result.src_camera, result.ref_camera,
                          (ref_arr.shape[1], ref_arr.shape[0])))
     return payloads
 

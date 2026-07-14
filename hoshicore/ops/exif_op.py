@@ -25,6 +25,21 @@ class ExifReadOp(ParallelBaseOp):
 
 
 @register_op()
+class ExifReadSingleOp(BaseOp):
+    """Read EXIF from one configured file path."""
+
+    CONFIGS = {
+        "fname": {"type": "str", "required": False, "default": None},
+    }
+    OUTPUTS = {"result": {"type": "exif", "description": "Exif"}}
+
+    async def _async_execute(self, configs: dict[str, Any]) -> None:
+        fname = configs.get("fname")
+        exif = read_exif_data(fname) if fname else None
+        await self._broadcast_outputs({"result": exif})
+
+
+@register_op()
 class ExifReduceOp(BaseOp):
     INPUTS = {"exifs": {"type": "sequence", "description": "Exif sequence"}}
     CONFIGS: dict[str, Any] = {

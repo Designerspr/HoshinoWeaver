@@ -1,24 +1,25 @@
 """
 对齐算子：星点对齐等帧间配准操作。
 
-StarAlignmentOp 支持两条对齐路径：
-  1. 2D 单应性（homography）：FlatCameraModel + warpPerspective（无需 EXIF）
+StarAlignmentOp 支持两条显式对齐路径：
+  1. 2D 单应性（homography）：zero-distortion CameraModel + warpPerspective（无需 EXIF）
   2. 相机模型优化（camera_model）：Intrinsics + optimize_alignment + remap
 
-method="auto" 时，根据 EXIF 是否能构建完整 Intrinsics 自动选择。
+相机参数按 EXIF、手动焦距和 fallback 顺序构造。
 对齐失败的帧被丢弃，输出为变长序列（sentinel 驱动）。
 """
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from loguru import logger
 
 from ..component.norma.frame_align import (AlignmentError,
+                                           CameraInitializationPolicy,
                                            align_frame_camera_model,
                                            align_frame_homography,
-                                           make_geometry, try_build_camera)
-from ..component.norma.types import CameraModel
-from ..component.norma.cache import GeometryView
+                                           build_camera_candidate)
+from ..component.norma.geometry_view import make_geometry
+from ..component.norma.intrinsics_from_exif import lens_type_from_exif
 from ..component.queue import StreamExhausted
 from ..engine.registry import register_op
 from ..component.data_container import FloatImage
@@ -29,12 +30,11 @@ from .base import FilterBaseOp
 class StarAlignmentOp(FilterBaseOp):
     """星点对齐：将序列帧对齐到参考帧。
 
-    支持两条路径：
-    - homography: 2D 单应性（FlatCameraModel），无需相机信息
-    - camera_model: 联合优化旋转+焦距+畸变，需要 EXIF 提供内参
+    支持两条路径，显式选择：
+    - homography: 仅优化旋转+焦距，无需相机信息
+    - distortion: 联合优化旋转+焦距+畸变，需要 EXIF 提供内参
 
-    method="auto" 时根据 EXIF 可用性自动选择。
-    对齐失败的帧被丢弃（不输出），因此输出为变长序列。
+    对齐失败的帧被丢弃（不输出），输出为变长序列。
     """
 
     EXECUTOR = "cpu"
@@ -43,10 +43,22 @@ class StarAlignmentOp(FilterBaseOp):
         "exifs": {"type": "sequence", "required": False},
     }
     CONFIGS: dict[str, Any] = {
-        "reference":   {"type": "image", "default": None},
-        "method":      {"type": "str",   "default": "auto"},
-        "same_camera": {"type": "bool",  "default": True},
-        "distortion":  {"type": "list",  "default": None},
+        "reference":        {"type": "image",  "required": True},
+        "reference_exif":   {"type": "exif",   "default": None},
+        "method":           {"type": "str",    "default": "distortion"},
+        "camera_setup_mode": {"type": "str",   "default": None},
+        "same_camera":      {"type": "bool",   "default": True},
+        "distortion":       {"type": "list",   "default": None},
+        "lens_type":        {"type": "str",    "default": None},
+        "ref_lens_type":    {"type": "str",    "default": None},
+        "src_lens_type":    {"type": "str",    "default": None},
+        "focal_length_mm":  {"type": "float",  "default": None},
+        "crop_factor":      {"type": "float",  "default": 1.0},
+        "fallback_focal_equiv_mm": {"type": "float", "default": 20.0},
+        "bootstrap_scales": {"type": "list", "default": None},
+        "optimize_focal": {"type": "bool", "default": None},
+        "optimize_distortion": {"type": "bool", "default": None},
+        "optimize_principal_point": {"type": "bool", "default": None},
     }
     OUTPUTS: dict[str, Any] = {
         "result": {"type": "sequence"},
@@ -62,22 +74,86 @@ class StarAlignmentOp(FilterBaseOp):
         return (2 * frame_bytes, 0)
 
     async def _async_filter(self, configs: dict[str, Any]) -> None:
-        reference = configs.get('reference')
-        method = configs.get('method', 'auto')
+        method = configs.get('method', 'distortion')
+        camera_setup_mode = configs.get('camera_setup_mode')
         same_camera = configs.get('same_camera', True)
         init_distortion = configs.get('distortion')
+        shared_lens_type = configs.get('lens_type')
+        configured_ref_lens = configs.get('ref_lens_type')
+        configured_src_lens = configs.get('src_lens_type')
+        focal_length_mm = configs.get('focal_length_mm')
+        crop_factor = configs.get('crop_factor') or 1.0
+
+        # camera_setup_mode is the user-facing controller.  Keep
+        # same_camera and the individual lens fields as a backwards-compatible
+        # low-level API for callers which do not provide the mode.
+        if camera_setup_mode is not None:
+            if camera_setup_mode == "auto":
+                same_camera = True
+                shared_lens_type = None
+                configured_ref_lens = None
+                configured_src_lens = None
+                focal_length_mm = None
+                crop_factor = 1.0
+            elif camera_setup_mode == "manual":
+                same_camera = True
+                configured_ref_lens = None
+                configured_src_lens = None
+            elif camera_setup_mode == "separate":
+                same_camera = False
+                shared_lens_type = None
+            else:
+                raise ValueError(
+                    f"Unsupported camera_setup_mode {camera_setup_mode!r}; "
+                    "expected 'auto', 'manual', or 'separate'")
+
+        focal_equiv_mm = focal_length_mm * crop_factor if focal_length_mm else None
+        fallback_focal_equiv_mm: float = configs.get('fallback_focal_equiv_mm', 20.0)
+        bootstrap_scales = configs.get('bootstrap_scales')
+        if bootstrap_scales is None:
+            bootstrap_scales_tuple = (0.7, 1.0, 1.3)
+        else:
+            bootstrap_scales_tuple = tuple(float(x) for x in bootstrap_scales)
+        policy_kwargs = dict(
+            fallback_focal_equiv_mm=float(fallback_focal_equiv_mm),
+            optimize_focal=configs.get('optimize_focal'),
+            optimize_distortion=configs.get('optimize_distortion'),
+            optimize_principal_point=configs.get('optimize_principal_point'),
+        )
 
         exifs_active = self.inputs['exifs'].active
 
-        ref_geo: Optional[GeometryView] = None
-        ref_arr: Optional[np.ndarray] = None
-        ref_camera: Optional[CameraModel] = None
+        # Initialize the mandatory reference before consuming the frame
+        # stream. This removes the previous first-frame/fallback mode.
+        reference = configs['reference']
+        ref_arr = reference.data if isinstance(reference, FloatImage) else reference
+
+        ref_exif_obj = configs.get('reference_exif')
+        ref_exif_tags = (ref_exif_obj.exif
+                         if ref_exif_obj is not None else None)
+        ref_lens_type = (configured_ref_lens if configured_ref_lens is not None
+                         else shared_lens_type)
+        if ref_lens_type is None:
+            ref_lens_type = lens_type_from_exif(ref_exif_tags)
+        ref_policy = CameraInitializationPolicy(
+            lens_type=ref_lens_type, **policy_kwargs)
+
+        ref_candidate = build_camera_candidate(
+            ref_exif_tags, ref_arr.shape, method, init_distortion,
+            focal_equiv_mm, ref_policy)
+        ref_camera = ref_candidate.camera
+        ref_geo = await self._run_cpu(
+            make_geometry, ref_arr, None, ref_camera,
+            float(fallback_focal_equiv_mm))
+        path_name = ("fixed-camera homography fast path"
+                     if method == "homography" else "camera model path")
+        logger.info(
+            f"{self.name}: {path_name} enabled for mandatory reference "
+            f"(focal={ref_camera.intrinsics.focal_length_mm:.1f}mm, "
+            f"lens_type={ref_lens_type or 'perspective'}, "
+            f"source={ref_candidate.init_source})")
         aligned_count = 0
         skipped_count = 0
-
-        if reference is not None:
-            ref_arr = reference.data if isinstance(reference, FloatImage) else reference
-            ref_geo = await self._run_cpu(make_geometry, ref_arr)
 
         for i in self._input_range():
             data = self._async_convert_inputs()
@@ -86,7 +162,7 @@ class StarAlignmentOp(FilterBaseOp):
             except StreamExhausted:
                 break
 
-            # 消费 EXIF 并拆包为 dict（Op 层负责 ExifData → dict 转换）
+            # 消费 EXIF 并拆包为 dict
             exif_tags = None
             exif_obj = None
             if exifs_active:
@@ -98,37 +174,35 @@ class StarAlignmentOp(FilterBaseOp):
 
             frame_arr = frame.data if isinstance(frame, FloatImage) else frame
 
-            # 首帧：设定参考 + 确定路径
-            if ref_geo is None:
-                ref_arr = frame_arr
-                ref_geo = await self._run_cpu(make_geometry, ref_arr)
-                ref_camera = try_build_camera(
-                    exif_tags, ref_arr.shape, method, init_distortion)
-                if ref_camera:
-                    logger.info(
-                        f"{self.name}: camera model path enabled "
-                        f"(focal={ref_camera.intrinsics.focal_length_mm:.1f}mm)")
-                else:
-                    logger.info(f"{self.name}: using homography path")
-                await self._broadcast_outputs(
-                    {"result": frame, "aligned_exifs": exif_obj})
-                aligned_count += 1
-                self.tracker.update(self.name)
-                continue
-
-            # 后续帧：对齐
+            # 对齐
             try:
-                src_camera = try_build_camera(
-                    exif_tags, frame_arr.shape, method, init_distortion)
+                src_lens_type = (configured_src_lens
+                                 if configured_src_lens is not None else
+                                 shared_lens_type)
+                if src_lens_type is None:
+                    src_lens_type = lens_type_from_exif(exif_tags)
+                src_policy = CameraInitializationPolicy(
+                    lens_type=src_lens_type, **policy_kwargs)
+                src_candidate = build_camera_candidate(
+                    exif_tags, frame_arr.shape, method, init_distortion,
+                    focal_equiv_mm, src_policy)
+                src_camera = src_candidate.camera
 
                 if ref_camera and src_camera and method != "homography":
                     aligned_arr = await self._run_cpu(
                         align_frame_camera_model,
                         frame_arr, ref_geo, ref_arr,
-                        ref_camera, src_camera, same_camera)
+                        ref_candidate, src_candidate, same_camera,
+                        bootstrap_scales_tuple)
                 else:
                     aligned_arr = await self._run_cpu(
-                        align_frame_homography, frame_arr, ref_geo, ref_arr)
+                        align_frame_homography,
+                        frame_arr,
+                        ref_geo,
+                        ref_arr,
+                        float(fallback_focal_equiv_mm),
+                        src_camera,
+                    )
 
                 aligned = (FloatImage(data=aligned_arr, dtype=frame.dtype)
                            if isinstance(frame, FloatImage) else aligned_arr)

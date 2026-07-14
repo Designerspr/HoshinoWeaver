@@ -3,66 +3,149 @@ import numpy as np
 import pytest
 
 from hoshicore.ops.satellite_clean_op import SatelliteCleanOp, _FrameSlot
+from hoshicore.component.norma.geometry_view import GeometryView
+from hoshicore.component.norma.types import CameraModel, Intrinsics
 
 
-class TestChainHomography:
-    """Test _chain_homography correctness."""
+def _dummy_geo(shape):
+    h, w = shape[:2]
+    camera = CameraModel(
+        intrinsics=Intrinsics(
+            focal_length_mm=20.0,
+            sensor_width_mm=36.0,
+            sensor_height_mm=24.0,
+            image_width_px=w,
+            image_height_px=h,
+        ))
+    return GeometryView(np.zeros((h, w), dtype=np.float64), camera)
 
-    def _make_buffer(self, shifts):
-        """Create a buffer of FrameSlots with known translation homographies."""
+
+class TestCameraInitialization:
+
+    def test_exif_intrinsics_take_priority_over_manual_focal(self):
+        exif = {
+            "Exif.Photo.FocalLength": "50/1",
+            "Exif.Photo.FocalPlaneXResolution": "500/3",
+            "Exif.Photo.FocalPlaneYResolution": "500/3",
+            "Exif.Photo.FocalPlaneResolutionUnit": "4",
+        }
+
+        camera = SatelliteCleanOp._build_frame_camera(
+            exif,
+            (4000, 6000, 3),
+            focal_equiv_mm=35.0,
+            fallback_focal_equiv_mm=20.0,
+        )
+
+        assert camera.intrinsics.focal_length_mm == pytest.approx(50.0)
+        assert camera.intrinsics.sensor_width_mm == pytest.approx(36.0)
+        assert camera.intrinsics.sensor_height_mm == pytest.approx(24.0)
+
+    def test_manual_focal_is_used_for_incomplete_exif(self):
+        camera = SatelliteCleanOp._build_frame_camera(
+            {"Exif.Photo.FocalLength": "50/1"},
+            (4000, 6000, 3),
+            focal_equiv_mm=35.0,
+            fallback_focal_equiv_mm=20.0,
+        )
+
+        assert camera.intrinsics.focal_length_mm == pytest.approx(35.0)
+
+    def test_configured_fallback_is_used_without_exif_or_manual_focal(self):
+        camera = SatelliteCleanOp._build_frame_camera(
+            None,
+            (4000, 6000, 3),
+            focal_equiv_mm=None,
+            fallback_focal_equiv_mm=28.0,
+        )
+
+        assert camera.intrinsics.focal_length_mm == pytest.approx(28.0)
+
+
+class TestChainRotation:
+    """Test _chain_rotation correctness."""
+
+    def _rot_z(self, angle_deg):
+        angle = np.deg2rad(angle_deg)
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0.0],
+            [np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+
+    def _make_buffer(self, angles):
+        """Create a buffer of FrameSlots with known adjacent rotations."""
         from collections import deque
         buffer = deque()
-        for i, (dx, dy) in enumerate(shifts):
+        for i, angle in enumerate(angles):
             slot = _FrameSlot(
                 original=np.zeros((100, 100, 3), dtype=np.uint8),
                 geo=None,
             )
-            if i < len(shifts) - 1:
-                next_dx, next_dy = shifts[i + 1]
-                # H maps frame[i] pixels to frame[i+1] pixels (translation)
-                H = np.eye(3, dtype=np.float64)
-                H[0, 2] = next_dx - dx
-                H[1, 2] = next_dy - dy
-                slot.H_to_next = H
+            if i < len(angles) - 1:
+                slot.R_to_next = self._rot_z(angles[i + 1] - angle)
             buffer.append(slot)
         return buffer
 
     def test_identity(self):
-        buffer = self._make_buffer([(0, 0), (5, 0), (10, 0)])
-        H = SatelliteCleanOp._chain_homography(buffer, 1, 1)
-        np.testing.assert_allclose(H, np.eye(3))
+        buffer = self._make_buffer([0, 5, 10])
+        R = SatelliteCleanOp._chain_rotation(buffer, 1, 1)
+        np.testing.assert_allclose(R, np.eye(3))
 
     def test_forward_chain(self):
-        buffer = self._make_buffer([(0, 0), (5, 0), (10, 0)])
-        H = SatelliteCleanOp._chain_homography(buffer, 0, 2)
-        # Should map frame[0] to frame[2]: translation of (10, 0)
-        expected = np.eye(3, dtype=np.float64)
-        expected[0, 2] = 10.0
-        np.testing.assert_allclose(H, expected, atol=1e-10)
+        buffer = self._make_buffer([0, 5, 10])
+        R = SatelliteCleanOp._chain_rotation(buffer, 0, 2)
+        np.testing.assert_allclose(R, self._rot_z(10), atol=1e-10)
 
     def test_reverse_chain(self):
-        buffer = self._make_buffer([(0, 0), (5, 0), (10, 0)])
-        H = SatelliteCleanOp._chain_homography(buffer, 2, 0)
-        expected = np.eye(3, dtype=np.float64)
-        expected[0, 2] = -10.0
-        np.testing.assert_allclose(H, expected, atol=1e-10)
+        buffer = self._make_buffer([0, 5, 10])
+        R = SatelliteCleanOp._chain_rotation(buffer, 2, 0)
+        np.testing.assert_allclose(R, self._rot_z(-10), atol=1e-10)
 
     def test_forward_reverse_inverse(self):
-        buffer = self._make_buffer([(0, 0), (3, 2), (7, 5), (12, 1)])
-        H_fwd = SatelliteCleanOp._chain_homography(buffer, 0, 3)
-        H_rev = SatelliteCleanOp._chain_homography(buffer, 3, 0)
-        product = H_fwd @ H_rev
+        buffer = self._make_buffer([0, 3, 7, 12])
+        R_fwd = SatelliteCleanOp._chain_rotation(buffer, 0, 3)
+        R_rev = SatelliteCleanOp._chain_rotation(buffer, 3, 0)
+        product = R_fwd @ R_rev
         np.testing.assert_allclose(product, np.eye(3), atol=1e-10)
 
-    def test_none_homography_returns_none(self):
+    def test_none_rotation_returns_none(self):
         from collections import deque
         buffer = deque()
         for _ in range(3):
             buffer.append(_FrameSlot(
                 original=np.zeros((10, 10), dtype=np.uint8),
-                geo=None, H_to_next=None))
-        result = SatelliteCleanOp._chain_homography(buffer, 0, 2)
+                geo=None, R_to_next=None))
+        result = SatelliteCleanOp._chain_rotation(buffer, 0, 2)
         assert result is None
+
+
+class TestHomographyFromRotation:
+
+    def test_uses_endpoint_intrinsics_and_rotation(self):
+        from_intrinsics = Intrinsics(20.0, 36.0, 24.0, 600, 400)
+        to_intrinsics = Intrinsics(35.0, 36.0, 24.0, 900, 600)
+        from_geo = GeometryView(
+            np.zeros((400, 600), dtype=np.float64),
+            CameraModel(intrinsics=from_intrinsics),
+        )
+        to_geo = GeometryView(
+            np.zeros((600, 900), dtype=np.float64),
+            CameraModel(intrinsics=to_intrinsics),
+        )
+        angle = np.deg2rad(7.0)
+        rotation = np.array([
+            [np.cos(angle), 0.0, np.sin(angle)],
+            [0.0, 1.0, 0.0],
+            [-np.sin(angle), 0.0, np.cos(angle)],
+        ], dtype=np.float64)
+
+        actual = SatelliteCleanOp._homography_from_rotation(
+            from_geo, to_geo, rotation)
+        expected = to_geo.camera.K @ rotation @ np.linalg.inv(from_geo.camera.K)
+        expected /= expected[2, 2]
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
 
 class TestProcessCenter:
@@ -89,12 +172,9 @@ class TestProcessCenter:
                 y1, y2, x1, x2 = satellite_region
                 shifted[y1:y2, x1:x2] = 255
 
-            slot = _FrameSlot(original=shifted, geo=None)
+            slot = _FrameSlot(original=shifted, geo=_dummy_geo(shape))
             if i > 0:
-                # H maps frame[i-1] to frame[i]: translate by (shift_x, 0)
-                H = np.eye(3, dtype=np.float64)
-                H[0, 2] = shift_x
-                buffer[-1].H_to_next = H
+                buffer[-1].R_to_next = np.eye(3, dtype=np.float64)
             buffer.append(slot)
 
         return buffer

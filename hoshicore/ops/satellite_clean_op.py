@@ -8,9 +8,10 @@ import numpy as np
 from loguru import logger
 
 from ..component.data_container import FloatImage
-from ..component.norma.cache import GeometryView
-from ..component.norma.frame_align import make_geometry
-from ..component.norma.alignment import match_star_pairs_from_geo
+from ..component.norma.geometry_view import GeometryView, make_geometry
+from ..component.norma.alignment import match_star_pairs
+from ..component.norma.frame_align import build_camera
+from ..component.norma.types import CameraModel
 from ..component.queue import StreamExhausted
 from .._custom_op.ops.median import median_reduce_chunk
 from ..engine.registry import register_op
@@ -21,7 +22,7 @@ from .base import BaseOp
 class _FrameSlot:
     original: np.ndarray
     geo: Optional[GeometryView]
-    H_to_next: Optional[np.ndarray] = None
+    R_to_next: Optional[np.ndarray] = None
 
 
 @register_op()
@@ -36,10 +37,14 @@ class SatelliteCleanOp(BaseOp):
     REPORTS_PROGRESS = True
     INPUTS: dict[str, Any] = {
         "data": {"type": "sequence", "required": True},
+        "exifs": {"type": "sequence", "required": False},
     }
     CONFIGS: dict[str, Any] = {
         "window_size": {"type": "int", "default": 3},
         "mask": {"type": "image", "default": None},
+        "focal_length_mm": {"type": "float", "default": None},
+        "crop_factor": {"type": "float", "default": 1.0},
+        "fallback_focal_equiv_mm": {"type": "float", "default": 20.0},
     }
     OUTPUTS: dict[str, Any] = {
         "result": {"type": "sequence"},
@@ -60,6 +65,13 @@ class SatelliteCleanOp(BaseOp):
     async def _async_execute(self, configs: dict[str, Any]) -> None:
         W: int = configs['window_size']
         mask: Optional[np.ndarray] = configs['mask']
+        focal_length_mm = configs.get('focal_length_mm')
+        crop_factor = configs.get('crop_factor') or 1.0
+        focal_equiv_mm = (float(focal_length_mm) * float(crop_factor)
+                          if focal_length_mm is not None else None)
+        fallback_focal_equiv_mm = float(
+            configs.get('fallback_focal_equiv_mm', 20.0))
+        exifs_active = self.inputs['exifs'].active
         if mask is not None:
             if mask.ndim == 3:
                 mask = mask.mean(axis=2)
@@ -83,9 +95,24 @@ class SatelliteCleanOp(BaseOp):
                 except StreamExhausted:
                     break
 
+                exif_obj = None
+                if exifs_active:
+                    try:
+                        exif_obj = await upper['exifs']
+                    except StreamExhausted:
+                        pass
+
                 frame_arr = frame.data if isinstance(frame, FloatImage) else frame
                 try:
-                    geo = await self._run_cpu(make_geometry, frame_arr, mask)
+                    camera = self._build_frame_camera(
+                        exif_obj,
+                        frame_arr.shape,
+                        focal_equiv_mm=focal_equiv_mm,
+                        fallback_focal_equiv_mm=fallback_focal_equiv_mm,
+                    )
+                    geo = await self._run_cpu(make_geometry, frame_arr, mask,
+                                              camera,
+                                              fallback_focal_equiv_mm)
                 except Exception as e:
                     logger.warning(
                         f"{self.name}: star extraction failed, frame will not be aligned ({e})")
@@ -103,11 +130,11 @@ class SatelliteCleanOp(BaseOp):
                 
                 slot = _FrameSlot(original=frame_arr, geo=geo)
                 if buffer:
-                    H = await self._run_cpu(
-                        self._compute_homography, buffer[-1].geo, geo)
-                    buffer[-1].H_to_next = H
-                    if H is None:
-                        logger.debug(f"Fail to compute homography for frame {i}.")
+                    R = await self._run_cpu(
+                        self._compute_rotation, buffer[-1].geo, geo)
+                    buffer[-1].R_to_next = R
+                    if R is None:
+                        logger.debug(f"Fail to compute rotation for frame {i}.")
 
                 # only pop when next frame is ready and buffer is full 
                 # this ensures the residual frames in buffer to be enough, and can still be processed after input is exhausted
@@ -144,6 +171,34 @@ class SatelliteCleanOp(BaseOp):
                 self.tracker.close_bar(self.name)
 
     @staticmethod
+    def _build_frame_camera(
+        exif_obj: Any,
+        image_shape: tuple[int, ...],
+        focal_equiv_mm: Optional[float],
+        fallback_focal_equiv_mm: float,
+    ) -> CameraModel:
+        """Build the zero-distortion perspective camera used by homography.
+
+        EXIF intrinsics take priority.  The manual 35mm-equivalent focal value
+        is used when EXIF is absent or incomplete, followed by the historical
+        20mm fallback (or its configured replacement).
+        """
+        if isinstance(exif_obj, dict):
+            exif_tags = exif_obj
+        else:
+            exif_tags = getattr(exif_obj, 'exif', None)
+        camera = build_camera(
+            exif_tags,
+            image_shape,
+            "homography",
+            focal_equiv_mm=focal_equiv_mm,
+            fallback_focal_equiv_mm=fallback_focal_equiv_mm,
+        )
+        if not isinstance(camera, CameraModel):
+            raise TypeError("Satellite clean homography requires CameraModel")
+        return camera
+
+    @staticmethod
     def _wrap_output(arr: np.ndarray, ref_frame) -> Any:
         if isinstance(ref_frame, FloatImage):
             return FloatImage(data=arr, dtype=ref_frame.dtype)
@@ -161,7 +216,9 @@ class SatelliteCleanOp(BaseOp):
         for pos in range(len(buffer)):
             if pos == center_pos:
                 continue
-            H = SatelliteCleanOp._chain_homography(buffer, pos, center_pos)
+            R = SatelliteCleanOp._chain_rotation(buffer, pos, center_pos)
+            H = SatelliteCleanOp._homography_from_rotation(
+                buffer[pos].geo, center.geo, R)
             if H is None:
                 continue
             aligned = cv2.warpPerspective(
@@ -190,37 +247,62 @@ class SatelliteCleanOp(BaseOp):
         return result
 
     @staticmethod
-    def _chain_homography(
+    def _chain_rotation(
         buffer: deque, from_pos: int, to_pos: int
     ) -> Optional[np.ndarray]:
         if from_pos == to_pos:
             return np.eye(3, dtype=np.float64)
 
         if from_pos < to_pos:
-            H = np.eye(3, dtype=np.float64)
+            R = np.eye(3, dtype=np.float64)
             for k in range(from_pos, to_pos):
-                H_k = buffer[k].H_to_next
-                if H_k is None:
+                R_k = buffer[k].R_to_next
+                if R_k is None:
                     return None
-                H = H_k @ H
-            return H
+                R = R_k @ R
+            return R
         else:
-            H_forward = SatelliteCleanOp._chain_homography(
+            R_forward = SatelliteCleanOp._chain_rotation(
                 buffer, to_pos, from_pos)
-            if H_forward is None:
+            if R_forward is None:
                 return None
-            return np.linalg.inv(H_forward)
+            return R_forward.T
 
     @staticmethod
-    def _compute_homography(
+    def _homography_from_rotation(
+        from_geo: Optional[GeometryView],
+        to_geo: Optional[GeometryView],
+        rotation_from_to: Optional[np.ndarray],
+    ) -> Optional[np.ndarray]:
+        if from_geo is None or to_geo is None or rotation_from_to is None:
+            return None
+        from_camera = from_geo.camera
+        to_camera = to_geo.camera
+        if not isinstance(from_camera, CameraModel) or not isinstance(
+                to_camera, CameraModel):
+            return None
+        if not from_camera.distortion.is_zero or not to_camera.distortion.is_zero:
+            logger.warning(
+                "Satellite clean: using rotation-derived H requires zero-distortion perspective cameras"
+            )
+            return None
+        H = to_camera.K @ rotation_from_to @ np.linalg.inv(from_camera.K)
+        if not np.all(np.isfinite(H)):
+            return None
+        if abs(float(H[2, 2])) > 1e-12:
+            H = H / H[2, 2]
+        return H.astype(np.float64, copy=False)
+
+    @staticmethod
+    def _compute_rotation(
         prev_geo: Optional[GeometryView], curr_geo: Optional[GeometryView]
     ) -> Optional[np.ndarray]:
         if prev_geo is None or curr_geo is None:
             return None
         try:
-            match = match_star_pairs_from_geo(prev_geo, curr_geo)
-            return match.init_homography
+            match = match_star_pairs(prev_geo, curr_geo)
+            return match.rotation
         except Exception as e:
             logger.warning(
-                f"Satellite clean: homography failed ({e}), frame link broken")
+                f"Satellite clean: rotation match failed ({e}), frame link broken")
             return None

@@ -60,6 +60,22 @@ configs:
     min: 3
     max: 9
     step: 2
+  sat_focal_length_mm:
+    label: "镜头焦距"
+    description: "用于去卫星线的旋转估计。优先读取逐帧 EXIF；EXIF 缺失或不完整时使用此实际焦距。留空则使用 20mm 等效焦距兜底。"
+    widget: input
+    visible_when: { key: "enable_satellite_clean", eq: true }
+    min: 0.1
+    max: 2000
+    step: 0.1
+  sat_crop_factor:
+    label: "传感器裁切系数"
+    description: "手动焦距对应的裁切系数；全画幅为 1.0。实际焦距乘以该值作为 35mm 等效焦距。"
+    widget: input
+    visible_when: { key: "enable_satellite_clean", eq: true }
+    min: 0.1
+    max: 10.0
+    step: 0.1
   mask:
     label: "天空区域遮罩"
     description: "选择一张天空区域遮罩图像（白色=天空，黑色=地面）。该遮罩用于限定星点检测区域。"
@@ -164,6 +180,8 @@ layout:
           star_shrink_mode,
           enable_satellite_clean,
           sat_window_size,
+          sat_focal_length_mm,
+          sat_crop_factor,
           mask,
         ]
     - name: "输出设置"
@@ -177,6 +195,8 @@ layout:
       star_shrink_mode,
       enable_satellite_clean,
       sat_window_size,
+      sat_focal_length_mm,
+      sat_crop_factor,
       mask,
     ]
 

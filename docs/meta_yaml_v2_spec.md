@@ -103,6 +103,10 @@ configs:
     bind: <other_key>                     # range_slider 专属
     accept: ".tif,.png"                   # file_picker 专属
     transform: <transform_spec>           # 值变换（见 §4.2）
+    visible_when:                         # 可选：条件可见性
+      all:                                # all 内条件需全部满足
+        - { key: <config_or_route>, eq: <value> }
+        - { key: <config_or_route>, neq: <value> }
 
 # ─── 路由专属配置面板 ───
 # 注意：ui.yaml 的 route_configs 按 option_key 分组（非 route_key），

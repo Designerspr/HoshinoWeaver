@@ -3,10 +3,14 @@ version: "1"
 
 inputs:
   data: { type: sequence, required: true }
+  exifs: { type: sequence, required: false }
 
 configs:
   window_size: { type: int, default: 3 }
   mask: { type: str, required: false, default: null }
+  focal_length_mm: { type: float, default: null }
+  crop_factor: { type: float, default: 1.0 }
+  fallback_focal_equiv_mm: { type: float, default: 20.0 }
 
 nodes:
   load_mask:
@@ -20,9 +24,13 @@ nodes:
     op: SatelliteCleanOp
     inputs:
       data: inputs.data
+      exifs: inputs.exifs
     configs:
       window_size: configs.window_size
       mask: load_mask.result
+      focal_length_mm: configs.focal_length_mm
+      crop_factor: configs.crop_factor
+      fallback_focal_equiv_mm: configs.fallback_focal_equiv_mm
     outputs:
       result: { type: sequence }
 

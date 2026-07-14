@@ -1,16 +1,20 @@
 """单帧对齐：封装两条路径的纯函数 API。
 """
+import dataclasses
 from typing import Optional
 
 import cv2
 import numpy as np
 from loguru import logger
 
-from .alignment import match_star_pairs, optimize_alignment, warp_image_by_remap
-from .matching import ALIGN_VALIDATION, HomographyValidationConfig
-from .cache import GeometryView, StarDetectionCache
-from .intrinsics_from_exif import intrinsics_from_exif
-from .types import CameraModel, Distortion, Intrinsics
+from .alignment import match_star_pairs, optimize_alignment
+from .optimization import CameraOptimizationPolicy
+from .geometry_view import GeometryView, make_geometry
+from .intrinsics_from_exif import (intrinsics_from_exif,
+                                   intrinsics_from_focal_equiv,
+                                   intrinsics_from_fisheye_estimate)
+from .types import (BaseCameraModel, CameraModel, Distortion,
+                    FisheyeCameraModel, FisheyeDistortion)
 
 
 class AlignmentError(Exception):
@@ -18,82 +22,443 @@ class AlignmentError(Exception):
     pass
 
 
-def to_gray_f64(arr: np.ndarray) -> np.ndarray:
-    """将图像数组转换为 [0, 1] 范围的 float64 灰度图。"""
-    if arr.ndim == 3:
-        gray = cv2.cvtColor(arr.astype(np.float32), cv2.COLOR_RGB2GRAY).astype(np.float64)
-    else:
-        gray = arr.astype(np.float64)
-
-    if np.issubdtype(arr.dtype, np.integer):
-        gray /= np.iinfo(arr.dtype).max
-    else:
-        max_val = gray.max()
-        if max_val > 1.0:
-            gray /= max_val
-
-    return gray
+DEFAULT_BOOTSTRAP_SCALES = (0.7, 1.0, 1.3)
 
 
-def make_geometry(arr: np.ndarray,
-                  mask: Optional[np.ndarray] = None) -> GeometryView:
-    """从原始图像数组构建 FlatCameraModel GeometryView。"""
-    gray = to_gray_f64(arr)
-    cache = StarDetectionCache(gray, mask=mask)
-    return GeometryView.from_flat_projection(cache)
+@dataclasses.dataclass(frozen=True)
+class CameraInitializationPolicy:
+    lens_type: Optional[str] = None
+    fallback_focal_equiv_mm: float = 20.0
+    optimize_focal: Optional[bool] = None
+    optimize_distortion: Optional[bool] = None
+    optimize_principal_point: Optional[bool] = None
 
 
-def try_build_camera(
+@dataclasses.dataclass(frozen=True)
+class AlignmentCameraCandidate:
+    camera: BaseCameraModel
+    optimization_policy: CameraOptimizationPolicy
+    init_source: str
+    scale: float = 1.0
+
+
+def build_camera(
     exif_tags: Optional[dict[str, str]],
     img_shape: tuple,
     method: str,
     init_distortion: Optional[list] = None,
-) -> Optional[CameraModel]:
-    """尝试从 EXIF 标签字典构建 CameraModel。
+    lens_type: Optional[str] = None,
+    focal_equiv_mm: Optional[float] = None,
+    fallback_focal_equiv_mm: float = 20.0,
+) -> BaseCameraModel:
+    """尝试构建 CameraModel 或 FisheyeCameraModel。
 
-    返回 None 时调用方应降级为 homography 路径。
+    内参解析优先级（高→低）：
+      1. EXIF（FocalLength + FocalPlaneResolution）
+      2. 手动参数 focal_equiv_mm（35mm 等效焦距）
+      3. 兜底：鱼眼假设 FOV=180° ，直线镜头35mm 等效焦距 Fallback
+
+    lens_type="fisheye" 时返回 FisheyeCameraModel（零系数=等距起点）。
     """
-    if method == "homography":
-        return None
-    if exif_tags is None:
-        return None
+    if method not in ("distortion", "homography"):
+        raise ValueError(f"Unsupported alignment method {method!r}; expected "
+                         "'distortion' or 'homography'")
 
     h, w = img_shape[:2]
-    intrinsics = intrinsics_from_exif(exif_tags, w, h)
-    if intrinsics is None:
-        return None
 
-    dist = Distortion.from_cv2(init_distortion) if init_distortion else Distortion()
+    # 1. 优先从 EXIF 解析
+    intrinsics = intrinsics_from_exif(exif_tags, w, h) if exif_tags else None
+
+    # 2. EXIF 失败时尝试手动焦距
+    if intrinsics is None and focal_equiv_mm is not None:
+        intrinsics = intrinsics_from_focal_equiv(focal_equiv_mm, w, h)
+        logger.debug(
+            f"build_camera: using manual focal_equiv={focal_equiv_mm:.1f}mm")
+
+    # 3. 兜底
+    if lens_type == "fisheye":
+        if method == "homography":
+            logger.warning(
+                "Applying homography method for a fisheye lens. The result may "
+                "be inaccurate. Consider using 'camera_model' method instead.")
+        else:
+            if intrinsics is None:
+                intrinsics = intrinsics_from_fisheye_estimate(w, h)
+                logger.warning(
+                    f"build_camera: fisheye but no EXIF or focal_length_mm; "
+                    f"estimating K from 180° FOV "
+                    f"(focal_equiv≈{intrinsics.focal_length_mm:.1f}mm). "
+                    f"Provide focal_length_mm for better accuracy.")
+            dist = FisheyeDistortion.from_array(
+                init_distortion) if init_distortion else FisheyeDistortion()
+            return FisheyeCameraModel(intrinsics=intrinsics, distortion=dist)
+
+    if intrinsics is None:
+        intrinsics = intrinsics_from_focal_equiv(fallback_focal_equiv_mm, w, h)
+        if intrinsics is not None:
+            logger.debug(
+                f"build_camera: using perspective fallback focal_equiv={fallback_focal_equiv_mm:.1f}mm"
+            )
+
+    dist = Distortion.from_cv2(init_distortion) if (
+        init_distortion and method != "homography") else Distortion()
     return CameraModel(intrinsics=intrinsics, distortion=dist)
 
 
-def _check_star_count(ref_geo: GeometryView, src_geo: GeometryView,
+def _camera_init_source(
+    exif_tags: Optional[dict[str, str]],
+    img_shape: tuple,
+    lens_type: Optional[str],
+    focal_equiv_mm: Optional[float],
+    fallback_focal_equiv_mm: Optional[float],
+) -> str:
+    h, w = img_shape[:2]
+    if exif_tags and intrinsics_from_exif(exif_tags, w, h) is not None:
+        return "exif"
+    if focal_equiv_mm is not None:
+        return "manual"
+    if lens_type == "fisheye":
+        return "fisheye_estimate"
+    if fallback_focal_equiv_mm is not None:
+        return "fallback_focal"
+    return "none"
+
+
+def _policy_for_camera(
+    init_source: str,
+    init_policy: CameraInitializationPolicy,
+) -> CameraOptimizationPolicy:
+    is_ideal = init_policy.lens_type == "ideal"
+    default_optimize_focal = True
+    # A synthetic fallback focal is deliberately conservative: allow focal
+    # recovery, but do not let distortion absorb a poor focal initial value.
+    default_optimize_distortion = (not is_ideal
+                                   and init_source != "fallback_focal")
+    optimize_focal = (default_optimize_focal if init_policy.optimize_focal
+                      is None else init_policy.optimize_focal)
+    optimize_distortion = (default_optimize_distortion
+                           if init_policy.optimize_distortion is None else
+                           init_policy.optimize_distortion)
+    optimize_principal_point = (False
+                                if init_policy.optimize_principal_point is None
+                                else init_policy.optimize_principal_point)
+    return CameraOptimizationPolicy(
+        optimize_focal=optimize_focal,
+        optimize_distortion=optimize_distortion,
+        optimize_principal_point=optimize_principal_point,
+        # The fourth Kannala--Brandt term is weakly identifiable for the
+        # typical star-field coverage. Keep it fixed by default and optimize
+        # k1..k3; perspective cameras retain their four-parameter policy.
+        n_dist=3 if init_policy.lens_type == "fisheye" else 4,
+    )
+
+
+def build_camera_candidate(
+        exif_tags: Optional[dict[str, str]],
+        img_shape: tuple,
+        method: str,
+        init_distortion: Optional[list] = None,
+        focal_equiv_mm: Optional[float] = None,
+        init_policy: CameraInitializationPolicy = CameraInitializationPolicy(),
+):
+    camera = build_camera(
+        exif_tags,
+        img_shape,
+        method,
+        init_distortion,
+        init_policy.lens_type,
+        focal_equiv_mm,
+        init_policy.fallback_focal_equiv_mm,
+    )
+    source = _camera_init_source(
+        exif_tags,
+        img_shape,
+        init_policy.lens_type,
+        focal_equiv_mm,
+        init_policy.fallback_focal_equiv_mm,
+    )
+    if method == "homography":
+        policy = CameraOptimizationPolicy(
+            optimize_focal=False,
+            optimize_distortion=False,
+            optimize_principal_point=False,
+            n_dist=0,
+        )
+    else:
+        policy = _policy_for_camera(source, init_policy)
+    return AlignmentCameraCandidate(camera=camera,
+                                    optimization_policy=policy,
+                                    init_source=source)
+
+
+def _check_star_count(ref_geo: GeometryView,
+                      src_geo: GeometryView,
                       min_stars: int = 20) -> None:
     """检查星点数量是否满足对齐要求。"""
-    if len(ref_geo.positions) < min_stars or len(src_geo.positions) < min_stars:
+    if len(ref_geo.positions) < min_stars or len(
+            src_geo.positions) < min_stars:
         raise AlignmentError(
             f"Insufficient stars: ref={len(ref_geo.positions)}, "
             f"src={len(src_geo.positions)} (need >={min_stars})")
 
 
-def _match_stars(ref_geo: GeometryView, src_geo: GeometryView,
-                 validation_config: HomographyValidationConfig = ALIGN_VALIDATION):
-    """执行星点匹配，失败时抛出 AlignmentError。"""
-    try:
-        return match_star_pairs(
-            ref_geo.unit_vectors, src_geo.unit_vectors,
-            ref_geo.volumes, src_geo.volumes,
-            ref_geo.positions, src_geo.positions,
-            validation_config=validation_config,
-        )
-    except Exception as e:
-        raise AlignmentError(f"Star matching failed: {e}") from e
+def _log_rotation_diagnostics(prefix: str, rotation: np.ndarray) -> None:
+    rvec, _ = cv2.Rodrigues(rotation)
+    rvec = rvec[:, 0]
+    angle_deg = float(np.linalg.norm(rvec)) * 180.0 / np.pi
+    logger.debug("{}: angle_deg={:.6f} rvec=({:.6f},{:.6f},{:.6f})", prefix,
+                 angle_deg, rvec[0], rvec[1], rvec[2])
+
+
+def _compute_radial_zone_stats(
+    pts_ref: np.ndarray,
+    residuals_px: np.ndarray,
+    reference_shape: tuple[int, ...],
+) -> list[dict[str, float | int | str]]:
+    h, w = reference_shape[:2]
+    cx = w / 2.0
+    cy = h / 2.0
+    radii = np.sqrt((pts_ref[:, 0] - cx)**2 + (pts_ref[:, 1] - cy)**2)
+    max_radius = float(np.sqrt(cx * cx + cy * cy))
+    if max_radius <= 0:
+        max_radius = 1.0
+    r_norm = radii / max_radius
+
+    bins = [
+        ("inner", 0.0, 0.33),
+        ("mid", 0.33, 0.66),
+        ("outer", 0.66, np.inf),
+    ]
+    stats: list[dict[str, float | int | str]] = []
+    for name, lo, hi in bins:
+        mask = (r_norm >= lo) & (r_norm < hi)
+        if not np.any(mask):
+            stats.append({"zone": name, "count": 0})
+            continue
+        err = residuals_px[mask]
+        stats.append({
+            "zone": name,
+            "count": int(mask.sum()),
+            "median": float(np.median(err)),
+            "p90": float(np.percentile(err, 90)),
+            "max": float(np.max(err)),
+        })
+    return stats
+
+
+def _log_residual_diagnostics(
+    prefix: str,
+    pts_ref: np.ndarray,
+    pts_src: np.ndarray,
+    pts_src_pred: np.ndarray,
+    reference_shape: tuple[int, ...],
+) -> None:
+    if len(pts_ref) == 0:
+        logger.debug(f"{prefix}: no matched points")
+        return
+
+    residual_vec = pts_src_pred - pts_src
+    residuals_px = np.linalg.norm(residual_vec, axis=1)
+    zones = _compute_radial_zone_stats(pts_ref, residuals_px, reference_shape)
+    zone_summary = ", ".join(f"{stat['zone']}={stat['count']}:"
+                             f"{stat.get('median', float('nan')):.3f}/"
+                             f"{stat.get('p90', float('nan')):.3f}px"
+                             for stat in zones)
+    logger.debug(
+        "{}: count={} median={:.3f}px p90={:.3f}px max={:.3f}px zones[{}]",
+        prefix, len(residuals_px), np.median(residuals_px),
+        np.percentile(residuals_px, 90), np.max(residuals_px), zone_summary)
+
+
+def _count_match_radial_bins(
+    ref_geo: GeometryView,
+    pair_idx: np.ndarray,
+) -> tuple[int, int, int]:
+    if len(pair_idx) == 0:
+        return 0, 0, 0
+    pts_ref = ref_geo.positions[pair_idx[:, 0]]
+    image_h, image_w = ref_geo.camera.intrinsics.image_height_px, ref_geo.camera.intrinsics.image_width_px
+    cx = image_w / 2.0
+    cy = image_h / 2.0
+    radii = np.sqrt((pts_ref[:, 0] - cx)**2 + (pts_ref[:, 1] - cy)**2)
+    max_radius = float(np.sqrt(cx * cx + cy * cy))
+    if max_radius <= 0:
+        max_radius = 1.0
+    r_norm = radii / max_radius
+    inner = int(np.count_nonzero(r_norm < 0.33))
+    mid = int(np.count_nonzero((r_norm >= 0.33) & (r_norm < 0.66)))
+    outer = int(np.count_nonzero(r_norm >= 0.66))
+    return inner, mid, outer
+
+
+def _count_match_active_sectors(
+    ref_geo: GeometryView,
+    pair_idx: np.ndarray,
+    num_sectors: int = 8,
+) -> int:
+    if len(pair_idx) == 0:
+        return 0
+    pts_ref = ref_geo.positions[pair_idx[:, 0]]
+    image_h = ref_geo.camera.intrinsics.image_height_px
+    image_w = ref_geo.camera.intrinsics.image_width_px
+    cx = image_w / 2.0
+    cy = image_h / 2.0
+    ang = (np.degrees(np.arctan2(pts_ref[:, 1] - cy, pts_ref[:, 0] - cx)) +
+           360.0) % 360.0
+    sector_width = 360.0 / num_sectors
+    sector_ids = np.floor(ang / sector_width).astype(np.int32)
+    sector_ids = np.clip(sector_ids, 0, num_sectors - 1)
+    return int(np.unique(sector_ids).size)
+
+
+def _candidate_family(
+    candidate: AlignmentCameraCandidate,
+    scales: tuple[float, ...],
+) -> list[AlignmentCameraCandidate]:
+    if not scales:
+        scales = (1.0, )
+    return [
+        dataclasses.replace(
+            candidate,
+            camera=candidate.camera.with_focal_length(
+                candidate.camera.intrinsics.focal_length_mm * scale),
+            scale=scale,
+        ) for scale in scales
+    ]
+
+
+def _candidate_scales(
+    candidate: AlignmentCameraCandidate,
+    bootstrap_scales: tuple[float, ...],
+) -> tuple[float, ...]:
+    """Choose focal search scales from projection type and init source."""
+    if isinstance(candidate.camera, FisheyeCameraModel):
+        return bootstrap_scales
+    if candidate.init_source in ("exif", "provided"):
+        return (1.0, )
+    return bootstrap_scales
+
+
+def _select_initial_alignment_candidate(
+    ref_geo: GeometryView,
+    src_geo: GeometryView,
+    ref_candidate: AlignmentCameraCandidate,
+    src_candidate: AlignmentCameraCandidate,
+    bootstrap_scales: tuple[float, ...],
+):
+    ref_scales = _candidate_scales(ref_candidate, bootstrap_scales)
+    src_scales = _candidate_scales(src_candidate, bootstrap_scales)
+    ref_family = _candidate_family(ref_candidate, ref_scales)
+    src_family = _candidate_family(src_candidate, src_scales)
+    best_payload = None
+    best_score = None
+
+    logger.debug(
+        "Camera candidate search: ref_source={} src_source={} "
+        "ref_scales={} src_scales={}",
+        ref_candidate.init_source,
+        src_candidate.init_source,
+        ref_scales,
+        src_scales,
+    )
+
+    for cand_ref in ref_family:
+        for cand_src in src_family:
+            cand_ref_geo = ref_geo.with_camera(cand_ref.camera)
+            cand_src_geo = src_geo.with_camera(cand_src.camera)
+
+            try:
+                cand_match = match_star_pairs(cand_ref_geo, cand_src_geo)
+            except Exception as exc:
+                logger.debug(
+                    "Camera candidate failed: ref_scale={:.3f} src_scale={:.3f} "
+                    "ref_projection={} src_projection={} failed={}",
+                    cand_ref.scale,
+                    cand_src.scale,
+                    "fisheye"
+                    if isinstance(cand_ref.camera,
+                                  FisheyeCameraModel) else "perspective",
+                    "fisheye"
+                    if isinstance(cand_src.camera, FisheyeCameraModel) else
+                    "perspective",
+                    exc,
+                )
+                continue
+
+            inner, mid, outer = _count_match_radial_bins(
+                cand_ref_geo, cand_match.pair_idx)
+            sectors = _count_match_active_sectors(cand_ref_geo,
+                                                  cand_match.pair_idx)
+            score = (
+                float(outer),
+                float(len(cand_match.pair_idx)),
+                float(sectors),
+                float(mid),
+                -abs(cand_ref.scale - 1.0) - abs(cand_src.scale - 1.0),
+            )
+            logger.debug(
+                "Camera candidate: ref_scale={:.3f} src_scale={:.3f} "
+                "ref_focal={:.6f}mm src_focal={:.6f}mm matches={} radial={}/{}/{} sectors={}/8",
+                cand_ref.scale,
+                cand_src.scale,
+                cand_ref.camera.intrinsics.focal_length_mm,
+                cand_src.camera.intrinsics.focal_length_mm,
+                len(cand_match.pair_idx),
+                inner,
+                mid,
+                outer,
+                sectors,
+            )
+
+            if best_score is None or score > best_score:
+                best_score = score
+                best_payload = (
+                    cand_ref_geo,
+                    cand_src_geo,
+                    cand_ref,
+                    cand_src,
+                    cand_match,
+                    inner,
+                    mid,
+                    outer,
+                    sectors,
+                )
+
+    if best_payload is None:
+        raise AlignmentError(
+            "Camera candidate search failed for all focal scales")
+
+    (best_ref_geo, best_src_geo, best_ref_candidate, best_src_candidate,
+     best_match, inner, mid, outer, sectors) = best_payload
+    logger.debug(
+        "Camera candidate selected: ref_source={} src_source={} "
+        "ref_scale={:.3f} src_scale={:.3f} "
+        "ref_focal={:.6f}mm src_focal={:.6f}mm matches={} radial={}/{}/{} sectors={}/8 "
+        "ref_policy={} src_policy={}",
+        best_ref_candidate.init_source,
+        best_src_candidate.init_source,
+        best_ref_candidate.scale,
+        best_src_candidate.scale,
+        best_ref_candidate.camera.intrinsics.focal_length_mm,
+        best_src_candidate.camera.intrinsics.focal_length_mm,
+        len(best_match.pair_idx),
+        inner,
+        mid,
+        outer,
+        sectors,
+        best_ref_candidate.optimization_policy,
+        best_src_candidate.optimization_policy,
+    )
+    return best_ref_geo, best_src_geo, best_ref_candidate, best_src_candidate, best_match
 
 
 def align_frame_homography(
-    frame: np.ndarray, ref_geo: GeometryView, reference: np.ndarray
-) -> np.ndarray:
-    """2D 单应性路径：match → RANSAC homography → warpPerspective。
+        frame: np.ndarray,
+        ref_geo: GeometryView,
+        reference: np.ndarray,
+        fallback_focal_equiv_mm: float = 20.0,
+        src_camera: BaseCameraModel | None = None) -> np.ndarray:
+    """Fixed-camera fast path: unit-ray match → rotation-derived H → warpPerspective。
 
     Args:
         frame: 待对齐帧。
@@ -106,46 +471,118 @@ def align_frame_homography(
     Raises:
         AlignmentError: 星点不足或匹配失败。
     """
-    src_geo = make_geometry(frame)
+    src_geo = make_geometry(frame,
+                            camera=src_camera,
+                            fallback_focal_equiv_mm=fallback_focal_equiv_mm)
     _check_star_count(ref_geo, src_geo)
-    match = _match_stars(ref_geo, src_geo)
+
+    try:
+        match = match_star_pairs(ref_geo, src_geo)
+    except Exception as e:
+        raise AlignmentError(f"Star matching failed: {e}") from e
 
     h, w = reference.shape[:2]
-    H = np.linalg.inv(match.init_homography)
+    if match.homography is None:
+        raise AlignmentError(
+            "Rotation-derived homography is unavailable for this camera pair; "
+            "use camera-model remap path instead.")
+    H = np.linalg.inv(match.homography)
+    pts_src_pred = cv2.perspectiveTransform(
+        match.ref_pts[:, None, :].astype(np.float32),
+        match.homography.astype(np.float64),
+    )[:, 0, :].astype(np.float64)
+    _log_residual_diagnostics(
+        "align_frame_homography: residual",
+        match.ref_pts,
+        match.src_pts,
+        pts_src_pred,
+        reference.shape,
+    )
     return cv2.warpPerspective(frame, H, (w, h))
 
 
 def align_frame_camera_model(
-    frame: np.ndarray, ref_geo: GeometryView, reference: np.ndarray,
-    ref_camera: CameraModel, src_camera: CameraModel,
+    frame: np.ndarray,
+    ref_geo: GeometryView,
+    reference: np.ndarray,
+    ref_candidate: AlignmentCameraCandidate,
+    src_candidate: AlignmentCameraCandidate,
     same_camera: bool = True,
+    bootstrap_scales: tuple[float, ...] = DEFAULT_BOOTSTRAP_SCALES,
 ) -> np.ndarray:
-    """相机模型路径：match → optimize_alignment → warp_image_by_remap。
+    """Camera-model alignment with explicit ref-to-src remap construction."""
+    ref_camera = ref_candidate.camera
+    src_camera = src_candidate.camera
+    ref_projection = "fisheye" if isinstance(
+        ref_camera, FisheyeCameraModel) else "perspective"
+    src_projection = "fisheye" if isinstance(
+        src_camera, FisheyeCameraModel) else "perspective"
+    if same_camera and ref_projection != src_projection:
+        logger.warning(
+            "align_frame_camera_model: mixed projection cameras cannot use same_camera=True; forcing same_camera=False"
+        )
+        same_camera = False
 
-    Args:
-        frame: 待对齐帧。
-        ref_geo: 参考帧的 GeometryView。
-        reference: 参考帧原始数组。
-        ref_camera: 参考帧相机模型。
-        src_camera: 当前帧相机模型。
-        same_camera: 是否共享内参（同机身序列）。
-
-    Returns:
-        对齐后的图像数组。
-
-    Raises:
-        AlignmentError: 星点不足、匹配失败或优化失败。
-    """
-    src_geo = make_geometry(frame)
+    src_geo = make_geometry(frame, camera=src_camera)
     _check_star_count(ref_geo, src_geo)
-    match = _match_stars(ref_geo, src_geo)
+
+    ref_geo, src_geo, ref_candidate, src_candidate, match = (
+        _select_initial_alignment_candidate(
+            ref_geo,
+            src_geo,
+            ref_candidate,
+            src_candidate,
+            bootstrap_scales,
+        ))
+    ref_camera = ref_candidate.camera
+    src_camera = src_candidate.camera
 
     try:
         result = optimize_alignment(
-            match, ref_camera, src_camera, same_camera=same_camera)
+            match,
+            ref_camera,
+            src_camera,
+            same_camera=same_camera,
+            ref_policy=ref_candidate.optimization_policy,
+            src_policy=src_candidate.optimization_policy,
+        )
     except Exception as e:
         raise AlignmentError(f"Optimization failed: {e}") from e
 
+    rotation_ref_to_src = result.rotation_ref_to_src
+    cam1 = result.ref_camera
+    cam2 = result.src_camera
+
+    _log_rotation_diagnostics("align_frame_camera_model: rotation_ref_to_src",
+                              rotation_ref_to_src)
+    logger.debug(
+        "align_frame_camera_model: backend=remap ref_projection={} "
+        "src_projection={} ref_focal={:.6f}mm src_focal={:.6f}mm",
+        ref_projection, src_projection, cam1.intrinsics.focal_length_mm,
+        cam2.intrinsics.focal_length_mm)
+
+    pts_ref = match.ref_pts
+    pts_src = match.src_pts
+    ref_vecs_match = cam1.unproject(pts_ref)
+    src_vecs_match = (rotation_ref_to_src @ ref_vecs_match.T).T
+    pts_src_pred = cam2.project(src_vecs_match)
+    valid_pred = np.all(np.isfinite(pts_src_pred), axis=1)
+    if np.any(valid_pred):
+        _log_residual_diagnostics(
+            "align_frame_camera_model: residual",
+            pts_ref[valid_pred],
+            pts_src[valid_pred],
+            pts_src_pred[valid_pred],
+            reference.shape,
+        )
+    else:
+        logger.debug(
+            "align_frame_camera_model: residual: no finite projected points")
+
     h, w = reference.shape[:2]
-    return warp_image_by_remap(
-        frame, result.camera2_refined, result.camera1_refined, (w, h))
+    return cam1.project_image_from_camera(
+        cam2,
+        frame,
+        (w, h),
+        rotation_dst_to_src=rotation_ref_to_src,
+    )

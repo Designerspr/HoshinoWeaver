@@ -400,6 +400,8 @@ class TestCustomOpsFallback(unittest.TestCase):
         )
         src_camera = CameraModel(intrinsics=intrinsics)
         dst_camera = CameraModel(intrinsics=intrinsics)
+        rotation, _ = cv2.Rodrigues(
+            np.array([0.0, np.deg2rad(1.0), 0.0], dtype=np.float64))
 
         expected = remap_ops.camera_model_remap_numpy(
             image=img,
@@ -413,14 +415,19 @@ class TestCustomOpsFallback(unittest.TestCase):
             fy_dst=float(dst_camera.K[1, 1]),
             cx_dst=float(dst_camera.K[0, 2]),
             cy_dst=float(dst_camera.K[1, 2]),
-            rotation_dst_to_src=np.eye(3, dtype=np.float32),
+            rotation_dst_to_src=rotation.astype(np.float32),
         )
 
         with mock.patch.object(
                 norma_types,
                 "custom_camera_model_remap",
                 wraps=norma_types.custom_camera_model_remap) as patched_custom:
-            got = dst_camera.project_image_from_camera(src_camera, img, (4, 4))
+            got = dst_camera.project_image_from_camera(
+                src_camera,
+                img,
+                (4, 4),
+                rotation_dst_to_src=rotation,
+            )
 
         patched_custom.assert_called_once()
         np.testing.assert_array_equal(got, expected)
