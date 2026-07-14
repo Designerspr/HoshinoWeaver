@@ -376,16 +376,14 @@ def _naive_weighted_max(
     fade_out: float,
 ) -> list[np.ndarray]:
     """Brute-force reference for weighted sliding window max."""
-    weights = generate_weight(window_size, fin=fade_in, fout=fade_out)
-    n = window_size
     results = []
     for t in range(len(frames)):
-        # Window: frames[max(0, t-n+1) : t+1]
-        l = max(0, t - n + 1)
+        # Window: frames[max(0, t-window_size+1) : t+1]
+        l = max(0, t - window_size + 1)
         buf = frames[l:t + 1]
         k = len(buf)
-        # Align to tail of weight vector
-        w = weights[n - k:]
+        # Warmup regenerates the curve for the current buffer length.
+        w = generate_weight(k, fin=fade_in, fout=fade_out)
         result = buf[0].astype(np.float32) * w[0]
         for i in range(1, k):
             weighted = buf[i].astype(np.float32) * w[i]
@@ -424,15 +422,16 @@ class TestWeightedSlidingWindowMaxBasic:
     async def test_fade_out_only(self):
         """Newest frames in window should be attenuated by fade-out."""
         frames = [
-            np.full((2, 2), 100.0, dtype=np.float32),
-            np.full((2, 2), 100.0, dtype=np.float32),
-            np.full((2, 2), 100.0, dtype=np.float32),
+            np.full((2, 2), 1.0, dtype=np.float32),
+            np.full((2, 2), 1.0, dtype=np.float32),
+            np.full((2, 2), 1.0, dtype=np.float32),
             np.full((2, 2), 100.0, dtype=np.float32),
         ]
         results = await _run_weighted_op(frames, window_size=4, fade_in=0, fade_out=0.5)
         expected = _naive_weighted_max(frames, 4, fade_in=0, fade_out=0.5)
         for t in range(len(frames)):
             np.testing.assert_allclose(results[t], expected[t], rtol=1e-5)
+        np.testing.assert_allclose(results[-1], np.ones((2, 2)), rtol=1e-5)
 
     async def test_symmetric_fade(self):
         """fade_in=0.5, fade_out=0.5 → triangular window."""

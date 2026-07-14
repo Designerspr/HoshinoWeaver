@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import Callable
 
 import numpy as np
 
+from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
 from hoshicore._custom_op._dispatch import debug_log
+from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
+from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
+from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
+from hoshicore._custom_op.backend_registry import resolve_backend as _resolve_backend
 
 
 _debug_log = partial(debug_log, "sigma_clip")
@@ -20,9 +26,14 @@ _SUPPORTED_DTYPES = (np.uint8, np.uint16)
 def _compiled_backend_available(logical_op: str) -> tuple[bool, str | None]:
     return _native_backend_available(
         logical_op,
-        "auto",
+        _fallback_preference(),
         load_module=_load_compiled_module_result,
     )
+
+
+def sigma_clip_iterative_chunk_native_available() -> bool:
+    available, _ = _compiled_backend_available("sigma_clip_iterative_chunk")
+    return available
 
 
 def _validate_inputs(
@@ -73,13 +84,20 @@ def sigma_clip_iterative_chunk_numpy(
     mask: np.ndarray | None = None,
     skip_zero_rgb: bool = False,
     channels: int = 1,
+    *,
+    _stack_f64: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Numpy fallback: per-pixel iterative sigma clip on a chunk."""
     stack, total_sum, total_sq, total_n, mask = _validate_inputs(
         stack, total_sum, total_sq, total_n, mask)
 
     n_frames, plane_size = stack.shape
-    stack_f64 = stack.astype(np.float64)
+    stack_f64 = _stack_f64
+    if stack_f64 is None:
+        stack_f64 = stack.astype(np.float64)
+    elif stack_f64.shape != stack.shape or stack_f64.dtype != np.float64:
+        raise ValueError(
+            "sigma_clip_iterative_chunk: _stack_f64 must be float64 with stack shape")
 
     # Build zero-pixel mask for skip_zero_rgb (flattened data needs explicit channels)
     zero_frame_mask = None
@@ -169,6 +187,7 @@ def sigma_clip_iterative_chunk_compiled(
         raise RuntimeError("compiled custom op backend is unavailable")
     stack, total_sum, total_sq, total_n, mask = _validate_inputs(
         stack, total_sum, total_sq, total_n, mask)
+    _apply_compiled_threads("sigma_clip_iterative_chunk", stack)
     return module.sigma_clip_iterative_chunk(
         stack, total_sum, total_sq, total_n,
         rej_high, rej_low, max_iter, mask,
@@ -241,6 +260,10 @@ def sigma_clip_fused_chunk_numpy(
         stack = np.ascontiguousarray(stack)
 
     n_frames, plane_size = stack.shape
+    if skip_zero_rgb and channels >= 3 and plane_size % channels != 0:
+        raise ValueError(
+            "sigma_clip_fused_chunk: plane_size must be divisible by channels "
+            "when skip_zero_rgb is true")
     stack_f64 = stack.astype(np.float64)
 
     # Compute masked totals. RGB 全零像素与 C++ 路径一致，作为无效样本排除。
@@ -277,7 +300,33 @@ def sigma_clip_fused_chunk_numpy(
 
     return sigma_clip_iterative_chunk_numpy(
         stack, total_sum, total_sq, total_n, rej_high, rej_low, max_iter, mask,
-        skip_zero_rgb, channels)
+        skip_zero_rgb, channels, _stack_f64=stack_f64)
+
+
+def _validate_fused_inputs(
+    stack: np.ndarray,
+    mask: np.ndarray | None = None,
+    skip_zero_rgb: bool = False,
+    channels: int = 1,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    if stack.ndim != 2:
+        raise ValueError(
+            "sigma_clip_fused_chunk: stack must be 2D (n_frames, plane_size)")
+    if stack.dtype not in _SUPPORTED_DTYPES:
+        raise ValueError(
+            "sigma_clip_fused_chunk: unsupported stack dtype; expected uint8/uint16")
+    if not stack.flags.c_contiguous:
+        stack = np.ascontiguousarray(stack)
+    if skip_zero_rgb and channels >= 3 and stack.shape[1] % channels != 0:
+        raise ValueError(
+            "sigma_clip_fused_chunk: plane_size must be divisible by channels "
+            "when skip_zero_rgb is true")
+    if mask is not None:
+        mask = np.ascontiguousarray(mask, dtype=np.uint8)
+        if mask.ndim != 2 or mask.shape[0] != stack.shape[0] or mask.shape[1] != stack.shape[1]:
+            raise ValueError(
+                "sigma_clip_fused_chunk: mask must have shape (n_frames, plane_size)")
+    return stack, mask
 
 
 def sigma_clip_fused_chunk_compiled(
@@ -289,25 +338,59 @@ def sigma_clip_fused_chunk_compiled(
     skip_zero_rgb: bool = False,
     channels: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compiled backend: delegates to C++ fused kernel."""
+    """Compiled CPU backend: delegates to the OpenMP fused kernel."""
     module, _ = _load_compiled_module_result()
     if module is None or not hasattr(module, "sigma_clip_fused_chunk"):
         raise RuntimeError("compiled custom op backend is unavailable")
-    if stack.ndim != 2:
-        raise ValueError(
-            "sigma_clip_fused_chunk: stack must be 2D (n_frames, plane_size)")
-    if stack.dtype not in _SUPPORTED_DTYPES:
-        raise ValueError(
-            "sigma_clip_fused_chunk: unsupported stack dtype; expected uint8/uint16")
-    if not stack.flags.c_contiguous:
-        stack = np.ascontiguousarray(stack)
-    if mask is not None:
-        mask = np.ascontiguousarray(mask, dtype=np.uint8)
-        if mask.ndim != 2 or mask.shape[0] != stack.shape[0] or mask.shape[1] != stack.shape[1]:
-            raise ValueError(
-                "sigma_clip_fused_chunk: mask must have shape (n_frames, plane_size)")
+    stack, mask = _validate_fused_inputs(stack, mask, skip_zero_rgb, channels)
+    _apply_compiled_threads("sigma_clip_fused_chunk", stack)
     return module.sigma_clip_fused_chunk(stack, rej_high, rej_low, max_iter, mask,
                                          skip_zero_rgb, channels)
+
+
+def sigma_clip_fused_chunk_compiled_cuda(
+    stack: np.ndarray,
+    rej_high: float = 3.0,
+    rej_low: float = 3.0,
+    max_iter: int = 5,
+    mask: np.ndarray | None = None,
+    skip_zero_rgb: bool = False,
+    channels: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compiled CUDA host-in/out backend."""
+    module, _ = _load_compiled_module_result()
+    if module is None or not hasattr(module, "sigma_clip_fused_chunk_cuda"):
+        raise RuntimeError("compiled CUDA custom op backend is unavailable")
+    stack, mask = _validate_fused_inputs(stack, mask, skip_zero_rgb, channels)
+    return module.sigma_clip_fused_chunk_cuda(
+        stack, rej_high, rej_low, max_iter, mask, skip_zero_rgb, channels)
+
+
+def _select_sigma_clip_fused_chunk_backend(
+    preference: str,
+) -> BackendSelection:
+    selection = _resolve_backend(
+        "sigma_clip_fused_chunk",
+        preference,
+        load_module=_load_compiled_module_result,
+    )
+    if selection.reason:
+        _debug_log(f"compiled backend unavailable, reason: {selection.reason}")
+    return selection
+
+
+def _sigma_clip_fused_chunk_backend(
+    selection: BackendSelection,
+) -> tuple[str, Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]]]:
+    if not selection.native or selection.candidate is None:
+        return "numpy", sigma_clip_fused_chunk_numpy
+    if selection.candidate.kernel_name == "sigma_clip_fused_chunk_cuda":
+        return "cuda", sigma_clip_fused_chunk_compiled_cuda
+    if selection.candidate.kernel_name == "sigma_clip_fused_chunk":
+        return "cpu", sigma_clip_fused_chunk_compiled
+    raise RuntimeError(
+        f"unknown sigma_clip_fused_chunk backend candidate: {selection.candidate}"
+    )
 
 
 def sigma_clip_fused_chunk(
@@ -333,13 +416,30 @@ def sigma_clip_fused_chunk(
     Returns:
         (accepted_sum, accepted_sq, accepted_n) as float64 arrays
     """
-    available, compiled_error = _compiled_backend_available("sigma_clip_fused_chunk")
-    if available:
-        return sigma_clip_fused_chunk_compiled(
+    selection = _select_sigma_clip_fused_chunk_backend(_fallback_preference())
+    backend_name, backend = _sigma_clip_fused_chunk_backend(selection)
+    if backend_name != "cuda":
+        return backend(
             stack, rej_high, rej_low, max_iter, mask,
             skip_zero_rgb, channels)
-    if compiled_error:
-        _debug_log(f"compiled backend unavailable, reason: {compiled_error}")
-    return sigma_clip_fused_chunk_numpy(
+    try:
+        return backend(
+            stack, rej_high, rej_low, max_iter, mask,
+            skip_zero_rgb, channels)
+    except RuntimeError as exc:
+        fallback_selection = resolve_after_runtime_unavailable(
+            "sigma_clip_fused_chunk",
+            "cuda_host_io",
+            exc,
+            load_module=_load_compiled_module_result,
+        )
+        _debug_log(
+            f"compiled CUDA backend unavailable at runtime, falling back to CPU: {exc}"
+        )
+    fallback_name, fallback_backend = _sigma_clip_fused_chunk_backend(
+        fallback_selection)
+    if fallback_name == "cuda":
+        raise RuntimeError("CUDA backend remained selected after runtime exclusion")
+    return fallback_backend(
         stack, rej_high, rej_low, max_iter, mask,
         skip_zero_rgb, channels)

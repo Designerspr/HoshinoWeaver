@@ -71,6 +71,16 @@ class ConfigOnlyOp(BaseOp):
         await self._broadcast_outputs({"out": configs["value"]})
 
 
+class SingleValueOp(BaseOp):
+    """只输出一个非 sequence 值。"""
+    INPUTS = {}
+    OUTPUTS = {"result": {"type": "int"}}
+    CONFIGS = {"value": {"type": "int", "default": 7}}
+
+    async def _async_execute(self, configs):
+        await self._broadcast_outputs({"result": configs["value"]})
+
+
 # ────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────
@@ -273,6 +283,20 @@ class TestDAGExecutorFailure:
             pass
 
         assert collected == ["hello"]
+
+    async def test_single_value_output_does_not_send_sentinel(self):
+        """非 sequence 输出只广播结果，不追加 sentinel 堵塞 maxsize=1 队列。"""
+        op = SingleValueOp(name="single")
+        collector = RichContextQueue(maxsize=1)
+        op.outputs["result"] = [collector]
+        await op.config["value"].put(9)
+
+        task = asyncio.create_task(op.execute())
+        assert await asyncio.wait_for(collector.get(), timeout=0.1) == 9
+        await asyncio.wait_for(task, timeout=0.1)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(collector.get(), timeout=0.01)
 
 
 # ────────────────────────────────────────────────────────────────

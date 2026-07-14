@@ -107,6 +107,12 @@ def detect_star_points(
         )
     logger.debug(f"final resize factor = {resize_factor:.3f}")
 
+    if not contours:
+        return DetectedStars(
+            positions=np.empty((0, 2), dtype=np.float64),
+            volumes=np.empty((0,), dtype=np.float64),
+        )
+
     elps = [cv2.fitEllipse(contour) for contour in contours]
     centroids = np.array([e[0] for e in elps])
     areas = np.array([
@@ -144,3 +150,22 @@ def detect_star_points(
     logger.debug(f"Final star points = {len(star_pts)}")
 
     return DetectedStars(positions=star_pts, volumes=areas * intensities)
+
+
+def _detect_star_points_opencv(*args, **kwargs) -> DetectedStars:
+    """Compatibility name for the production Python/OpenCV detector."""
+    return detect_star_points(*args, **kwargs)
+
+
+_FULL_GPU_FALLBACK_WARNED = False
+
+
+def _detect_star_points_full_gpu(*args, **kwargs) -> DetectedStars:
+    """Use the Python detector until the full custom-op path is integrated."""
+    global _FULL_GPU_FALLBACK_WARNED
+    if not _FULL_GPU_FALLBACK_WARNED:
+        logger.warning(
+            "Full-GPU Norma detection is not integrated with the current "
+            "pipeline; falling back to the Python/OpenCV detector")
+        _FULL_GPU_FALLBACK_WARNED = True
+    return detect_star_points(*args, **kwargs)

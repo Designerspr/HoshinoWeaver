@@ -22,6 +22,7 @@ class BaseOp(object):
     VARIABLE_OUTPUT: bool = False  # True 时标记为变长输出（Filter 类）
     REPORTS_PROGRESS: bool = False  # True 时该 Op 被视为限速节点，注入真实 tracker
     CHUNK_PLANNED: bool = False  # True 时 chunk_rows 由 runtime planner 管理
+    BACKEND_LOGICAL_OP: str | None = None  # backend registry 中对应的 logical op
 
     @classmethod
     def estimate_resources(
@@ -186,7 +187,11 @@ class BaseOp(object):
 
     async def _send_sentinel(self) -> None:
         """发送正常结束信号"""
-        for queue_list in self.outputs.values():
+        for key, queue_list in self.outputs.items():
+            # sentinel 只属于流式 sequence 输出。image/int/object 等单值输出
+            # 已经由 _broadcast_outputs 推送结果，再发送 sentinel 会堵塞 maxsize=1 的收集队列。
+            if self.OUTPUTS[key].get("type") != "sequence":
+                continue
             for queue in queue_list:
                 await queue.put(BaseQueue._SENTINEL)
 
@@ -385,8 +390,10 @@ class ChunkIteratorBaseOp(BaseOp):
     def __init__(self, name: str):
         super().__init__(name)
         self._chunk_states: list[Any] = []
+        self._configs: dict[str, Any] = {}
 
     async def _async_execute(self, configs: dict[str, Any]) -> None:
+        self._configs = configs
         frame_buffer = configs['buffer_handle']
         chunk_rows = configs.get('chunk_rows', self.CHUNK_ROWS)
         overlap = self.CHUNK_OVERLAP

@@ -164,7 +164,7 @@ nodes:
 
   # ── Flat 的 Bias 减法（Flat 自身也需要去 Bias）──
   flat_bias_subtract:
-    op: CalibrationSubtractOp
+    op: CalibrationSubtractImageOp
     configs:
       data: flat_stacker.result
       reference: bias_stacker.result

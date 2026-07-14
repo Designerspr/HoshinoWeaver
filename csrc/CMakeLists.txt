@@ -21,38 +21,72 @@ add_library(hnw_ops_common STATIC
     common/backend_info.cpp
 )
 
+add_library(hnw_ops_cpu_calibration STATIC
+    ops/cpu/calibration/calibration_ops.cpp
+)
+
+add_library(hnw_ops_cpu_alignment STATIC
+    ops/cpu/alignment/alignment_ops.cpp
+)
+
+add_library(hnw_ops_cpu_detection STATIC
+    ops/cpu/detection/detection_ops.cpp
+)
+
 add_library(hnw_ops_cpu_fgp STATIC
-    ops/fgp/fgp_ops.cpp
+    ops/cpu/fgp/fgp_accumulate_ops.cpp
+    ops/cpu/fgp/fgp_merge_ops.cpp
+    ops/cpu/fgp/fgp_ops.cpp
+    ops/cpu/fgp/huber_accumulate_ops.cpp
+    ops/cpu/fgp/sigma_clip_merge_ops.cpp
 )
 
 add_library(hnw_ops_cpu_filter STATIC
-    ops/filter/filter_ops.cpp
+    ops/cpu/filter/filter_ops.cpp
 )
 
 add_library(hnw_ops_cpu_max STATIC
-    ops/max/max_ops.cpp
+    ops/cpu/max/max_ops.cpp
 )
 
 add_library(hnw_ops_cpu_median STATIC
-    ops/median/median_ops.cpp
+    ops/cpu/median/median_ops.cpp
 )
 
 add_library(hnw_ops_cpu_noise STATIC
-    ops/noise/noise_ops.cpp
+    ops/cpu/noise/noise_ops.cpp
+)
+
+add_library(hnw_ops_cpu_remap STATIC
+    ops/cpu/remap/remap_ops.cpp
 )
 
 add_library(hnw_ops_cpu_sigma_clip STATIC
-    ops/sigma_clip/sigma_clip_chunk_ops.cpp
+    ops/cpu/sigma_clip/sigma_clip_chunk_ops.cpp
+)
+
+add_library(hnw_ops_cpu_star_shrink STATIC
+    ops/cpu/star_shrink/star_shrink_ops.cpp
+)
+
+add_library(hnw_ops_cpu_wavelet STATIC
+    ops/cpu/wavelet/wavelet_ops.cpp
 )
 
 set(hnw_cpu_targets
     hnw_ops_common
+    hnw_ops_cpu_calibration
+    hnw_ops_cpu_alignment
+    hnw_ops_cpu_detection
     hnw_ops_cpu_fgp
     hnw_ops_cpu_filter
     hnw_ops_cpu_max
     hnw_ops_cpu_median
     hnw_ops_cpu_noise
+    hnw_ops_cpu_remap
     hnw_ops_cpu_sigma_clip
+    hnw_ops_cpu_star_shrink
+    hnw_ops_cpu_wavelet
 )
 
 foreach(target IN LISTS hnw_cpu_targets)
@@ -75,8 +109,25 @@ pybind11_add_module(_C MODULE
 
 if(HNW_ENABLE_CUDA)
     target_sources(_C PRIVATE
-        ops/cuda/camera_model_remap_fused_ops.cpp
-        ops/cuda/camera_model_remap_fused_ops.cu
+        common/backend_cuda_info.cu
+        # Fused camera-model remap.
+        ops/cuda/remap/camera_model_remap_fused_ops.cpp
+        ops/cuda/remap/camera_model_remap_fused_ops.cu
+        # Wavelet CUDA backend and shared full-GPU star detection path.
+        ops/cuda/wavelet/wavelet_cuda_ops.cpp
+        ops/cuda/wavelet/wavelet_cuda_ops.cu
+        ops/cuda/detection/star_detect_full_ops.cpp
+        ops/cuda/detection/star_detect_full_ops.cu
+        # Chunk stack kernels.
+        ops/cuda/fgp/huber_weighted_chunk_ops.cpp
+        ops/cuda/fgp/huber_weighted_chunk_ops.cu
+        ops/cuda/sigma_clip/sigma_clip_fused_chunk_ops.cpp
+        ops/cuda/sigma_clip/sigma_clip_fused_chunk_ops.cu
+        # Star shrink fused processing.
+        ops/cuda/star_shrink/star_mask_ops.cpp
+        ops/cuda/star_shrink/star_mask_ops.cu
+        ops/cuda/star_shrink/star_shrink_process_ops.cpp
+        ops/cuda/star_shrink/star_shrink_process_ops.cu
     )
 endif()
 
@@ -88,12 +139,18 @@ target_include_directories(
 )
 target_link_libraries(_C PRIVATE
     hnw_ops_common
+    hnw_ops_cpu_calibration
+    hnw_ops_cpu_alignment
+    hnw_ops_cpu_detection
     hnw_ops_cpu_fgp
     hnw_ops_cpu_filter
     hnw_ops_cpu_max
     hnw_ops_cpu_median
     hnw_ops_cpu_noise
+    hnw_ops_cpu_remap
     hnw_ops_cpu_sigma_clip
+    hnw_ops_cpu_star_shrink
+    hnw_ops_cpu_wavelet
 )
 hnw_apply_common_compile_options(_C)
 hnw_link_openmp(_C)

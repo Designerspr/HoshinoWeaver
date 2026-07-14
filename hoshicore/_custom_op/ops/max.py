@@ -221,10 +221,7 @@ def build_info() -> dict[str, Any]:
 
 
 def max_combine(base: np.ndarray, fresh: np.ndarray) -> np.ndarray:
-    backend_name, backend = _select_max_backend(_fallback_preference())
-    if backend_name == "compiled":
-        base_arr, _ = _validate_pair(base, fresh)
-        _apply_compiled_threads("max_combine", base_arr)
+    _, backend = _select_max_backend(_fallback_preference())
     return backend(base, fresh)
 
 
@@ -246,15 +243,5 @@ def threshold_max_merge(
             n_sigma,
             weight,
         )
-    backend_name, backend = _select_threshold_max_backend(_fallback_preference())
-    if backend_name == "compiled":
-        frame_arr, mean_arr, std_arr, result_arr = _validate_threshold_inputs(
-            frame,
-            mean_img,
-            std_img,
-            result,
-            op_name="threshold_max_merge",
-        )
-        _apply_compiled_threads("threshold_max_merge", frame_arr)
-        return backend(frame_arr, mean_arr, std_arr, result_arr, n_sigma, scalar_weight)
+    _, backend = _select_threshold_max_backend(_fallback_preference())
     return backend(frame, mean_img, std_img, result, n_sigma, scalar_weight)

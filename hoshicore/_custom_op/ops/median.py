@@ -78,9 +78,5 @@ def _select_median_backend(
 
 
 def median_reduce_chunk(stack: np.ndarray) -> np.ndarray:
-    backend_name, backend = _select_median_backend(_fallback_preference())
-    if backend_name == "compiled":
-        stack_arr = _validate_stack(stack)
-        _apply_compiled_threads("median_reduce_chunk", stack_arr)
-        return backend(stack_arr)
+    _, backend = _select_median_backend(_fallback_preference())
     return backend(stack)

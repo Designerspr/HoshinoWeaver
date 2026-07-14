@@ -19,11 +19,12 @@ csrc/
   module.cpp
   common/
   ops/
-    fgp/
-    max/
-    median/
-    noise/
-    sigma_clip/
+    cpu/
+      fgp/
+      max/
+      median/
+      noise/
+      sigma_clip/
     cuda/
 ```
 
@@ -31,8 +32,10 @@ csrc/
 
 - `module.cpp`
   pybind11 模块入口，注册 `_C` 内的算子
-- `ops/<name>/`
-  单个算子的 C++/CUDA 实现与绑定
+- `ops/cpu/<name>/`
+  单个算子的 compiled CPU 实现与绑定；OpenMP 是可选并行能力
+- `ops/cuda/<name>/`
+  单个算子的 CUDA 实现与绑定
 - `build_ops.py`
   统一本地构建入口
 - `CMakeLists.txt` / `CMakePresets.json`
@@ -206,13 +209,13 @@ Preset 参考：
 
 最小流程：
 
-1. 在 `csrc/ops/<name>/` 新增 `.h/.cpp`
+1. 在 `csrc/ops/cpu/<name>/` 新增 CPU `.h/.cpp`
 2. 在 `CMakeLists.txt` 新增 static library target 并链接到 `_C`
 3. 在 `module.cpp` 中注册 `bind_*_ops(m)`
 4. 在 `hoshicore/_custom_op/ops/` 增加 Python 包装与 numpy fallback
 5. 在 `hoshicore/_custom_op/backend_registry.py` 注册 `BackendCandidate`
 6. 在 `hoshicore/_custom_op/api.py` + `__init__.py` 导出
-7. 补 focused tests（`tests/test_custom_ops.py`）
+7. 补 focused tests（`tests/custom_ops/test_<logical_op>.py`）
 8. 补 microbenchmark（`bench/cpu/kernels.py`）
 
 `BackendCandidate` 用于运行时判断当前包是否实际包含 native kernel。若 CMake /
@@ -221,7 +224,7 @@ backend 只能影响性能，不能影响 public API 可用性。
 
 CUDA 算子沿用同样流程，但额外需要：
 
-1. 在 `CMakeLists.txt` 的 `HNW_ENABLE_CUDA` 分支里接入 `.cu`/binding 源文件
+1. 在 `csrc/ops/cuda/<name>/` 新增 CUDA `.h/.cpp/.cu`，并在 `CMakeLists.txt` 的 `HNW_ENABLE_CUDA` 分支接入
 2. 保持 CPU fallback 语义不变
 3. `.cpp` 绑定文件需 `#include "common/compat.h"`（MSVC `ssize_t` 兼容）
 4. 在 `BackendCandidate` 中标注对应 backend（如 `cuda_host_io`）和 build flag（如 `cuda`）

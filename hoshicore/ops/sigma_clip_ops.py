@@ -33,9 +33,14 @@ import numpy as np
 from loguru import logger
 
 from .._custom_op import median_reduce_chunk as custom_median_reduce_chunk
+from .._custom_op.ops.fgp import (
+    huber_weighted_chunk_native_available as custom_huber_weighted_chunk_available,
+    try_huber_weighted_chunk_native as custom_huber_weighted_chunk_or_none,
+)
 from .._custom_op.ops.sigma_clip import (
+    sigma_clip_fused_chunk as custom_sigma_clip_fused_chunk,
     sigma_clip_iterative_chunk as custom_sigma_clip_iterative_chunk,
-    _load_compiled_module_result as _sc_load_compiled,
+    sigma_clip_iterative_chunk_native_available,
 )
 from ..component.data_container import FastGaussianParam, FloatImage
 from ..component.frame_buffer import (BaseFrameBuffer, DiskFrameBuffer,
@@ -263,14 +268,15 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
 
     @classmethod
     def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
-        float64_row = row_bytes // dtype_bytes * 8
+        plane_items_per_row = row_bytes // dtype_bytes
+        float64_row = plane_items_per_row * 8
         # compiled 路径峰值包含 chunk 双缓冲、stack_2d、mask、total_* 与 acc_*。
         stack = 2 * n_frames * row_bytes
         active_stack = n_frames * row_bytes
-        mask = n_frames * row_bytes // dtype_bytes
+        mask_bytes = n_frames * plane_items_per_row
         totals = 3 * float64_row
         acc = 3 * float64_row
-        return stack + active_stack + mask + totals + acc
+        return stack + active_stack + mask_bytes + totals + acc
 
     def _init_chunk_state(self, configs, row_start, row_end, w):
         fgp_total: FastGaussianParam = configs['fgp_total']
@@ -297,13 +303,13 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
 
         # Check if C++ kernel can be used for this chunk
         first_frame_dtype = fgp_total.source_dtype
-        use_cpp = (
-            self._cpp_kernel_available()
+        use_native = (
+            self._native_kernel_available()
             and first_frame_dtype in (np.dtype('uint8'), np.dtype('uint16'))
         )
 
         clip_merger = None
-        if not use_cpp:
+        if not use_native:
             clip_merger = SigmaClippingMerger(
                 ref_img=fgp_chunk,
                 rej_high=rej_high,
@@ -317,28 +323,27 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
             'static_mask': static_mask_chunk,
             'accepted': None,
             '_mask_cache': {},
-            '_use_cpp': use_cpp,
-            '_cpp_done': False,
+            '_use_native': use_native,
+            '_native_done': False,
         }
 
     @staticmethod
-    def _cpp_kernel_available() -> bool:
-        module, _ = _sc_load_compiled()
-        return module is not None and hasattr(module, "sigma_clip_iterative_chunk")
+    def _native_kernel_available() -> bool:
+        return sigma_clip_iterative_chunk_native_available()
 
     def _max_passes(self, configs):
         return configs['max_iter']
 
     def _run_pass(self, state, chunk_stack):
         """Override: use C++ kernel for all iterations in one call."""
-        if state['_use_cpp'] and not state['_cpp_done']:
-            self._run_pass_cpp(state, chunk_stack)
+        if state['_use_native'] and not state['_native_done']:
+            self._run_pass_native(state, chunk_stack)
             return
         # Fallback: per-frame merge (one pass)
         for frame_idx, (chunk_data, chunk_weight) in enumerate(chunk_stack):
             self._merge_chunk(state, chunk_data, chunk_weight, frame_idx)
 
-    def _run_pass_cpp(self, state, chunk_stack):
+    def _run_pass_native(self, state, chunk_stack):
         """C++ path: stack all frames, call kernel with skip_zero_rgb."""
         n_frames = len(chunk_stack)
         first_data = chunk_stack[0][0]
@@ -391,7 +396,7 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
         )
         accepted.apply_zero_var(fgp_chunk)
         state['accepted'] = accepted
-        state['_cpp_done'] = True
+        state['_native_done'] = True
 
     def _merge_chunk(self, state, chunk_data, chunk_weight, frame_idx):
         cache = state['_mask_cache']
@@ -404,7 +409,7 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
                                    skip_zero_rgb=is_rgb)
 
     def _check_convergence(self, state, pass_idx):
-        if state['_cpp_done']:
+        if state['_native_done']:
             return True
 
         fgp_chunk = state['fgp_chunk']
@@ -466,8 +471,6 @@ class SigmaClipIteratorOp(ChunkIteratorBaseOp):
         return {"result": result_img, "statistics": accepted_full}
 
     async def _async_execute(self, configs: dict[str, Any]) -> None:
-        # 缓存 configs 供 _check_convergence / _prepare_next_pass 使用
-        self._configs = configs
         configs['fgp_total'].inplace_calc = False
         await super()._async_execute(configs)
 
@@ -483,6 +486,7 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
     EXECUTOR = "cpu"
     ITERATOR_TYPE = "sigma_clip_fused"
     CHUNK_ROWS = 256
+    BACKEND_LOGICAL_OP = "sigma_clip_fused_chunk"
     CONFIGS: dict[str, dict[str, Any]] = {
         "buffer_handle": {
             "type": "image",
@@ -522,12 +526,23 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
 
     @classmethod
     def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
-        float64_row = row_bytes // dtype_bytes * 8
+        return cls.chunk_cost_per_row_for_backend(
+            "openmp_cpu", n_frames, row_bytes, dtype_bytes)
+
+    @classmethod
+    def chunk_cost_per_row_for_backend(cls, backend, n_frames, row_bytes, dtype_bytes):
+        plane_items_per_row = row_bytes // dtype_bytes
+        float64_row = plane_items_per_row * 8
         stack = 2 * n_frames * row_bytes
         active = n_frames * row_bytes
-        mask = n_frames * row_bytes // dtype_bytes
+        mask_bytes = n_frames * plane_items_per_row
         state = 3 * float64_row
-        return stack + active + mask + state
+        if backend == "numpy":
+            float64_stacks = 2 * n_frames * float64_row
+            active_masks = 2 * n_frames * plane_items_per_row
+            iterative_state = 6 * float64_row
+            return stack + float64_stacks + active_masks + state + iterative_state
+        return stack + active + mask_bytes + state
 
     def _init_chunk_state(self, configs, row_start, row_end, w):
         # 静态 mask 切片
@@ -552,8 +567,6 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
         return 1
 
     def _run_pass(self, state, chunk_stack):
-        from .._custom_op.ops.sigma_clip import sigma_clip_fused_chunk
-
         n_frames = len(chunk_stack)
         first_data = chunk_stack[0][0]
         h, w = first_data.shape[:2]
@@ -581,7 +594,7 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
             ).copy()
 
         # Call fused kernel (computes mean + iterative clip)
-        acc_sum, acc_sq, acc_n = sigma_clip_fused_chunk(
+        acc_sum, acc_sq, acc_n = custom_sigma_clip_fused_chunk(
             stack_2d, self._configs['rej_high'], self._configs['rej_low'],
             self._configs['max_iter'], mask=chunk_mask,
             skip_zero_rgb=is_rgb, channels=channels)
@@ -633,11 +646,6 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
         logger.info(f"{self.name} fused sigma clipping complete.")
         return {"result": result_img, "statistics": accepted_full}
 
-    async def _async_execute(self, configs: dict[str, Any]) -> None:
-        self._configs = configs
-        await super()._async_execute(configs)
-
-
 @register_op()
 class HuberMeanIteratorOp(ChunkIteratorBaseOp):
     """Huber 加权均值（Phase 2）：基于 mean FGP 和缓冲帧进行单 pass Huber 加权。
@@ -656,6 +664,7 @@ class HuberMeanIteratorOp(ChunkIteratorBaseOp):
     EXECUTOR = "cpu"
     ITERATOR_TYPE = "huber_mean"
     CHUNK_ROWS = 256
+    BACKEND_LOGICAL_OP = "huber_weighted_chunk"
     CONFIGS: dict[str, dict[str, Any]] = {
         "fgp_total": {
             "type": "image",
@@ -702,12 +711,75 @@ class HuberMeanIteratorOp(ChunkIteratorBaseOp):
         )
 
         merger = HuberWeightedMerger(ref_stats=ref_chunk, huber_c=huber_c)
-        return {'merger': merger, 'source_dtype': fgp_total.source_dtype}
+        return {
+            'merger': merger,
+            'ref_mean': ref_chunk.mu.reshape(-1).astype(np.float64),
+            'ref_std': np.sqrt(np.maximum(ref_chunk.var, 0)).reshape(-1).astype(np.float64),
+            'source_dtype': fgp_total.source_dtype,
+            'result': None,
+            '_done': False,
+        }
+
+    def _run_pass(self, state, chunk_stack):
+        if self._run_pass_cuda(state, chunk_stack):
+            return
+        for frame_idx, (chunk_data, chunk_weight) in enumerate(chunk_stack):
+            self._merge_chunk(state, chunk_data, chunk_weight, frame_idx)
+
+    def _run_pass_cuda(self, state, chunk_stack):
+        if not custom_huber_weighted_chunk_available():
+            return False
+
+        n_frames = len(chunk_stack)
+        first_data = chunk_stack[0][0]
+        if first_data.dtype not in (np.dtype("uint8"), np.dtype("uint16")):
+            return False
+
+        weights = []
+        has_weight = False
+        for _, chunk_weight in chunk_stack:
+            if chunk_weight is None:
+                weights.append(1.0)
+                continue
+            if not np.isscalar(chunk_weight):
+                return False
+            has_weight = True
+            weights.append(float(chunk_weight))
+        weights_arr = np.asarray(weights, dtype=np.float64) if has_weight else None
+
+        stack_2d = np.empty((n_frames, first_data.size), dtype=first_data.dtype)
+        for f, (chunk_data, _) in enumerate(chunk_stack):
+            if chunk_data.shape != first_data.shape or chunk_data.dtype != first_data.dtype:
+                return False
+            stack_2d[f] = chunk_data.reshape(-1)
+
+        result = custom_huber_weighted_chunk_or_none(
+            stack_2d,
+            state['ref_mean'],
+            state['ref_std'],
+            self._configs['huber_c'],
+            weights_arr,
+        )
+        if result is None:
+            return False
+
+        weighted_sum, weight_total = result
+        state['result'] = np.round(np.divide(
+            weighted_sum,
+            np.where(weight_total > 0, weight_total, 1.0),
+        )).reshape(first_data.shape)
+        state['_done'] = True
+        return True
 
     def _merge_chunk(self, state, chunk_data, chunk_weight, frame_idx):
         state['merger'].merge(chunk_data, chunk_weight)
 
+    def _check_convergence(self, state, pass_idx):
+        return state['_done'] or pass_idx >= 0
+
     def _finalize_chunk(self, state):
+        if state['result'] is not None:
+            return state['result']
         result = state['merger'].merged_image
         if result is None:
             raise ValueError("HuberMeanIteratorOp: no frames processed in chunk")

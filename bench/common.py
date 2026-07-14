@@ -61,12 +61,45 @@ def _format_seconds(value: float) -> str:
 
 
 def _case_order(report: dict[str, Any]) -> list[str]:
+    terminal_cases = report.get("terminal_cases", report.get("display_cases"))
     config = report.get("config", {})
     configured = config.get("cases")
     results = report.get("results", {})
+    if isinstance(terminal_cases, list):
+        return [str(case) for case in terminal_cases if case in results]
     if isinstance(configured, list):
         return [str(case) for case in configured if case in results]
     return list(results.keys())
+
+
+def _plural_unit(unit: str) -> str:
+    if unit.endswith("pass"):
+        return f"{unit}es"
+    if unit.endswith("s"):
+        return unit
+    return f"{unit}s"
+
+
+def annotate_case_units(
+    results: dict[str, dict[str, Any]],
+    case_units: dict[str, dict[str, Any]],
+) -> None:
+    for case_name, unit_info in case_units.items():
+        payload = results.get(case_name)
+        if not isinstance(payload, dict):
+            continue
+        unit = str(unit_info.get("unit", "item"))
+        count = unit_info.get("count")
+        if not isinstance(count, (int, float)) or count <= 0:
+            continue
+        unit_count = int(count)
+        payload["unit"] = unit
+        payload["unit_count"] = unit_count
+        for field_name in ("min_sec", "max_sec", "mean_sec", "median_sec"):
+            value = payload.get(field_name)
+            if isinstance(value, (int, float)):
+                metric_name = field_name.replace("_sec", "_per_unit_sec")
+                payload[metric_name] = float(value) / unit_count
 
 
 def render_terminal_summary(report: dict[str, Any], output_json: str | None) -> str:
@@ -74,10 +107,13 @@ def render_terminal_summary(report: dict[str, Any], output_json: str | None) -> 
     suite = report.get("suite", "benchmark")
     input_source = report.get("input_source", {})
     custom_ops = report.get("custom_ops", {})
+    terminal_mode = report.get("terminal_mode")
+    totals_only = terminal_mode == "pipeline_totals"
+    terminal_case_labels = report.get("terminal_case_labels", {})
 
     lines.append(f"[{suite}]")
 
-    if isinstance(input_source, dict):
+    if isinstance(input_source, dict) and input_source:
         mode = input_source.get("mode")
         frames = input_source.get("resolved_frames")
         shape = input_source.get("resolved_shape")
@@ -93,8 +129,23 @@ def render_terminal_summary(report: dict[str, Any], output_json: str | None) -> 
             parts.append(f"dtype={dtype}")
         if parts:
             lines.append(" ".join(parts))
+    elif isinstance(report.get("input_sources"), dict):
+        input_parts = []
+        for suite_id, source in report["input_sources"].items():
+            if not isinstance(source, dict):
+                continue
+            mode = source.get("mode")
+            frames = source.get("resolved_frames")
+            if mode is None:
+                continue
+            suffix = f":{mode}"
+            if frames is not None:
+                suffix += f"({frames})"
+            input_parts.append(f"{suite_id}{suffix}")
+        if input_parts:
+            lines.append("inputs=" + ", ".join(input_parts))
 
-    if isinstance(custom_ops, dict) and custom_ops.get("available"):
+    if not totals_only and isinstance(custom_ops, dict) and custom_ops.get("available"):
         compiler = custom_ops.get("compiler")
         openmp = custom_ops.get("openmp")
         omp_simd = custom_ops.get("omp_simd")
@@ -111,22 +162,129 @@ def render_terminal_summary(report: dict[str, Any], output_json: str | None) -> 
         if parts:
             lines.append(" ".join(parts))
 
+    pipeline = report.get("pipeline")
+    if not totals_only and isinstance(pipeline, dict):
+        parts = []
+        for key in ("aligned_frames", "failed_frames", "output_shape", "output_dtype"):
+            value = pipeline.get(key)
+            if value is not None:
+                parts.append(f"{key}={value}")
+        if parts:
+            lines.append("pipeline=" + " ".join(parts))
+    pipelines = report.get("pipelines")
+    if not totals_only and isinstance(pipelines, dict):
+        for pipeline_name, pipeline_payload in pipelines.items():
+            if not isinstance(pipeline_payload, dict):
+                continue
+            parts = []
+            for key in ("aligned_frames", "failed_frames", "output_shape", "output_dtype"):
+                value = pipeline_payload.get(key)
+                if value is not None:
+                    parts.append(f"{key}={value}")
+            if parts:
+                lines.append(f"pipeline.{pipeline_name}=" + " ".join(parts))
+
+    backend_diagnostics = report.get("backend_diagnostics")
+    if not totals_only and isinstance(backend_diagnostics, dict):
+        parts = []
+        for logical_op, payload in backend_diagnostics.items():
+            if (
+                logical_op in {
+                    "preference",
+                    "runtime_probes",
+                    "registry_selection_only",
+                    "note",
+                }
+                or not isinstance(payload, dict)
+            ):
+                continue
+            backend = payload.get("candidate_backend")
+            if backend is not None:
+                parts.append(f"{logical_op}:{backend}")
+        if parts:
+            preference = backend_diagnostics.get("preference")
+            prefix = f"backend_preference={preference} " if preference else ""
+            lines.append(prefix + "registry_selection=" + ", ".join(parts))
+        runtime_probes = backend_diagnostics.get("runtime_probes")
+        if isinstance(runtime_probes, dict):
+            probe_parts = []
+            for name, payload in runtime_probes.items():
+                if not isinstance(payload, dict):
+                    continue
+                status = payload.get("status")
+                if status is not None:
+                    probe_parts.append(f"{name}:{status}")
+            if probe_parts:
+                lines.append("cuda_runtime_probe=" + ", ".join(probe_parts))
+
     results = report.get("results", {})
     for case_name in _case_order(report):
         payload = results.get(case_name, {})
         if not isinstance(payload, dict):
             continue
+        if payload.get("skipped"):
+            reason = payload.get("reason")
+            summary = f"{case_name}: skipped"
+            if isinstance(reason, str) and reason:
+                summary += f" ({reason})"
+            lines.append(summary)
+            continue
         mean_sec = payload.get("mean_sec")
         min_sec = payload.get("min_sec")
         max_sec = payload.get("max_sec")
         if isinstance(mean_sec, (int, float)):
-            summary = f"{case_name}: mean={_format_seconds(float(mean_sec))}"
+            label = case_name
+            if isinstance(terminal_case_labels, dict):
+                label = str(terminal_case_labels.get(case_name, case_name))
+            summary = f"{label}: mean={_format_seconds(float(mean_sec))}"
             if isinstance(min_sec, (int, float)) and isinstance(max_sec, (int, float)):
                 summary += f" min={_format_seconds(float(min_sec))} max={_format_seconds(float(max_sec))}"
+            per_unit_mean = payload.get("mean_per_unit_sec")
+            unit = payload.get("unit")
+            unit_count = payload.get("unit_count")
+            if (not totals_only
+                    and isinstance(per_unit_mean, (int, float))
+                    and isinstance(unit, str)
+                    and isinstance(unit_count, int)):
+                summary += (
+                    f" per_{unit}_mean={_format_seconds(float(per_unit_mean))}"
+                    f" {_plural_unit(unit)}={unit_count}"
+                )
             lines.append(summary)
 
-    if output_json:
-        lines.append(f"json={output_json}")
+    custom_backends = report.get("custom_backends", {})
+    if isinstance(custom_backends, dict):
+        for case_name, backend_name in custom_backends.items():
+            lines.append(f"{case_name}_backend: {backend_name}")
+
+    accuracy_by_case = report.get("accuracy_by_case")
+    if not isinstance(accuracy_by_case, dict):
+        accuracy = report.get("accuracy", {})
+        if (
+            isinstance(accuracy, dict)
+            and isinstance(accuracy.get("max_abs_err"), (int, float))
+            and isinstance(accuracy.get("mean_abs_err"), (int, float))
+        ):
+            accuracy_by_case = {"accuracy": accuracy}
+        elif isinstance(accuracy, dict):
+            accuracy_by_case = accuracy
+        else:
+            accuracy_by_case = {}
+    if isinstance(accuracy_by_case, dict):
+        for case_name, payload in accuracy_by_case.items():
+            if not isinstance(payload, dict):
+                continue
+            max_abs_err = payload.get("max_abs_err")
+            mean_abs_err = payload.get("mean_abs_err")
+            if isinstance(max_abs_err, (int, float)) and isinstance(
+                    mean_abs_err, (int, float)):
+                label = "accuracy" if case_name == "accuracy" else f"{case_name}_accuracy"
+                lines.append(
+                    f"{label}: "
+                    f"max_abs_err={max_abs_err:.6e} "
+                    f"mean_abs_err={mean_abs_err:.6e}"
+                )
+
     return "\n".join(lines)
 
 
@@ -294,7 +452,7 @@ def discover_cache_dataset(
     frames: int,
 ) -> tuple[Path | None, dict[str, Any] | None]:
     roots: list[Path] = []
-    if input_dir:
+    if input_dir is not None:
         roots.append(Path(input_dir))
     else:
         roots.extend(DEFAULT_INPUT_DIRS)
@@ -340,7 +498,7 @@ def discover_image_paths(
     frames: int,
 ) -> tuple[Path | None, list[Path]]:
     roots: list[Path] = []
-    if input_dir:
+    if input_dir is not None:
         roots.append(Path(input_dir))
     else:
         roots.extend(DEFAULT_INPUT_DIRS)
@@ -388,18 +546,13 @@ def load_frames_from_paths(paths: list[Path]) -> list[np.ndarray]:
     return frames
 
 
-def prepare_frames(
+def resolve_existing_frames(
     *,
     frames: int,
-    height: int,
-    width: int,
-    dtype: np.dtype,
-    channels: int = 3,
-    seed: int = 0,
     input_dir: str | None = None,
     input_mode: str = "auto",
-) -> tuple[list[np.ndarray], dict[str, Any]]:
-    if input_mode not in {"auto", "cache", "images", "synthetic"}:
+) -> tuple[list[np.ndarray], dict[str, Any]] | None:
+    if input_mode not in {"auto", "cache", "images"}:
         raise ValueError(f"unsupported input_mode: {input_mode}")
 
     if input_mode in {"auto", "cache"}:
@@ -439,6 +592,37 @@ def prepare_frames(
             return loaded, source
         if input_mode == "images":
             raise FileNotFoundError(f"no image dataset found for frames={frames} under: {input_dir or DEFAULT_INPUT_DIRS}")
+
+    if input_dir is not None and input_mode == "auto":
+        raise FileNotFoundError(
+            f"no raw cache or image dataset found for frames={frames} under: {input_dir}"
+        )
+
+    return None
+
+
+def prepare_frames(
+    *,
+    frames: int,
+    height: int,
+    width: int,
+    dtype: np.dtype,
+    channels: int = 3,
+    seed: int = 0,
+    input_dir: str | None = None,
+    input_mode: str = "auto",
+) -> tuple[list[np.ndarray], dict[str, Any]]:
+    if input_mode not in {"auto", "cache", "images", "synthetic"}:
+        raise ValueError(f"unsupported input_mode: {input_mode}")
+
+    if input_mode != "synthetic":
+        existing = resolve_existing_frames(
+            frames=frames,
+            input_dir=input_dir,
+            input_mode=input_mode,
+        )
+        if existing is not None:
+            return existing
 
     synthetic = make_frames(
         frames=frames,
