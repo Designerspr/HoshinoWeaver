@@ -26,13 +26,14 @@ SigmaClipIteratorOp：
     清理策略：
         - 在 finally 中无条件清理 buffer，确保不泄漏
 """
-from typing import Any, Optional
+from typing import Any
 
 import cv2
 import numpy as np
 from loguru import logger
 
 from .._custom_op import median_reduce_chunk as custom_median_reduce_chunk
+from .._custom_op.cuda_memory import chunk_host_cost_per_row
 from .._custom_op.ops.fgp import (
     huber_weighted_chunk_native_available as custom_huber_weighted_chunk_available,
     try_huber_weighted_chunk_native as custom_huber_weighted_chunk_or_none,
@@ -45,8 +46,7 @@ from .._custom_op.ops.sigma_clip import (
 from ..component.data_container import FastGaussianParam, FloatImage
 from ..component.frame_buffer import (BaseFrameBuffer, DiskFrameBuffer,
                                       MemoryFrameBuffer, SourceReplayBuffer)
-from ..component.merger import (HuberWeightedMerger, MeanMerger,
-                                SigmaClippingMerger)
+from ..component.merger import HuberWeightedMerger, SigmaClippingMerger
 from ..component.noise_equalization import (compute_adaptive_n_sigma,
                                             threshold_max_merge)
 from ..component.queue import StreamExhausted
@@ -531,18 +531,13 @@ class SigmaClipFusedChunkOp(ChunkIteratorBaseOp):
 
     @classmethod
     def chunk_cost_per_row_for_backend(cls, backend, n_frames, row_bytes, dtype_bytes):
-        plane_items_per_row = row_bytes // dtype_bytes
-        float64_row = plane_items_per_row * 8
-        stack = 2 * n_frames * row_bytes
-        active = n_frames * row_bytes
-        mask_bytes = n_frames * plane_items_per_row
-        state = 3 * float64_row
-        if backend == "numpy":
-            float64_stacks = 2 * n_frames * float64_row
-            active_masks = 2 * n_frames * plane_items_per_row
-            iterative_state = 6 * float64_row
-            return stack + float64_stacks + active_masks + state + iterative_state
-        return stack + active + mask_bytes + state
+        return chunk_host_cost_per_row(
+            "sigma_clip_fused_chunk",
+            backend,
+            n_frames=n_frames,
+            row_bytes=row_bytes,
+            dtype_bytes=dtype_bytes,
+        )
 
     def _init_chunk_state(self, configs, row_start, row_end, w):
         # 静态 mask 切片
@@ -692,10 +687,13 @@ class HuberMeanIteratorOp(ChunkIteratorBaseOp):
 
     @classmethod
     def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
-        float64_row = row_bytes // dtype_bytes * 8
-        stack = 2 * n_frames * row_bytes
-        merger_state = 4 * float64_row
-        return stack + merger_state
+        return chunk_host_cost_per_row(
+            "huber_weighted_chunk",
+            "numpy",
+            n_frames=n_frames,
+            row_bytes=row_bytes,
+            dtype_bytes=dtype_bytes,
+        )
 
     def _init_chunk_state(self, configs, row_start, row_end, w):
         fgp_total: FastGaussianParam = configs['fgp_total']

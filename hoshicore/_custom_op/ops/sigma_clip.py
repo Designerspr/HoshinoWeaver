@@ -7,14 +7,19 @@ from typing import Callable
 
 import numpy as np
 
+from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
+from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
+from hoshicore._custom_op.backend_registry import resolve_after_resource_exhausted
 from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
 from hoshicore._custom_op.backend_registry import resolve_backend as _resolve_backend
+from hoshicore._custom_op.cuda_memory import cuda_chunk_memory_model
+from hoshicore._custom_op.cuda_memory import cuda_memory_admission
 
 
 _debug_log = partial(debug_log, "sigma_clip")
@@ -361,9 +366,31 @@ def sigma_clip_fused_chunk_compiled_cuda(
     module, _ = _load_compiled_module_result()
     if module is None or not hasattr(module, "sigma_clip_fused_chunk_cuda"):
         raise RuntimeError("compiled CUDA custom op backend is unavailable")
-    stack, mask = _validate_fused_inputs(stack, mask, skip_zero_rgb, channels)
-    return module.sigma_clip_fused_chunk_cuda(
-        stack, rej_high, rej_low, max_iter, mask, skip_zero_rgb, channels)
+    stack_arr, mask_arr = _validate_fused_inputs(
+        stack, mask, skip_zero_rgb, channels)
+    model = cuda_chunk_memory_model(
+        "sigma_clip_fused_chunk",
+        n_frames=stack_arr.shape[0],
+        row_bytes=stack_arr.shape[1] * stack_arr.dtype.itemsize,
+        dtype_bytes=stack_arr.dtype.itemsize,
+        include_mask=mask_arr is not None,
+    )
+    # The flattened plane is one modeled row, so estimate(1) covers this chunk.
+    with cuda_memory_admission(model.estimate(1)) as admission:
+        if not admission.granted:
+            raise CustomOpResourceExhaustedError(
+                "sigma_clip_fused_chunk skipped CUDA because estimated peak "
+                f"{admission.estimated_peak_bytes} bytes exceeds usable VRAM"
+            )
+        return module.sigma_clip_fused_chunk_cuda(
+            stack_arr,
+            rej_high,
+            rej_low,
+            max_iter,
+            mask_arr,
+            skip_zero_rgb,
+            channels,
+        )
 
 
 def _select_sigma_clip_fused_chunk_backend(
@@ -427,15 +454,28 @@ def sigma_clip_fused_chunk(
             stack, rej_high, rej_low, max_iter, mask,
             skip_zero_rgb, channels)
     except RuntimeError as exc:
-        fallback_selection = resolve_after_runtime_unavailable(
-            "sigma_clip_fused_chunk",
-            "cuda_host_io",
-            exc,
-            load_module=_load_compiled_module_result,
-        )
-        _debug_log(
-            f"compiled CUDA backend unavailable at runtime, falling back to CPU: {exc}"
-        )
+        if is_cuda_resource_exhausted_error(exc):
+            fallback_selection = resolve_after_resource_exhausted(
+                "sigma_clip_fused_chunk",
+                "cuda_host_io",
+                exc,
+                load_module=_load_compiled_module_result,
+            )
+            _debug_log(
+                "compiled CUDA backend exhausted resources, falling back to "
+                f"the next backend: {exc}"
+            )
+        else:
+            fallback_selection = resolve_after_runtime_unavailable(
+                "sigma_clip_fused_chunk",
+                "cuda_host_io",
+                exc,
+                load_module=_load_compiled_module_result,
+            )
+            _debug_log(
+                "compiled CUDA backend unavailable at runtime, falling back "
+                f"to the next backend: {exc}"
+            )
     fallback_name, fallback_backend = _sigma_clip_fused_chunk_backend(
         fallback_selection)
     if fallback_name == "cuda":

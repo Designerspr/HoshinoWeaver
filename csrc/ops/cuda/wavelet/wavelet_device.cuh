@@ -1,7 +1,9 @@
 #pragma once
 
 // Shared device-only helpers for CUDA wavelet and star-detection kernels.
+#include "common/cuda_host_io_workspace.cuh"
 #include "common/cuda_runtime_utils.cuh"
+#include "common/wavelet_geometry.h"
 
 #include <cuda_runtime.h>
 
@@ -13,7 +15,7 @@
 
 namespace {
 
-constexpr int DB8_FILTER_LEN = 16;
+constexpr int DB8_FILTER_LEN = hnw::wavelet::kDb8FilterLength;
 constexpr int DB8_DWT_OFFSET = -14;
 constexpr int DB8_IDWT_OFFSET = 14;
 
@@ -55,28 +57,49 @@ public:
     DeviceBuffer(const DeviceBuffer&) = delete;
     DeviceBuffer& operator=(const DeviceBuffer&) = delete;
 
-    DeviceBuffer(DeviceBuffer&& other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
+    DeviceBuffer(DeviceBuffer&& other) noexcept
+        : ptr_(other.ptr_), bytes_(other.bytes_), lease_(std::move(other.lease_)) {
+        other.ptr_ = nullptr;
+        other.bytes_ = 0;
+    }
 
     DeviceBuffer& operator=(DeviceBuffer&& other) noexcept {
         if (this != &other) {
             reset();
             ptr_ = other.ptr_;
+            bytes_ = other.bytes_;
+            lease_ = std::move(other.lease_);
             other.ptr_ = nullptr;
+            other.bytes_ = 0;
         }
         return *this;
     }
 
     ~DeviceBuffer() { reset(); }
 
-    void allocate(const size_t count, const char* context) {
+    void allocate(const size_t count, const char* context,
+                  hnw::cuda::HostIoWorkspaceSession* workspace = nullptr) {
         reset();
-        throw_if_cuda_failed(cudaMalloc(&ptr_, count * sizeof(double)), context);
+        bytes_ = count * sizeof(double);
+        if (workspace != nullptr) {
+            lease_ = workspace->device_lease(bytes_, context);
+            ptr_ = static_cast<double*>(lease_.get());
+        } else {
+            throw_if_cuda_failed(cudaMalloc(&ptr_, bytes_), context);
+            hnw::cuda::record_device_memory_acquire(bytes_);
+        }
     }
 
     void reset() noexcept {
         if (ptr_ != nullptr) {
-            cudaFree(ptr_);
+            if (lease_.get() != nullptr) {
+                lease_.reset();
+            } else {
+                cudaFree(ptr_);
+                hnw::cuda::record_device_memory_release(bytes_);
+            }
             ptr_ = nullptr;
+            bytes_ = 0;
         }
     }
 
@@ -84,6 +107,8 @@ public:
 
 private:
     double* ptr_ = nullptr;
+    size_t bytes_ = 0;
+    hnw::cuda::HostIoDeviceLease lease_;
 };
 
 template <typename T> class DeviceTypedBuffer {
@@ -92,30 +117,49 @@ public:
     DeviceTypedBuffer(const DeviceTypedBuffer&) = delete;
     DeviceTypedBuffer& operator=(const DeviceTypedBuffer&) = delete;
 
-    DeviceTypedBuffer(DeviceTypedBuffer&& other) noexcept : ptr_(other.ptr_) {
+    DeviceTypedBuffer(DeviceTypedBuffer&& other) noexcept
+        : ptr_(other.ptr_), bytes_(other.bytes_), lease_(std::move(other.lease_)) {
         other.ptr_ = nullptr;
+        other.bytes_ = 0;
     }
 
     DeviceTypedBuffer& operator=(DeviceTypedBuffer&& other) noexcept {
         if (this != &other) {
             reset();
             ptr_ = other.ptr_;
+            bytes_ = other.bytes_;
+            lease_ = std::move(other.lease_);
             other.ptr_ = nullptr;
+            other.bytes_ = 0;
         }
         return *this;
     }
 
     ~DeviceTypedBuffer() { reset(); }
 
-    void allocate(const size_t count, const char* context) {
+    void allocate(const size_t count, const char* context,
+                  hnw::cuda::HostIoWorkspaceSession* workspace = nullptr) {
         reset();
-        throw_if_cuda_failed(cudaMalloc(&ptr_, count * sizeof(T)), context);
+        bytes_ = count * sizeof(T);
+        if (workspace != nullptr) {
+            lease_ = workspace->device_lease(bytes_, context);
+            ptr_ = static_cast<T*>(lease_.get());
+        } else {
+            throw_if_cuda_failed(cudaMalloc(&ptr_, bytes_), context);
+            hnw::cuda::record_device_memory_acquire(bytes_);
+        }
     }
 
     void reset() noexcept {
         if (ptr_ != nullptr) {
-            cudaFree(ptr_);
+            if (lease_.get() != nullptr) {
+                lease_.reset();
+            } else {
+                cudaFree(ptr_);
+                hnw::cuda::record_device_memory_release(bytes_);
+            }
             ptr_ = nullptr;
+            bytes_ = 0;
         }
     }
 
@@ -123,6 +167,8 @@ public:
 
 private:
     T* ptr_ = nullptr;
+    size_t bytes_ = 0;
+    hnw::cuda::HostIoDeviceLease lease_;
 };
 
 struct DeviceDetailLevel {
@@ -141,11 +187,11 @@ struct DeviceImage {
 };
 
 int dwt_len(const int n) {
-    return (n + DB8_FILTER_LEN - 1) / 2;
+    return hnw::wavelet::dwt_length(n);
 }
 
 int idwt_len(const int n) {
-    return 2 * n - DB8_FILTER_LEN + 2;
+    return hnw::wavelet::idwt_length(n);
 }
 
 __device__ inline int symmetric_index_device(int idx, const int n) {
@@ -270,7 +316,9 @@ __global__ void idwt_rows_kernel(const double* col_lo, const double* col_hi, dou
 }
 
 DeviceImage wavelet_dec_rec_device(DeviceBuffer current, int current_h, int current_w,
-                                   const int level, const int threads) {
+                                   const int level, const int threads,
+                                   hnw::cuda::HostIoWorkspaceSession* workspace = nullptr,
+                                   const cudaStream_t stream = nullptr) {
     size_t current_size = static_cast<size_t>(current_h) * static_cast<size_t>(current_w);
     std::vector<DeviceDetailLevel> details(static_cast<size_t>(level));
 
@@ -282,24 +330,24 @@ DeviceImage wavelet_dec_rec_device(DeviceBuffer current, int current_h, int curr
         DeviceBuffer row_lo;
         DeviceBuffer row_hi;
         DeviceBuffer approx;
-        row_lo.allocate(row_size, "wavelet_dec_rec_cuda_core cudaMalloc row_lo");
-        row_hi.allocate(row_size, "wavelet_dec_rec_cuda_core cudaMalloc row_hi");
-        approx.allocate(detail_size, "wavelet_dec_rec_cuda_core cudaMalloc approx");
+        row_lo.allocate(row_size, "wavelet_dec_rec_cuda_core cudaMalloc row_lo", workspace);
+        row_hi.allocate(row_size, "wavelet_dec_rec_cuda_core cudaMalloc row_hi", workspace);
+        approx.allocate(detail_size, "wavelet_dec_rec_cuda_core cudaMalloc approx", workspace);
         DeviceDetailLevel& detail = details[static_cast<size_t>(idx)];
         detail.h = out_h;
         detail.w = out_w;
-        detail.cH.allocate(detail_size, "wavelet_dec_rec_cuda_core cudaMalloc cH");
-        detail.cV.allocate(detail_size, "wavelet_dec_rec_cuda_core cudaMalloc cV");
-        detail.cD.allocate(detail_size, "wavelet_dec_rec_cuda_core cudaMalloc cD");
+        detail.cH.allocate(detail_size, "wavelet_dec_rec_cuda_core cudaMalloc cH", workspace);
+        detail.cV.allocate(detail_size, "wavelet_dec_rec_cuda_core cudaMalloc cV", workspace);
+        detail.cD.allocate(detail_size, "wavelet_dec_rec_cuda_core cudaMalloc cD", workspace);
 
         const int row_blocks = (static_cast<int>(row_size) + threads - 1) / threads;
-        dwt_rows_kernel<<<row_blocks, threads>>>(current.get(), row_lo.get(), row_hi.get(),
-                                                 current_h, current_w, out_w);
+        dwt_rows_kernel<<<row_blocks, threads, 0, stream>>>(
+            current.get(), row_lo.get(), row_hi.get(), current_h, current_w, out_w);
         throw_if_cuda_failed(cudaGetLastError(), "wavelet_dec_rec_cuda_core dwt rows launch");
         const int col_blocks = (static_cast<int>(detail_size) + threads - 1) / threads;
-        dwt_cols_kernel<<<col_blocks, threads>>>(row_lo.get(), row_hi.get(), approx.get(),
-                                                 detail.cH.get(), detail.cV.get(), detail.cD.get(),
-                                                 current_h, out_h, out_w);
+        dwt_cols_kernel<<<col_blocks, threads, 0, stream>>>(
+            row_lo.get(), row_hi.get(), approx.get(), detail.cH.get(), detail.cV.get(),
+            detail.cD.get(), current_h, out_h, out_w);
         throw_if_cuda_failed(cudaGetLastError(), "wavelet_dec_rec_cuda_core dwt cols launch");
 
         current = std::move(approx);
@@ -308,7 +356,7 @@ DeviceImage wavelet_dec_rec_device(DeviceBuffer current, int current_h, int curr
         current_size = detail_size;
     }
 
-    throw_if_cuda_failed(cudaMemset(current.get(), 0, current_size * sizeof(double)),
+    throw_if_cuda_failed(cudaMemsetAsync(current.get(), 0, current_size * sizeof(double), stream),
                          "wavelet_dec_rec_cuda_core cudaMemset approx");
     for (int idx = level - 1; idx >= 0; --idx) {
         DeviceDetailLevel& detail = details[static_cast<size_t>(idx)];
@@ -319,19 +367,19 @@ DeviceImage wavelet_dec_rec_device(DeviceBuffer current, int current_h, int curr
         DeviceBuffer col_lo;
         DeviceBuffer col_hi;
         DeviceBuffer output;
-        col_lo.allocate(col_size, "wavelet_dec_rec_cuda_core cudaMalloc col_lo");
-        col_hi.allocate(col_size, "wavelet_dec_rec_cuda_core cudaMalloc col_hi");
-        output.allocate(out_size, "wavelet_dec_rec_cuda_core cudaMalloc output");
+        col_lo.allocate(col_size, "wavelet_dec_rec_cuda_core cudaMalloc col_lo", workspace);
+        col_hi.allocate(col_size, "wavelet_dec_rec_cuda_core cudaMalloc col_hi", workspace);
+        output.allocate(out_size, "wavelet_dec_rec_cuda_core cudaMalloc output", workspace);
 
         const bool zero_detail = idx == 0;
         const int col_blocks = (static_cast<int>(col_size) + threads - 1) / threads;
-        idwt_cols_kernel<<<col_blocks, threads>>>(
+        idwt_cols_kernel<<<col_blocks, threads, 0, stream>>>(
             current.get(), detail.cH.get(), detail.cV.get(), detail.cD.get(), col_lo.get(),
             col_hi.get(), current_w, detail.h, detail.w, out_h, zero_detail);
         throw_if_cuda_failed(cudaGetLastError(), "wavelet_dec_rec_cuda_core idwt cols launch");
         const int row_blocks = (static_cast<int>(out_size) + threads - 1) / threads;
-        idwt_rows_kernel<<<row_blocks, threads>>>(col_lo.get(), col_hi.get(), output.get(), out_h,
-                                                  detail.w, out_w);
+        idwt_rows_kernel<<<row_blocks, threads, 0, stream>>>(col_lo.get(), col_hi.get(),
+                                                             output.get(), out_h, detail.w, out_w);
         throw_if_cuda_failed(cudaGetLastError(), "wavelet_dec_rec_cuda_core idwt rows launch");
 
         detail.cH.reset();

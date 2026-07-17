@@ -8,6 +8,7 @@ from hoshicore._custom_op import (
     sigma_clip_fused_merge,
 )
 import hoshicore._custom_op.backend_registry as backend_registry
+from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 import hoshicore._custom_op.ops.fgp as fgp_ops
 import hoshicore._custom_op.ops.sigma_clip as sigma_clip_chunk_ops
@@ -652,7 +653,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
         np.testing.assert_array_equal(first[0], cpu_result[0])
         np.testing.assert_array_equal(second[0], cuda_result[0])
 
-    def test_sigma_clip_fused_chunk_cuda_resource_error_propagates(self) -> None:
+    def test_sigma_clip_fused_chunk_unstructured_oom_error_propagates(self) -> None:
         stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
         cuda_selection = backend_registry.BackendSelection(
             backend_registry.BackendCandidate(
@@ -680,3 +681,57 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                 ):
                     with self.assertRaisesRegex(RuntimeError, "out of memory"):
                         sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
+
+    def test_sigma_clip_fused_chunk_typed_resource_error_falls_back_to_cpu(
+        self,
+    ) -> None:
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "sigma_clip_fused_chunk",
+                "cuda_host_io",
+                "sigma_clip_fused_chunk_cuda",
+            ),
+            mock.Mock(),
+        )
+        cpu_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "sigma_clip_fused_chunk",
+                "openmp_cpu",
+                "sigma_clip_fused_chunk",
+            ),
+            mock.Mock(),
+        )
+        expected = (
+            np.full(6, 10.0, dtype=np.float64),
+            np.full(6, 20.0, dtype=np.float64),
+            np.full(6, 4, dtype=np.uint32),
+        )
+
+        with mock.patch.object(
+            sigma_clip_chunk_ops,
+            "_resolve_backend",
+            return_value=cuda_selection,
+        ):
+            with mock.patch.object(
+                sigma_clip_chunk_ops,
+                "sigma_clip_fused_chunk_compiled_cuda",
+                side_effect=CustomOpResourceExhaustedError(
+                    "estimated VRAM is insufficient"
+                ),
+            ):
+                with mock.patch.object(
+                    sigma_clip_chunk_ops,
+                    "resolve_after_resource_exhausted",
+                    return_value=cpu_selection,
+                ) as resource_resolver:
+                    with mock.patch.object(
+                        sigma_clip_chunk_ops,
+                        "sigma_clip_fused_chunk_compiled",
+                        return_value=expected,
+                    ) as cpu_backend:
+                        result = sigma_clip_chunk_ops.sigma_clip_fused_chunk(stack)
+
+        self.assertIs(result, expected)
+        resource_resolver.assert_called_once()
+        cpu_backend.assert_called_once()
