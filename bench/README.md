@@ -155,6 +155,12 @@ custom-op wrapper；`stack_*` 不消费对齐输出。终端只打印每条路�
 `--method all` 会顺序跑 `homography` 和 `camera_model` 两条主要对齐路径；
 终端只打印两条 pipeline 的 `mean/min/max`，阶段明细保留在 JSON `results` 中。
 单独运行 `--method homography` 或 `--method camera_model` 时，终端会同时打印阶段耗时。
+camera-model 路径可用 `--ref-projection` / `--src-projection` 选择
+perspective、fisheye 或混合相机；混合相机 benchmark 会自动禁用 same-camera 参数共享。
+这两个参数只作用于 camera-model 分支；homography 分支始终使用 perspective，
+因此 `--method all` 不会把不受支持的鱼眼 homography 记成对齐失败。
+synthetic starfield 只用于投影路径的功能/性能 smoke，并不是按鱼眼光学重新渲染的质量数据；
+评估真实鱼眼对齐质量时仍应通过 `--input-dir` 提供对应镜头图像。
 输入选择遵循统一 benchmark 规则：显式 `--input-dir` 优先，其次扫描
 `bench/data/cache`、`bench/data/input`、`bench/data/generated`，最后才使用
 synthetic starfield。
@@ -175,7 +181,7 @@ synthetic starfield。
 ### GPU
 
 - `python -m bench.gpu.original_remap`
-  当前 camera-model remap 口径集合。覆盖 `NumPy grid`、fused `camera_model_remap` custom-op、`cv2.remap` 与原主线路径。
+  当前 camera-model remap 口径集合。覆盖 perspective/fisheye 四种源目标组合、`NumPy grid`、fused `camera_model_remap` custom-op、`cv2.remap` 与原主线路径；用 `--src-projection` / `--dst-projection` 选择投影。
 - `python -m bench.gpu.original_homography`
   纯 homography warp 的 CPU 基线。只测 `cv2.warpPerspective`，不含 detect / features / match。
 - `python -m bench.cli run gpu.sigma_clip_chunk`
@@ -306,6 +312,7 @@ python -m bench.data_tools.generate_starfield_dataset --name align_u16_32f --fra
 python -m bench.cli run pipeline.all -- --input-dir <image-dir>
 python -m bench.cli run pipeline.all -- --input-dir <image-dir> --backend numpy
 python -m bench.cli run pipeline.compute -- --input-dir <image-dir> --cases alignment_homography,alignment_camera_model,remap_camera_model
+python -m bench.cli run pipeline.compute -- --cases alignment_camera_model,remap_camera_model --ref-projection fisheye --src-projection perspective --no-same-camera
 python -m bench.cli run pipeline.alignment -- --input-dir <image-dir> --method all
 python -m bench.cpu.kernels --frames 128 --height 1080 --width 1920 --dtype uint16 --input-mode synthetic
 python -m bench.cpu.kernels --frames 64 --height 2048 --width 3072 --dtype uint16 --input-mode synthetic --cases fgp_masked_mean_merge_stream_numpy,fgp_masked_mean_merge_stream_compiled,sigma_clip_fused_merge_stream_numpy,sigma_clip_fused_merge_stream_compiled,sigma_clip_fused_masked_merge_stream_numpy,sigma_clip_fused_masked_merge_stream_compiled,fgp_add_partial_reduce_numpy,fgp_add_partial_reduce_compiled

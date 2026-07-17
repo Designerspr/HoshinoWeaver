@@ -1,7 +1,7 @@
 """Benchmark for camera-model remap host-in/host-out paths.
 
-Compares the OpenCV reference path against the fused custom-op path.  The
-benchmark can exercise both zero-distortion and Brown-Conrady distorted remap.
+Compares the camera-model reference path against the fused custom-op path.  The
+benchmark covers perspective and Kannala-Brandt fisheye projection pairs.
 """
 
 from __future__ import annotations
@@ -21,6 +21,12 @@ from bench.common import (
 )
 from hoshicore._custom_op import build_info as custom_op_build_info
 from hoshicore._custom_op.ops import remap as remap_ops
+from hoshicore.component.norma.projection import (
+    project_fisheye_vectors,
+    project_vectors,
+    unproject_fisheye_pixels,
+    unproject_pixels,
+)
 
 
 DEFAULT_HEIGHT = 2048
@@ -61,6 +67,8 @@ class RemapConfig:
     rotation_dst_to_src: np.ndarray
     src_dist_coeffs: np.ndarray | None
     dst_dist_coeffs: np.ndarray | None
+    src_projection: str
+    dst_projection: str
 
 
 def _make_rotation_matrix(yaw_deg: float,
@@ -141,14 +149,23 @@ def _build_config(
         cy_dst=cy_dst,
         rotation_dst_to_src=_make_rotation_matrix(
             args.yaw_deg, args.pitch_deg, args.roll_deg),
-        src_dist_coeffs=_make_dist_coeffs(args.distortion_scale),
-        dst_dist_coeffs=_make_dist_coeffs(-args.distortion_scale),
+        src_dist_coeffs=_make_dist_coeffs(
+            args.distortion_scale, args.src_projection),
+        dst_dist_coeffs=_make_dist_coeffs(
+            -args.distortion_scale, args.dst_projection),
+        src_projection=args.src_projection,
+        dst_projection=args.dst_projection,
     )
 
 
-def _make_dist_coeffs(scale: float) -> np.ndarray | None:
+def _make_dist_coeffs(scale: float, projection: str) -> np.ndarray | None:
     if scale == 0.0:
         return None
+    if projection == "fisheye":
+        return np.array(
+            [0.01 * scale, -0.0015 * scale, 0.0002 * scale, -0.00002 * scale],
+            dtype=np.float32,
+        )
     return np.array(
         [0.01 * scale, -0.0015 * scale, 0.0008 * scale, -0.0004 * scale, 0.0001 * scale],
         dtype=np.float32,
@@ -156,65 +173,24 @@ def _make_dist_coeffs(scale: float) -> np.ndarray | None:
 
 
 def build_grid_numpy(cfg: RemapConfig) -> tuple[np.ndarray, np.ndarray]:
-    if cfg.src_dist_coeffs is None and cfg.dst_dist_coeffs is None:
-        xs = np.arange(cfg.width, dtype=np.float32)
-        ys = np.arange(cfg.height, dtype=np.float32)
-        grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
-
-        x = (grid_x - cfg.cx_dst) / cfg.fx_dst
-        y = (grid_y - cfg.cy_dst) / cfg.fy_dst
-
-        r = cfg.rotation_dst_to_src
-        proj_x = r[0, 0] * x + r[0, 1] * y + r[0, 2]
-        proj_y = r[1, 0] * x + r[1, 1] * y + r[1, 2]
-        proj_z = r[2, 0] * x + r[2, 1] * y + r[2, 2]
-
-        src_x = cfg.fx_src * (proj_x / proj_z) + cfg.cx_src
-        src_y = cfg.fy_src * (proj_y / proj_z) + cfg.cy_src
-        return src_x.astype(np.float32), src_y.astype(np.float32)
-
-    xs = np.arange(cfg.width, dtype=np.float32)
-    ys = np.arange(cfg.height, dtype=np.float32)
+    xs = np.arange(cfg.width, dtype=np.float64)
+    ys = np.arange(cfg.height, dtype=np.float64)
     grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
-    dst_pixels = np.stack([grid_x.ravel(), grid_y.ravel()], axis=1).astype(np.float64)
+    dst_pixels = np.stack([grid_x.ravel(), grid_y.ravel()], axis=1)
 
     k_dst = _make_camera_matrix(cfg.fx_dst, cfg.fy_dst, cfg.cx_dst, cfg.cy_dst)
-    if cfg.dst_dist_coeffs is not None:
-        dst_norm = cv2.undistortPoints(
-            dst_pixels[:, None, :],
-            k_dst,
-            cfg.dst_dist_coeffs.astype(np.float64),
-            P=None,
-        )[:, 0, :]
+    if cfg.dst_projection == "fisheye":
+        dst_rays = unproject_fisheye_pixels(
+            dst_pixels, k_dst, cfg.dst_dist_coeffs)
     else:
-        dst_norm = np.empty_like(dst_pixels)
-        dst_norm[:, 0] = (dst_pixels[:, 0] - cfg.cx_dst) / cfg.fx_dst
-        dst_norm[:, 1] = (dst_pixels[:, 1] - cfg.cy_dst) / cfg.fy_dst
-
-    dst_rays = np.concatenate(
-        [dst_norm, np.ones((dst_norm.shape[0], 1), dtype=np.float64)],
-        axis=1,
-    )
+        dst_rays = unproject_pixels(dst_pixels, k_dst, cfg.dst_dist_coeffs)
     src_rays = (cfg.rotation_dst_to_src.astype(np.float64) @ dst_rays.T).T
-    valid = src_rays[:, 2] > 0.0
-    src_pixels = np.full((src_rays.shape[0], 2), np.nan, dtype=np.float64)
-
-    if np.any(valid):
-        valid_rays = src_rays[valid]
-        if cfg.src_dist_coeffs is not None:
-            k_src = _make_camera_matrix(cfg.fx_src, cfg.fy_src, cfg.cx_src, cfg.cy_src)
-            projected, _ = cv2.projectPoints(
-                valid_rays.reshape(-1, 1, 3),
-                np.zeros((3, 1), dtype=np.float64),
-                np.zeros((3, 1), dtype=np.float64),
-                k_src,
-                cfg.src_dist_coeffs.astype(np.float64),
-            )
-            src_pixels[valid] = projected[:, 0, :]
-        else:
-            normalized = valid_rays[:, :2] / valid_rays[:, 2:3]
-            src_pixels[valid, 0] = cfg.fx_src * normalized[:, 0] + cfg.cx_src
-            src_pixels[valid, 1] = cfg.fy_src * normalized[:, 1] + cfg.cy_src
+    k_src = _make_camera_matrix(cfg.fx_src, cfg.fy_src, cfg.cx_src, cfg.cy_src)
+    if cfg.src_projection == "fisheye":
+        src_pixels = project_fisheye_vectors(
+            src_rays, k_src, cfg.src_dist_coeffs)
+    else:
+        src_pixels = project_vectors(src_rays, k_src, cfg.src_dist_coeffs)
 
     return (
         src_pixels[:, 0].reshape(cfg.height, cfg.width).astype(np.float32),
@@ -232,7 +208,7 @@ def _make_camera_matrix(fx: float, fy: float, cx: float, cy: float) -> np.ndarra
 def remap_with_cv2(image: np.ndarray,
                    map_x: np.ndarray,
                    map_y: np.ndarray) -> np.ndarray:
-    return cv2.remap(
+    remapped = cv2.remap(
         image,
         map_x,
         map_y,
@@ -240,6 +216,9 @@ def remap_with_cv2(image: np.ndarray,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     )
+    if image.ndim == 3 and image.shape[2] == 1 and remapped.ndim == 2:
+        return remapped[:, :, None]
+    return remapped
 
 
 def remap_with_custom_op(image: np.ndarray, cfg: RemapConfig) -> np.ndarray:
@@ -258,6 +237,8 @@ def remap_with_custom_op(image: np.ndarray, cfg: RemapConfig) -> np.ndarray:
         rotation_dst_to_src=cfg.rotation_dst_to_src,
         src_dist_coeffs=cfg.src_dist_coeffs,
         dst_dist_coeffs=cfg.dst_dist_coeffs,
+        src_projection=cfg.src_projection,
+        dst_projection=cfg.dst_projection,
     )
 
 
@@ -277,6 +258,8 @@ def remap_with_auto_custom_op(image: np.ndarray, cfg: RemapConfig) -> np.ndarray
         rotation_dst_to_src=cfg.rotation_dst_to_src,
         src_dist_coeffs=cfg.src_dist_coeffs,
         dst_dist_coeffs=cfg.dst_dist_coeffs,
+        src_projection=cfg.src_projection,
+        dst_projection=cfg.dst_projection,
     )
 
 
@@ -296,6 +279,8 @@ def remap_with_cpu_custom_op(image: np.ndarray, cfg: RemapConfig) -> np.ndarray:
         rotation_dst_to_src=cfg.rotation_dst_to_src,
         src_dist_coeffs=cfg.src_dist_coeffs,
         dst_dist_coeffs=cfg.dst_dist_coeffs,
+        src_projection=cfg.src_projection,
+        dst_projection=cfg.dst_projection,
     )
 
 
@@ -308,6 +293,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channels", type=int, default=3)
     parser.add_argument("--src-focal-px", type=float, default=2400.0)
     parser.add_argument("--dst-focal-px", type=float, default=2400.0)
+    parser.add_argument(
+        "--src-projection",
+        choices=["perspective", "fisheye"],
+        default="perspective",
+    )
+    parser.add_argument(
+        "--dst-projection",
+        choices=["perspective", "fisheye"],
+        default="perspective",
+    )
     parser.add_argument("--yaw-deg", type=float, default=0.30)
     parser.add_argument("--pitch-deg", type=float, default=0.15)
     parser.add_argument("--roll-deg", type=float, default=0.05)
@@ -406,6 +401,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "requested_channels": args.channels,
             "src_focal_px": args.src_focal_px,
             "dst_focal_px": args.dst_focal_px,
+            "src_projection": cfg.src_projection,
+            "dst_projection": cfg.dst_projection,
             "yaw_deg": args.yaw_deg,
             "pitch_deg": args.pitch_deg,
             "roll_deg": args.roll_deg,

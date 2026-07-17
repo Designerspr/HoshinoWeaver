@@ -312,6 +312,20 @@ class BaseCameraModel(abc.ABC):
         """Estimate horizontal, vertical, and diagonal field of view."""
         ...
 
+    @property
+    def remap_projection(self) -> Optional[str]:
+        """Projection identifier for fused remap, or ``None`` if unsupported.
+
+        Keeping this capability optional preserves compatibility with external
+        camera-model subclasses, which continue through the generic path.
+        """
+        return None
+
+    @property
+    def remap_dist_coeffs(self) -> Optional[NDArray[np.float64]]:
+        """Projection-specific distortion coefficients for fused remap."""
+        return None
+
     def _estimate_fov_from_model(self) -> CameraFieldOfView:
         """Estimate FOV by unprojecting the continuous image boundary.
 
@@ -362,6 +376,55 @@ class BaseCameraModel(abc.ABC):
         return self.with_intrinsics(
             self.intrinsics.with_focal_length(focal_length_mm))
 
+    @staticmethod
+    def _remap_rotation_dst_to_src(
+        rotation_dst_to_src: Optional[NDArray[np.float64]] = None,
+    ) -> NDArray[np.float64]:
+        rotation = np.eye(3, dtype=np.float64)
+        if rotation_dst_to_src is not None:
+            rotation = np.asarray(rotation_dst_to_src, dtype=np.float64)
+            if rotation.shape != (3, 3):
+                raise ValueError("rotation_dst_to_src must have shape (3, 3)")
+        return rotation
+
+    def _project_image_from_camera_fused(
+        self,
+        camera: "BaseCameraModel",
+        img: NDArray[np.uint8],
+        output_size: tuple[int, int],
+        roi=None,
+        interpolation=cv2.INTER_LINEAR,
+        rotation_dst_to_src: Optional[NDArray[np.float64]] = None,
+    ) -> NDArray[np.uint8] | None:
+        if roi is not None or interpolation != cv2.INTER_LINEAR:
+            return None
+
+        src_projection = camera.remap_projection
+        dst_projection = self.remap_projection
+        if src_projection is None or dst_projection is None:
+            return None
+
+        target_width, target_height = output_size
+        return custom_camera_model_remap(
+            image=img,
+            out_height=target_height,
+            out_width=target_width,
+            fx_src=float(camera.K[0, 0]),
+            fy_src=float(camera.K[1, 1]),
+            cx_src=float(camera.K[0, 2]),
+            cy_src=float(camera.K[1, 2]),
+            fx_dst=float(self.K[0, 0]),
+            fy_dst=float(self.K[1, 1]),
+            cx_dst=float(self.K[0, 2]),
+            cy_dst=float(self.K[1, 2]),
+            rotation_dst_to_src=self._remap_rotation_dst_to_src(
+                rotation_dst_to_src),
+            src_dist_coeffs=camera.remap_dist_coeffs,
+            dst_dist_coeffs=self.remap_dist_coeffs,
+            src_projection=src_projection,
+            dst_projection=dst_projection,
+        )
+
     def project_image_from_camera(
         self,
         camera: "BaseCameraModel",
@@ -375,8 +438,20 @@ class BaseCameraModel(abc.ABC):
 
         ``rotation_dst_to_src`` maps destination camera-local rays into source
         camera-local rays. Identity is used when it is omitted.
-        Subclasses may override to add fast paths.
+        Linear full-frame remaps use the fused custom op for all supported
+        perspective/fisheye source and destination combinations.
         """
+        fused = self._project_image_from_camera_fused(
+            camera,
+            img,
+            output_size,
+            roi=roi,
+            interpolation=interpolation,
+            rotation_dst_to_src=rotation_dst_to_src,
+        )
+        if fused is not None:
+            return fused
+
         target_width, target_height = output_size
         u_dst = np.arange(target_width, dtype=np.float32)
         v_dst = np.arange(target_height, dtype=np.float32)
@@ -405,12 +480,15 @@ class BaseCameraModel(abc.ABC):
         else:
             img_use = img
 
-        return cv2.remap(img_use,
-                         map_x,
-                         map_y,
-                         interpolation=interpolation,
-                         borderMode=cv2.BORDER_CONSTANT,
-                         borderValue=0 if img_use.ndim == 2 else (0, 0, 0))
+        remapped = cv2.remap(img_use,
+                             map_x,
+                             map_y,
+                             interpolation=interpolation,
+                             borderMode=cv2.BORDER_CONSTANT,
+                             borderValue=0)
+        if img_use.ndim == 3 and img_use.shape[2] == 1 and remapped.ndim == 2:
+            return remapped[:, :, None]
+        return remapped
 
 
 @dataclasses.dataclass(frozen=True)
@@ -422,6 +500,14 @@ class CameraModel(BaseCameraModel):
         if self.distortion.is_zero:
             return None
         return self.distortion.to_cv2()
+
+    @property
+    def remap_projection(self) -> str:
+        return "perspective"
+
+    @property
+    def remap_dist_coeffs(self) -> Optional[NDArray[np.float64]]:
+        return self.dist_coeffs
 
     def unproject(self, pts: NDArray[np.float64]) -> NDArray[np.float64]:
         return unproject_pixels(pts, self.K, self.dist_coeffs)
@@ -436,51 +522,6 @@ class CameraModel(BaseCameraModel):
     def with_distortion(self, distortion: Distortion) -> "CameraModel":
         return super().with_distortion(distortion)
 
-    def _zero_distortion_rotation_dst_to_src(
-        self,
-        camera: "CameraModel",
-        rotation_dst_to_src: Optional[NDArray[np.float64]] = None,
-    ) -> NDArray[np.float32] | None:
-        if not self.distortion.is_zero or not camera.distortion.is_zero:
-            return None
-
-        rotation = np.eye(3, dtype=np.float32)
-        if rotation_dst_to_src is not None:
-            rotation = np.asarray(rotation_dst_to_src, dtype=np.float32)
-            if rotation.shape != (3, 3):
-                raise ValueError("rotation_dst_to_src must have shape (3, 3)")
-        return rotation
-
-    def _project_image_from_camera_zero_distortion_fused(
-        self,
-        camera: "CameraModel",
-        img: NDArray[np.uint8],
-        output_size: tuple[int, int],
-        roi=None,
-        interpolation=cv2.INTER_LINEAR,
-        rotation_dst_to_src: Optional[NDArray[np.float64]] = None,
-    ) -> NDArray[np.uint8] | None:
-        fused_rotation = self._zero_distortion_rotation_dst_to_src(
-            camera, rotation_dst_to_src)
-        if fused_rotation is None or roi is not None or interpolation != cv2.INTER_LINEAR:
-            return None
-
-        target_width, target_height = output_size
-        return custom_camera_model_remap(
-            image=img,
-            out_height=target_height,
-            out_width=target_width,
-            fx_src=float(camera.K[0, 0]),
-            fy_src=float(camera.K[1, 1]),
-            cx_src=float(camera.K[0, 2]),
-            cy_src=float(camera.K[1, 2]),
-            fx_dst=float(self.K[0, 0]),
-            fy_dst=float(self.K[1, 1]),
-            cx_dst=float(self.K[0, 2]),
-            cy_dst=float(self.K[1, 2]),
-            rotation_dst_to_src=fused_rotation,
-        )
-
     @classmethod
     def from_view(cls, view: View) -> "CameraModel":
         """Build camera calibration from a view; orientation stays separate."""
@@ -493,32 +534,6 @@ class CameraModel(BaseCameraModel):
         )
         return cls(intrinsics=intrinsics)
 
-    def project_image_from_camera(self,
-                                  camera: BaseCameraModel,
-                                  img: NDArray[np.uint8],
-                                  output_size: tuple[int, int],
-                                  roi=None,
-                                  interpolation=cv2.INTER_LINEAR,
-                                  rotation_dst_to_src=None):
-        """Projects an image from `camera` into this camera's frame via remap."""
-        if isinstance(camera, CameraModel):
-            fused = self._project_image_from_camera_zero_distortion_fused(
-                camera,
-                img,
-                output_size,
-                roi=roi,
-                interpolation=interpolation,
-                rotation_dst_to_src=rotation_dst_to_src)
-            if fused is not None:
-                return fused
-        return super().project_image_from_camera(
-            camera,
-            img,
-            output_size,
-            roi=roi,
-            interpolation=interpolation,
-            rotation_dst_to_src=rotation_dst_to_src)
-
 
 @dataclasses.dataclass(frozen=True)
 class FisheyeCameraModel(BaseCameraModel):
@@ -526,8 +541,6 @@ class FisheyeCameraModel(BaseCameraModel):
 
     Supports any fisheye type (equidistant, equisolid, orthographic, etc.)
     via the k1..k4 polynomial. Zero k1..k4 = pure equidistant model.
-    Does not implement a fast-path remap; inherits the per-pixel remap
-    from BaseCameraModel.project_image_from_camera().
     """
     distortion: FisheyeDistortion = dataclasses.field(
         default_factory=FisheyeDistortion)
@@ -535,6 +548,16 @@ class FisheyeCameraModel(BaseCameraModel):
     @property
     def dist_k4(self) -> NDArray[np.float64]:
         return self.distortion.to_cv2()
+
+    @property
+    def remap_projection(self) -> str:
+        return "fisheye"
+
+    @property
+    def remap_dist_coeffs(self) -> Optional[NDArray[np.float64]]:
+        if self.distortion.is_zero:
+            return None
+        return self.dist_k4
 
     def unproject(self, pts: NDArray[np.float64]) -> NDArray[np.float64]:
         return unproject_fisheye_pixels(pts, self.K, self.dist_k4)

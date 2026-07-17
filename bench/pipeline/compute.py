@@ -479,7 +479,7 @@ def _run_satellite_clean_window_once(frames: list[np.ndarray]) -> dict[str, Any]
         window_size -= 1
     selected = frames[:max(1, window_size)]
     slots: deque[_FrameSlot] = deque(
-        _FrameSlot(original=frame, geo=None, H_to_next=np.eye(3, dtype=np.float64))
+        _FrameSlot(original=frame, geo=None, R_to_next=np.eye(3, dtype=np.float64))
         for frame in selected
     )
     result = SatelliteCleanOp._process_center(slots, len(slots) // 2, None)
@@ -512,8 +512,16 @@ def _run_remap_camera_model_once(
         sensor_width_mm=args.sensor_width_mm,
         sensor_height_mm=args.sensor_height_mm,
         distortion_scale=args.distortion_scale,
+        projection=args.src_projection,
     )
-    dst_camera = src_camera.with_focal_length(args.focal_length_mm * 1.01)
+    dst_camera = alignment_bench._make_camera(
+        first,
+        focal_length_mm=args.focal_length_mm * 1.01,
+        sensor_width_mm=args.sensor_width_mm,
+        sensor_height_mm=args.sensor_height_mm,
+        distortion_scale=args.distortion_scale,
+        projection=args.ref_projection,
+    )
     output_size = (first.shape[1], first.shape[0])
     last = None
     for frame in frames:
@@ -584,6 +592,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sensor-width-mm", type=float, default=36.0)
     parser.add_argument("--sensor-height-mm", type=float, default=24.0)
     parser.add_argument("--distortion-scale", type=float, default=0.0)
+    parser.add_argument(
+        "--ref-projection",
+        choices=["perspective", "fisheye"],
+        default="perspective",
+    )
+    parser.add_argument(
+        "--src-projection",
+        choices=["perspective", "fisheye"],
+        default="perspective",
+    )
     parser.add_argument(
         "--backend",
         dest="backend",
@@ -697,10 +715,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "input_mode": args.input_mode,
             "cases": requested_cases,
             "same_camera": args.same_camera,
+            "effective_same_camera": (
+                args.same_camera
+                and args.ref_projection == args.src_projection
+            ),
             "focal_length_mm": args.focal_length_mm,
             "sensor_width_mm": args.sensor_width_mm,
             "sensor_height_mm": args.sensor_height_mm,
             "distortion_scale": args.distortion_scale,
+            "ref_projection": args.ref_projection,
+            "src_projection": args.src_projection,
             "backend": args.backend,
             "warmup": args.warmup,
             "repeat": args.repeat,
