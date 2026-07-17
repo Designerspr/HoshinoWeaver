@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/compat.h"
+#include "common/cuda_memory_ledger.cuh"
 #include "common/cuda_runtime_utils.cuh"
 
 #include <cuda_runtime.h>
@@ -241,6 +242,7 @@ private:
 };
 
 class HostIoWorkspace;
+class HostIoDeviceLease;
 
 class HostIoWorkspaceSession {
 public:
@@ -248,13 +250,20 @@ public:
     HostIoWorkspaceSession& operator=(const HostIoWorkspaceSession&) = delete;
     HostIoWorkspaceSession(HostIoWorkspaceSession&& other) noexcept
         : workspace_(other.workspace_), next_device_slot_(other.next_device_slot_),
-          next_pinned_slot_(other.next_pinned_slot_) {
+          next_pinned_slot_(other.next_pinned_slot_),
+          device_request_bytes_(std::move(other.device_request_bytes_)),
+          pinned_request_bytes_(std::move(other.pinned_request_bytes_)) {
         other.workspace_ = nullptr;
     }
     ~HostIoWorkspaceSession();
 
     void* device_buffer(size_t required_bytes, const char* context);
     void* pinned_buffer(size_t required_bytes, const char* context);
+    HostIoDeviceLease device_lease(size_t required_bytes, const char* context);
+    size_t device_mark() const;
+    size_t pinned_mark() const;
+    void rewind_device_buffers(size_t mark);
+    void rewind_pinned_buffers(size_t mark);
     cudaStream_t stream() const;
     void reset_after_error() noexcept;
 
@@ -265,6 +274,49 @@ private:
     HostIoWorkspace* workspace_ = nullptr;
     size_t next_device_slot_ = 0;
     size_t next_pinned_slot_ = 0;
+    std::vector<size_t> device_request_bytes_;
+    std::vector<size_t> pinned_request_bytes_;
+};
+
+class HostIoDeviceLease {
+public:
+    HostIoDeviceLease() = default;
+    HostIoDeviceLease(const HostIoDeviceLease&) = delete;
+    HostIoDeviceLease& operator=(const HostIoDeviceLease&) = delete;
+    HostIoDeviceLease(HostIoDeviceLease&& other) noexcept
+        : workspace_(other.workspace_), slot_(other.slot_), ptr_(other.ptr_),
+          requested_bytes_(other.requested_bytes_) {
+        other.workspace_ = nullptr;
+        other.ptr_ = nullptr;
+        other.requested_bytes_ = 0;
+    }
+    HostIoDeviceLease& operator=(HostIoDeviceLease&& other) noexcept {
+        if (this != &other) {
+            reset();
+            workspace_ = other.workspace_;
+            slot_ = other.slot_;
+            ptr_ = other.ptr_;
+            requested_bytes_ = other.requested_bytes_;
+            other.workspace_ = nullptr;
+            other.ptr_ = nullptr;
+            other.requested_bytes_ = 0;
+        }
+        return *this;
+    }
+    ~HostIoDeviceLease() { reset(); }
+
+    void* get() const { return ptr_; }
+    void reset() noexcept;
+
+private:
+    friend class HostIoWorkspace;
+    HostIoDeviceLease(HostIoWorkspace* workspace, size_t slot, void* ptr, size_t requested_bytes)
+        : workspace_(workspace), slot_(slot), ptr_(ptr), requested_bytes_(requested_bytes) {}
+
+    HostIoWorkspace* workspace_ = nullptr;
+    size_t slot_ = 0;
+    void* ptr_ = nullptr;
+    size_t requested_bytes_ = 0;
 };
 
 class HostIoWorkspace {
@@ -280,6 +332,7 @@ public:
             device_ = current_device;
         }
         stream_.ensure(context);
+        begin_cuda_memory_measurement(context);
         active_ = true;
         return HostIoWorkspaceSession(this);
     }
@@ -290,11 +343,15 @@ public:
         for (auto& buffer : device_buffers_) {
             buffer.reset();
         }
+        for (auto& slot : scratch_device_buffers_) {
+            slot.buffer.reset();
+        }
         for (auto& buffer : pinned_buffers_) {
             buffer.reset();
         }
         stream_.reset();
         device_buffers_.clear();
+        scratch_device_buffers_.clear();
         pinned_buffers_.clear();
         device_ = -1;
     }
@@ -303,6 +360,9 @@ public:
         size_t total = 0;
         for (const auto& buffer : device_buffers_) {
             total += buffer.capacity();
+        }
+        for (const auto& slot : scratch_device_buffers_) {
+            total += slot.buffer.capacity();
         }
         return total;
     }
@@ -317,6 +377,12 @@ public:
 
 private:
     friend class HostIoWorkspaceSession;
+    friend class HostIoDeviceLease;
+
+    struct ScratchDeviceSlot {
+        DeviceBuffer buffer;
+        bool in_use = false;
+    };
 
     void* device_buffer(const size_t slot, const size_t required_bytes, const char* context) {
         if (slot >= device_buffers_.size()) {
@@ -332,8 +398,49 @@ private:
         return pinned_buffers_[slot].ensure(required_bytes, context);
     }
 
+    HostIoDeviceLease device_lease(const size_t required_bytes, const char* context) {
+        size_t selected = scratch_device_buffers_.size();
+        size_t selected_capacity = std::numeric_limits<size_t>::max();
+        size_t grow_candidate = scratch_device_buffers_.size();
+        size_t grow_candidate_capacity = 0;
+        for (size_t slot = 0; slot < scratch_device_buffers_.size(); ++slot) {
+            const auto& candidate = scratch_device_buffers_[slot];
+            if (candidate.in_use) {
+                continue;
+            }
+            if (candidate.buffer.capacity() >= required_bytes &&
+                candidate.buffer.capacity() < selected_capacity) {
+                selected = slot;
+                selected_capacity = candidate.buffer.capacity();
+            } else if (candidate.buffer.capacity() < required_bytes &&
+                       candidate.buffer.capacity() >= grow_candidate_capacity) {
+                grow_candidate = slot;
+                grow_candidate_capacity = candidate.buffer.capacity();
+            }
+        }
+        if (selected == scratch_device_buffers_.size() &&
+            grow_candidate != scratch_device_buffers_.size()) {
+            selected = grow_candidate;
+        }
+        if (selected == scratch_device_buffers_.size()) {
+            scratch_device_buffers_.resize(selected + 1);
+        }
+        auto& slot = scratch_device_buffers_[selected];
+        void* ptr = slot.buffer.ensure(required_bytes, context);
+        slot.in_use = true;
+        record_device_memory_acquire(required_bytes);
+        return HostIoDeviceLease(this, selected, ptr, required_bytes);
+    }
+
+    void release_device_lease(const size_t slot) noexcept {
+        if (slot < scratch_device_buffers_.size()) {
+            scratch_device_buffers_[slot].in_use = false;
+        }
+    }
+
     void finish() noexcept {
         active_ = false;
+        finish_cuda_memory_measurement();
         const size_t retained = retained_device_bytes() + retained_pinned_bytes();
         if (retained > host_io_cache_per_thread_limit_bytes() ||
             process_host_io_cache_bytes() > host_io_cache_process_limit_bytes()) {
@@ -343,11 +450,13 @@ private:
 
     void reset_after_error() noexcept {
         active_ = false;
+        finish_cuda_memory_measurement();
         clear();
     }
 
     CudaStream stream_;
     std::vector<DeviceBuffer> device_buffers_;
+    std::vector<ScratchDeviceSlot> scratch_device_buffers_;
     std::vector<PinnedHostBuffer> pinned_buffers_;
     int device_ = -1;
     bool active_ = false;
@@ -355,18 +464,69 @@ private:
 
 inline HostIoWorkspaceSession::~HostIoWorkspaceSession() {
     if (workspace_ != nullptr) {
+        rewind_device_buffers(0);
+        rewind_pinned_buffers(0);
         workspace_->finish();
     }
 }
 
 inline void* HostIoWorkspaceSession::device_buffer(const size_t required_bytes,
                                                    const char* context) {
-    return workspace_->device_buffer(next_device_slot_++, required_bytes, context);
+    void* ptr = workspace_->device_buffer(next_device_slot_, required_bytes, context);
+    if (next_device_slot_ >= device_request_bytes_.size()) {
+        device_request_bytes_.resize(next_device_slot_ + 1, 0);
+    }
+    device_request_bytes_[next_device_slot_] = required_bytes;
+    ++next_device_slot_;
+    record_device_memory_acquire(required_bytes);
+    return ptr;
 }
 
 inline void* HostIoWorkspaceSession::pinned_buffer(const size_t required_bytes,
                                                    const char* context) {
-    return workspace_->pinned_buffer(next_pinned_slot_++, required_bytes, context);
+    void* ptr = workspace_->pinned_buffer(next_pinned_slot_, required_bytes, context);
+    if (next_pinned_slot_ >= pinned_request_bytes_.size()) {
+        pinned_request_bytes_.resize(next_pinned_slot_ + 1, 0);
+    }
+    pinned_request_bytes_[next_pinned_slot_] = required_bytes;
+    ++next_pinned_slot_;
+    record_pinned_memory_acquire(required_bytes);
+    return ptr;
+}
+
+inline HostIoDeviceLease HostIoWorkspaceSession::device_lease(const size_t required_bytes,
+                                                              const char* context) {
+    return workspace_->device_lease(required_bytes, context);
+}
+
+inline size_t HostIoWorkspaceSession::device_mark() const {
+    return next_device_slot_;
+}
+
+inline size_t HostIoWorkspaceSession::pinned_mark() const {
+    return next_pinned_slot_;
+}
+
+inline void HostIoWorkspaceSession::rewind_device_buffers(const size_t mark) {
+    if (mark > next_device_slot_) {
+        throw std::invalid_argument("CUDA workspace device rewind mark is invalid");
+    }
+    for (size_t slot = mark; slot < next_device_slot_; ++slot) {
+        record_device_memory_release(device_request_bytes_[slot]);
+        device_request_bytes_[slot] = 0;
+    }
+    next_device_slot_ = mark;
+}
+
+inline void HostIoWorkspaceSession::rewind_pinned_buffers(const size_t mark) {
+    if (mark > next_pinned_slot_) {
+        throw std::invalid_argument("CUDA workspace pinned rewind mark is invalid");
+    }
+    for (size_t slot = mark; slot < next_pinned_slot_; ++slot) {
+        record_pinned_memory_release(pinned_request_bytes_[slot]);
+        pinned_request_bytes_[slot] = 0;
+    }
+    next_pinned_slot_ = mark;
 }
 
 inline cudaStream_t HostIoWorkspaceSession::stream() const {
@@ -375,9 +535,28 @@ inline cudaStream_t HostIoWorkspaceSession::stream() const {
 
 inline void HostIoWorkspaceSession::reset_after_error() noexcept {
     if (workspace_ != nullptr) {
+        for (size_t slot = 0; slot < next_device_slot_; ++slot) {
+            record_device_memory_release(device_request_bytes_[slot]);
+        }
+        for (size_t slot = 0; slot < next_pinned_slot_; ++slot) {
+            record_pinned_memory_release(pinned_request_bytes_[slot]);
+        }
+        next_device_slot_ = 0;
+        next_pinned_slot_ = 0;
         workspace_->reset_after_error();
         workspace_ = nullptr;
     }
+}
+
+inline void HostIoDeviceLease::reset() noexcept {
+    if (workspace_ == nullptr) {
+        return;
+    }
+    record_device_memory_release(requested_bytes_);
+    workspace_->release_device_lease(slot_);
+    workspace_ = nullptr;
+    ptr_ = nullptr;
+    requested_bytes_ = 0;
 }
 
 inline thread_local HostIoWorkspace host_io_workspace;

@@ -77,6 +77,17 @@ py::dict cuda_host_io_cache_info_cuda_dict() {
         static_cast<unsigned long long>(hnw::cuda::host_io_cache_per_thread_limit_bytes());
     info["process_limit_bytes"] =
         static_cast<unsigned long long>(hnw::cuda::host_io_cache_process_limit_bytes());
+    info["measurement_active"] = hnw::cuda::memory_measurement_active;
+    info["current_operation"] = hnw::cuda::current_memory_measurement.operation;
+    info["current_device_bytes"] =
+        static_cast<unsigned long long>(hnw::cuda::current_memory_measurement.current_device_bytes);
+    info["current_device_peak_bytes"] =
+        static_cast<unsigned long long>(hnw::cuda::current_memory_measurement.peak_device_bytes);
+    info["last_operation"] = hnw::cuda::last_memory_measurement.operation;
+    info["last_device_peak_bytes"] =
+        static_cast<unsigned long long>(hnw::cuda::last_memory_measurement.peak_device_bytes);
+    info["last_pinned_peak_bytes"] =
+        static_cast<unsigned long long>(hnw::cuda::last_memory_measurement.peak_pinned_bytes);
     return info;
 }
 
