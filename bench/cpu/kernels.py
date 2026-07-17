@@ -84,8 +84,6 @@ FRAME_STREAM_CASE_NAMES = {
     "star_shrink_process_stream_compiled",
     "fgp_accumulate_stream_numpy",
     "fgp_accumulate_stream_compiled",
-    "fgp_add_partial_reduce_numpy",
-    "fgp_add_partial_reduce_compiled",
     "huber_weighted_accumulate_stream_numpy",
     "huber_weighted_accumulate_stream_compiled",
     "fgp_masked_mean_merge_stream_numpy",
@@ -144,8 +142,6 @@ CASE_NAMES = [
     "star_shrink_process_stream_compiled",
     "fgp_accumulate_stream_numpy",
     "fgp_accumulate_stream_compiled",
-    "fgp_add_partial_reduce_numpy",
-    "fgp_add_partial_reduce_compiled",
     "huber_weighted_accumulate_stream_numpy",
     "huber_weighted_accumulate_stream_compiled",
     "fgp_masked_mean_merge_stream_numpy",
@@ -488,44 +484,6 @@ def bench_fgp_accumulate_stream_backend(
     }[backend]
     for frame in frames[1:]:
         accumulate(total, frame)
-    _ = total.mu
-    _ = total.var
-
-
-def clone_fgp(param):
-    from hoshicore.component.data_container import FastGaussianParam
-
-    return FastGaussianParam(
-        sum_mu=np.array(param.sum_mu, copy=True),
-        square_sum=np.array(param.square_sum, copy=True),
-        n=np.array(param.n, copy=True),
-        ddof=param.ddof,
-        source_dtype=param.source_dtype,
-        inplace_calc=True,
-    )
-
-
-def build_fgp_partials(frames: list[np.ndarray]):
-    from hoshicore.component.data_container import FastGaussianParam
-
-    return [
-        FastGaussianParam(np.array(frame, copy=True), source_dtype=frame.dtype)
-        for frame in frames
-    ]
-
-
-def bench_fgp_add_partial_reduce_backend(
-    partials,
-    *,
-    backend: str,
-) -> None:
-    add = {
-        "numpy": fgp_ops.fgp_add_numpy,
-        "compiled": fgp_ops.fgp_add_compiled,
-    }[backend]
-    total = clone_fgp(partials[0])
-    for partial in partials[1:]:
-        add(total, partial)
     _ = total.mu
     _ = total.var
 
@@ -1090,7 +1048,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     weights = make_weights(frame_count)
     spatial_mask = None
-    fgp_partials = None
     threshold_stats = None
     median_chunk_stacks = None
     alignment_inputs = None
@@ -1113,12 +1070,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if spatial_mask is None:
             spatial_mask = build_spatial_mask(frames[0], args.mask_density)
         return spatial_mask
-
-    def get_fgp_partials():
-        nonlocal fgp_partials
-        if fgp_partials is None:
-            fgp_partials = build_fgp_partials(frames)
-        return fgp_partials
 
     def get_threshold_stats():
         nonlocal threshold_stats
@@ -1337,14 +1288,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "fgp_accumulate_stream_numpy": lambda: bench_fgp_accumulate_stream_backend(frames, backend="numpy"),
         "fgp_accumulate_stream_compiled": lambda: bench_fgp_accumulate_stream_backend(frames, backend="compiled"),
-        "fgp_add_partial_reduce_numpy": lambda: bench_fgp_add_partial_reduce_backend(
-            get_fgp_partials(),
-            backend="numpy",
-        ),
-        "fgp_add_partial_reduce_compiled": lambda: bench_fgp_add_partial_reduce_backend(
-            get_fgp_partials(),
-            backend="compiled",
-        ),
         "huber_weighted_accumulate_stream_numpy": lambda: bench_huber_weighted_accumulate_stream_backend(
             frames,
             get_huber_refs()[0],

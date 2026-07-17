@@ -10,7 +10,6 @@ from hoshicore._custom_op.ops.calibration import (
 )
 from hoshicore._custom_op.ops.detection import star_detect_full_connected_components
 from hoshicore._custom_op.ops.fgp import (
-    fgp_add,
     fgp_accumulate,
     fgp_masked_mean_merge,
     huber_weighted_chunk,
@@ -52,7 +51,6 @@ __all__ = [
     "custom_ops_available",
     "equalize_noise_correct",
     "extract_point_features",
-    "fgp_add",
     "fgp_accumulate",
     "fgp_masked_mean_merge",
     "huber_weighted_chunk",

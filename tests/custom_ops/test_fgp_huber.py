@@ -4,7 +4,6 @@ import numpy as np
 
 from hoshicore._custom_op import (
     build_info,
-    fgp_add,
     fgp_accumulate,
     fgp_masked_mean_merge,
     huber_weighted_chunk,
@@ -87,60 +86,6 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
             source_dtype=np.dtype("uint16"),
         )
         expected = expected + FastGaussianParam(fresh, source_dtype=fresh.dtype)
-
-        self.assertIs(got, base)
-        np.testing.assert_array_equal(base.sum_mu, expected.sum_mu)
-        np.testing.assert_array_equal(base.square_sum, expected.square_sum)
-        np.testing.assert_array_equal(base.n, expected.n)
-
-    def test_fgp_add_matches_python(self) -> None:
-        base = FastGaussianParam(
-            np.array([[1, 5], [3, 4]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        other = FastGaussianParam(
-            np.array([[2, 4], [7, 1]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        expected = FastGaussianParam(
-            np.array([[1, 5], [3, 4]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        expected = expected + other
-
-        got = fgp_add(base, other)
-
-        self.assertIs(got, base)
-        np.testing.assert_array_equal(base.sum_mu, expected.sum_mu)
-        np.testing.assert_array_equal(base.square_sum, expected.square_sum)
-        np.testing.assert_array_equal(base.n, expected.n)
-
-    def test_fgp_add_can_force_numpy_fallback(self) -> None:
-        base = FastGaussianParam(
-            np.array([[1, 5], [3, 4]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        other = FastGaussianParam(
-            np.array([[2, 4], [7, 1]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-
-        with mock.patch.dict(
-            "os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False
-        ):
-            with mock.patch.object(
-                fgp_ops,
-                "_load_compiled_module_result",
-                return_value=(None, "mock error"),
-            ):
-                fgp_ops._select_fgp_add_backend.cache_clear()
-                got = fgp_add(base, other)
-
-        expected = FastGaussianParam(
-            np.array([[1, 5], [3, 4]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        expected = expected + other
 
         self.assertIs(got, base)
         np.testing.assert_array_equal(base.sum_mu, expected.sum_mu)
