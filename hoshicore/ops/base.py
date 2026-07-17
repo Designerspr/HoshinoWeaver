@@ -341,21 +341,20 @@ class ParallelBaseOp(BaseOp):
                     break
                 task = asyncio.create_task(process_item(idx))
                 tasks.append(task)
-        finally:
-            # 无论正常或取消，确保所有子任务被清理
-            for t in tasks:
-                if not t.done():
-                    try:
-                        await asyncio.wait_for(t, timeout=5.0)
-                    except (asyncio.TimeoutError, Exception):
-                        t.cancel()
-
+            await asyncio.gather(*tasks)
             emit_event.set()
+            await emit_task
+        except BaseException:
+            # 只有真正的异常或外部取消才应立即取消子任务。
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
             if not emit_task.done():
-                try:
-                    await asyncio.wait_for(emit_task, timeout=5.0)
-                except (asyncio.TimeoutError, Exception):
-                    emit_task.cancel()
+                emit_task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(emit_task, return_exceptions=True)
+            raise
 
         if self.length is not None:
             self.tracker.close_bar(self.name)
