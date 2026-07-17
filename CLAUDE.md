@@ -99,7 +99,12 @@ Nodes reference operators by class name (e.g., `TrailStackerOp`) or by SubDAG fi
 
 ### Custom Op Layer (`hoshicore/_custom_op/` + `csrc/`)
 
-C++/pybind11 compiled extension (`_C`) with numpy fallback. Every wrapper in `_custom_op/ops/` follows `compiled → numpy` two-tier dispatch — the project always runs without compilation.
+C++/pybind11 compiled extension (`_C`) with CPU/NumPy fallbacks. Most wrappers in
+`_custom_op/ops/` select a compiled CUDA/OpenMP backend and then fall back to
+NumPy when that backend is explicitly unavailable. The CUDA-only
+`star_detect_fused_pixel_components` wrapper is an internal exception: its
+production fallback is Norma's OpenCV contour detector at the component layer,
+so the project still runs without compilation.
 
 Key env vars: `HNW_CUSTOM_OPS_FALLBACK` (`auto`|`numpy`), `HNW_CUSTOM_OPS_THREADS` (`auto`|int), `HNW_CUSTOM_OPS_DEBUG` (`0`|`1`).
 

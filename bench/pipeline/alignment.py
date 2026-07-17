@@ -27,9 +27,10 @@ from bench.common import (
 from bench.cpu.alignment import prepare_alignment_frames
 from hoshicore._custom_op import build_info as custom_ops_build_info
 from hoshicore._custom_op._dispatch import fallback_preference
+from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op.backend_registry import select_backend
 from hoshicore._custom_op.ops.detection import (
-    star_detect_full_connected_components_compiled,
+    star_detect_fused_pixel_components_compiled,
 )
 from hoshicore._custom_op.ops.remap import camera_model_remap_compiled
 from hoshicore.component.norma.alignment import (match_star_pairs,
@@ -297,7 +298,7 @@ def _backend_diagnostics() -> dict[str, Any]:
         ),
     }
     for logical_op in (
-        "star_detect_full_connected_components",
+        "star_detect_fused_pixel_components",
         "camera_model_remap",
     ):
         selection = select_backend(logical_op, preference)
@@ -322,14 +323,22 @@ def _probe_cuda_runtime() -> dict[str, Any]:
             func()
             probes[name] = {"status": "ok"}
         except Exception as exc:
+            unavailable = (
+                isinstance(exc, RuntimeError)
+                and (
+                    is_cuda_runtime_unavailable_error(exc)
+                    or "compiled cuda custom op backend is unavailable"
+                    in str(exc).lower()
+                )
+            )
             probes[name] = {
-                "status": "unavailable",
+                "status": "unavailable" if unavailable else "error",
                 "error": str(exc),
             }
 
     def probe_detection() -> None:
-        image = np.zeros((512, 512), dtype=np.float64)
-        star_detect_full_connected_components_compiled(
+        image = np.arange(512 * 512, dtype=np.float64).reshape(512, 512)
+        star_detect_fused_pixel_components_compiled(
             image,
             None,
             1.0,
@@ -356,7 +365,7 @@ def _probe_cuda_runtime() -> dict[str, Any]:
             dst_dist_coeffs=None,
         )
 
-    record("star_detect_full_connected_components_cuda", probe_detection)
+    record("star_detect_fused_pixel_components_cuda", probe_detection)
     record("camera_model_remap_cuda", probe_remap)
     return probes
 

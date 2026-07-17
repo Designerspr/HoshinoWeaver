@@ -28,6 +28,8 @@ class BackendCandidate:
     dtypes: tuple[str, ...] = ()
     fallback: str = "numpy"
     build_flag: str | None = None
+    memory_model: str | None = None
+    memory_model_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,12 +157,6 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         build_flag="cuda",
     ),
     BackendCandidate("sigma_clip_fused_chunk", "openmp_cpu", "sigma_clip_fused_chunk"),
-    # Experimental norma detector path; production fallback remains OpenCV contour.
-    BackendCandidate(
-        "star_detect_connected_components_candidates",
-        "openmp_cpu",
-        "star_detect_connected_components_candidates",
-    ),
     BackendCandidate(
         "wavelet_dec_rec",
         "cuda_host_io",
@@ -177,10 +173,11 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         build_flag="cuda",
     ),
     BackendCandidate(
-        "star_detect_full_connected_components",
+        "star_detect_fused_pixel_components",
         "cuda_host_io",
-        "star_detect_full_connected_components_core",
+        "star_detect_fused_pixel_components_cuda",
         build_flag="cuda",
+        memory_model="phase_estimator",
     ),
     BackendCandidate(
         "camera_model_remap",

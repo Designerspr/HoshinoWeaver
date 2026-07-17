@@ -8,7 +8,7 @@ from hoshicore._custom_op.ops.calibration import (
     calibration_divide,
     calibration_subtract,
 )
-from hoshicore._custom_op.ops.detection import star_detect_full_connected_components
+from hoshicore._custom_op.ops.detection import star_detect_fused_pixel_components
 from hoshicore._custom_op.ops.fgp import (
     fgp_accumulate,
     fgp_masked_mean_merge,
@@ -65,7 +65,7 @@ __all__ = [
     "sigma_clip_fused_masked_merge",
     "sigma_clip_fused_merge",
     "sigma_clip_iterative_chunk",
-    "star_detect_full_connected_components",
+    "star_detect_fused_pixel_components",
     "star_mask_dog",
     "star_shrink_detect_mask",
     "star_shrink_dog_process",

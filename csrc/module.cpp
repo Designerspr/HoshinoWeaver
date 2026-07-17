@@ -3,7 +3,6 @@
 #include "common/star_detect_capacity.h"
 #include "ops/cpu/alignment/alignment_ops.h"
 #include "ops/cpu/calibration/calibration_ops.h"
-#include "ops/cpu/detection/detection_ops.h"
 #include "ops/cpu/fgp/fgp_ops.h"
 #include "ops/cpu/filter/filter_ops.h"
 #include "ops/cpu/max/max_ops.h"
@@ -16,7 +15,7 @@
 
 #include <pybind11/pybind11.h>
 #if HNW_ENABLE_CUDA
-#include "ops/cuda/detection/star_detect_full_ops.h"
+#include "ops/cuda/detection/star_detect_fused_pixel_components_ops.h"
 #include "ops/cuda/fgp/huber_weighted_chunk_ops.h"
 #include "ops/cuda/remap/camera_model_remap_fused_ops.h"
 #include "ops/cuda/sigma_clip/sigma_clip_fused_chunk_ops.h"
@@ -42,7 +41,6 @@ PYBIND11_MODULE(_C, m) {
     bind_backend_info(m);
     bind_alignment_ops(m);
     bind_calibration_ops(m);
-    bind_detection_ops(m);
     bind_filter_ops(m);
     bind_fgp_ops(m);
     bind_max_ops(m);
@@ -58,7 +56,7 @@ PYBIND11_MODULE(_C, m) {
     bind_sigma_clip_fused_chunk_cuda_ops(m);
     bind_star_mask_cuda_ops(m);
     bind_star_shrink_process_cuda_ops(m);
-    bind_star_detect_full_ops(m);
+    bind_star_detect_fused_pixel_components_ops(m);
     bind_wavelet_cuda_ops(m);
 #endif
 }

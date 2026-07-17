@@ -48,7 +48,6 @@ from hoshicore._custom_op import build_info as custom_ops_build_info
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 import hoshicore._custom_op.ops.alignment as alignment_ops
 import hoshicore._custom_op.ops.calibration as calibration_ops
-import hoshicore._custom_op.ops.detection as detection_ops
 import hoshicore._custom_op.ops.fgp as fgp_ops
 import hoshicore._custom_op.ops.filter as filter_ops
 import hoshicore._custom_op.ops.max as max_ops
@@ -165,7 +164,6 @@ CASE_NAMES = [
     "wavelet_dec_rec_core_cuda",
     "wavelet_dec_rec_numpy",
     "wavelet_dec_rec_auto",
-    "star_detect_connected_components_compiled",
     "sigma_clip_chunk_numpy",
     "sigma_clip_chunk_compiled",
     "sigma_clip_iterative_chunk_numpy",
@@ -751,37 +749,6 @@ def bench_median_filter_2d_backend(
     _ = median_filter(image, ksize)
 
 
-def build_cc_candidate_input(
-    height: int,
-    width: int,
-    *,
-    seed: int,
-    components: int = 1200,
-) -> tuple[np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(seed)
-    image = rng.normal(scale=0.01, size=(height, width)).astype(np.float64)
-    bw = np.zeros((height, width), dtype=np.uint8)
-    margin = 8
-    max_y = max(margin + 1, height - margin)
-    max_x = max(margin + 1, width - margin)
-    for _ in range(components):
-        cy = int(rng.integers(margin, max_y))
-        cx = int(rng.integers(margin, max_x))
-        radius = int(rng.integers(2, 5))
-        value = float(rng.uniform(1.0, 10.0))
-        cv2.circle(bw, (cx, cy), radius, 255, -1)
-        cv2.circle(image, (cx, cy), radius, value, -1)
-    return image, bw
-
-
-def bench_star_detect_connected_components_backend(
-    image: np.ndarray,
-    bw: np.ndarray,
-) -> None:
-    _ = detection_ops.star_detect_connected_components_candidates_compiled(
-        image, bw)
-
-
 def build_alignment_match_inputs(
     n_points: int,
     *,
@@ -1053,7 +1020,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     alignment_inputs = None
     alignment_features = None
     wavelet_input = None
-    cc_candidate_input = None
     sc_chunk_stack = None
     calibration_subtract_ref = None
     calibration_divide_ref = None
@@ -1088,16 +1054,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if wavelet_input is None:
             wavelet_input = build_wavelet_input(frames[0])
         return wavelet_input
-
-    def get_cc_candidate_input():
-        nonlocal cc_candidate_input
-        if cc_candidate_input is None:
-            cc_candidate_input = build_cc_candidate_input(
-                args.height,
-                args.width,
-                seed=args.seed,
-            )
-        return cc_candidate_input
 
     def get_sc_chunk_stack():
         nonlocal sc_chunk_stack
@@ -1384,10 +1340,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             get_wavelet_input(),
             args.wavelet_resize_factor,
             backend="auto",
-        ),
-        "star_detect_connected_components_compiled": lambda: bench_star_detect_connected_components_backend(
-            get_cc_candidate_input()[0],
-            get_cc_candidate_input()[1],
         ),
         "sigma_clip_chunk_numpy": lambda: bench_sigma_clip_chunk_backend(
             get_sc_chunk_stack()[0],
