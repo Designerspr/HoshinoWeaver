@@ -1,13 +1,13 @@
 #include "detection_ops.h"
 
+#include <pybind11/numpy.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#include <pybind11/numpy.h>
 
 namespace {
 
@@ -47,22 +47,19 @@ void union_labels(std::vector<int32_t>& parent, const int32_t a, const int32_t b
     }
 }
 
-void validate_inputs(const py::buffer_info& image_info,
-                     const py::buffer_info& bw_info) {
+void validate_inputs(const py::buffer_info& image_info, const py::buffer_info& bw_info) {
     if (image_info.ndim != 2) {
         throw std::invalid_argument(
             "star_detect_connected_components_candidates: image must be 2D");
     }
     if (bw_info.ndim != 2) {
-        throw std::invalid_argument(
-            "star_detect_connected_components_candidates: bw must be 2D");
+        throw std::invalid_argument("star_detect_connected_components_candidates: bw must be 2D");
     }
     if (image_info.shape[0] <= 0 || image_info.shape[1] <= 0) {
         throw std::invalid_argument(
             "star_detect_connected_components_candidates: image height and width must be positive");
     }
-    if (image_info.shape[0] != bw_info.shape[0] ||
-        image_info.shape[1] != bw_info.shape[1]) {
+    if (image_info.shape[0] != bw_info.shape[0] || image_info.shape[1] != bw_info.shape[1]) {
         throw std::invalid_argument(
             "star_detect_connected_components_candidates: image and bw shapes must match");
     }
@@ -104,15 +101,13 @@ py::tuple star_detect_connected_components_candidates_impl(
                     neighbors[neighbor_count++] = labels[static_cast<size_t>(idx - 1)];
                 }
                 if (y > 0 && x > 0) {
-                    neighbors[neighbor_count++] =
-                        labels[static_cast<size_t>(idx - w - 1)];
+                    neighbors[neighbor_count++] = labels[static_cast<size_t>(idx - w - 1)];
                 }
                 if (y > 0) {
                     neighbors[neighbor_count++] = labels[static_cast<size_t>(idx - w)];
                 }
                 if (y > 0 && x + 1 < w) {
-                    neighbors[neighbor_count++] =
-                        labels[static_cast<size_t>(idx - w + 1)];
+                    neighbors[neighbor_count++] = labels[static_cast<size_t>(idx - w + 1)];
                 }
 
                 for (int n = 0; n < neighbor_count; ++n) {
@@ -206,14 +201,12 @@ py::tuple star_detect_connected_components_candidates_impl(
         const double cov_xy = item.sum_xy * inv_count - cx * cy;
         const double trace = cov_xx + cov_yy;
         const double det_term =
-            std::sqrt(std::max(0.0, (cov_xx - cov_yy) * (cov_xx - cov_yy) +
-                                        4.0 * cov_xy * cov_xy));
+            std::sqrt(std::max(0.0, (cov_xx - cov_yy) * (cov_xx - cov_yy) + 4.0 * cov_xy * cov_xy));
         const double lambda_max = 0.5 * (trace + det_term);
         const double lambda_min = 0.5 * (trace - det_term);
         double eccentricity = 0.0;
         if (lambda_max > 1e-12) {
-            eccentricity =
-                std::sqrt(std::max(0.0, 1.0 - lambda_min / lambda_max));
+            eccentricity = std::sqrt(std::max(0.0, 1.0 - lambda_min / lambda_max));
         }
 
         positions_ptr[out_idx * 2] = cx;
@@ -226,12 +219,10 @@ py::tuple star_detect_connected_components_candidates_impl(
     return py::make_tuple(positions, areas, intensities, eccentricities);
 }
 
-}  // namespace
+} // namespace
 
 void bind_detection_ops(py::module_& m) {
     m.def("star_detect_connected_components_candidates",
-          &star_detect_connected_components_candidates_impl,
-          py::arg("image"),
-          py::arg("bw"),
+          &star_detect_connected_components_candidates_impl, py::arg("image"), py::arg("bw"),
           "Extract connected-component star candidates from a binary detection mask.");
 }

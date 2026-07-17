@@ -17,16 +17,13 @@
 
 namespace hnw::cuda {
 
-constexpr size_t DEFAULT_HOST_IO_CACHE_PER_THREAD_LIMIT_BYTES =
-    512ULL * 1024ULL * 1024ULL;
-constexpr size_t DEFAULT_HOST_IO_CACHE_PROCESS_LIMIT_BYTES =
-    1024ULL * 1024ULL * 1024ULL;
+constexpr size_t DEFAULT_HOST_IO_CACHE_PER_THREAD_LIMIT_BYTES = 512ULL * 1024ULL * 1024ULL;
+constexpr size_t DEFAULT_HOST_IO_CACHE_PROCESS_LIMIT_BYTES = 1024ULL * 1024ULL * 1024ULL;
 
 inline std::atomic<size_t> process_device_cache_bytes{0};
 inline std::atomic<size_t> process_pinned_cache_bytes{0};
 
-inline size_t parse_cache_limit_bytes(const char* environment_name,
-                                      const size_t default_bytes) {
+inline size_t parse_cache_limit_bytes(const char* environment_name, const size_t default_bytes) {
     const char* raw = std::getenv(environment_name);
     if (raw == nullptr || *raw == '\0' || *raw == '-') {
         return default_bytes;
@@ -46,23 +43,19 @@ inline size_t parse_cache_limit_bytes(const char* environment_name,
 
 inline size_t host_io_cache_per_thread_limit_bytes() {
     static const size_t limit = parse_cache_limit_bytes(
-        "HNW_CUDA_HOST_IO_CACHE_PER_THREAD_MB",
-        DEFAULT_HOST_IO_CACHE_PER_THREAD_LIMIT_BYTES);
+        "HNW_CUDA_HOST_IO_CACHE_PER_THREAD_MB", DEFAULT_HOST_IO_CACHE_PER_THREAD_LIMIT_BYTES);
     return limit;
 }
 
 inline size_t host_io_cache_process_limit_bytes() {
-    static const size_t limit = parse_cache_limit_bytes(
-        "HNW_CUDA_HOST_IO_CACHE_MB",
-        DEFAULT_HOST_IO_CACHE_PROCESS_LIMIT_BYTES);
+    static const size_t limit = parse_cache_limit_bytes("HNW_CUDA_HOST_IO_CACHE_MB",
+                                                        DEFAULT_HOST_IO_CACHE_PROCESS_LIMIT_BYTES);
     return limit;
 }
 
 inline size_t process_host_io_cache_bytes() {
-    const size_t device_bytes =
-        process_device_cache_bytes.load(std::memory_order_relaxed);
-    const size_t pinned_bytes =
-        process_pinned_cache_bytes.load(std::memory_order_relaxed);
+    const size_t device_bytes = process_device_cache_bytes.load(std::memory_order_relaxed);
+    const size_t pinned_bytes = process_pinned_cache_bytes.load(std::memory_order_relaxed);
     if (device_bytes > std::numeric_limits<size_t>::max() - pinned_bytes) {
         return std::numeric_limits<size_t>::max();
     }
@@ -95,9 +88,7 @@ public:
         return *this;
     }
 
-    ~DeviceBuffer() {
-        reset();
-    }
+    ~DeviceBuffer() { reset(); }
 
     void* ensure(const size_t required_bytes, const char* context) {
         int current_device = -1;
@@ -137,9 +128,7 @@ public:
         device_ = -1;
     }
 
-    size_t capacity() const {
-        return capacity_;
-    }
+    size_t capacity() const { return capacity_; }
 
 private:
     void* ptr_ = nullptr;
@@ -170,9 +159,7 @@ public:
         return *this;
     }
 
-    ~PinnedHostBuffer() {
-        reset();
-    }
+    ~PinnedHostBuffer() { reset(); }
 
     void* ensure(const size_t required_bytes, const char* context) {
         if (required_bytes <= capacity_) {
@@ -197,9 +184,7 @@ public:
         capacity_ = 0;
     }
 
-    size_t capacity() const {
-        return capacity_;
-    }
+    size_t capacity() const { return capacity_; }
 
 private:
     void* ptr_ = nullptr;
@@ -212,9 +197,7 @@ public:
     CudaStream(const CudaStream&) = delete;
     CudaStream& operator=(const CudaStream&) = delete;
 
-    ~CudaStream() {
-        reset();
-    }
+    ~CudaStream() { reset(); }
 
     cudaStream_t ensure(const char* context) {
         int current_device = -1;
@@ -223,8 +206,7 @@ public:
             reset();
         }
         if (stream_ == nullptr) {
-            throw_if_failed(
-                cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), context);
+            throw_if_failed(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), context);
             device_ = current_device;
         }
         return stream_;
@@ -265,8 +247,7 @@ public:
     HostIoWorkspaceSession(const HostIoWorkspaceSession&) = delete;
     HostIoWorkspaceSession& operator=(const HostIoWorkspaceSession&) = delete;
     HostIoWorkspaceSession(HostIoWorkspaceSession&& other) noexcept
-        : workspace_(other.workspace_),
-          next_device_slot_(other.next_device_slot_),
+        : workspace_(other.workspace_), next_device_slot_(other.next_device_slot_),
           next_pinned_slot_(other.next_pinned_slot_) {
         other.workspace_ = nullptr;
     }
@@ -279,8 +260,7 @@ public:
 
 private:
     friend class HostIoWorkspace;
-    explicit HostIoWorkspaceSession(HostIoWorkspace* workspace)
-        : workspace_(workspace) {}
+    explicit HostIoWorkspaceSession(HostIoWorkspace* workspace) : workspace_(workspace) {}
 
     HostIoWorkspace* workspace_ = nullptr;
     size_t next_device_slot_ = 0;
@@ -338,18 +318,14 @@ public:
 private:
     friend class HostIoWorkspaceSession;
 
-    void* device_buffer(const size_t slot,
-                        const size_t required_bytes,
-                        const char* context) {
+    void* device_buffer(const size_t slot, const size_t required_bytes, const char* context) {
         if (slot >= device_buffers_.size()) {
             device_buffers_.resize(slot + 1);
         }
         return device_buffers_[slot].ensure(required_bytes, context);
     }
 
-    void* pinned_buffer(const size_t slot,
-                        const size_t required_bytes,
-                        const char* context) {
+    void* pinned_buffer(const size_t slot, const size_t required_bytes, const char* context) {
         if (slot >= pinned_buffers_.size()) {
             pinned_buffers_.resize(slot + 1);
         }
@@ -383,15 +359,13 @@ inline HostIoWorkspaceSession::~HostIoWorkspaceSession() {
     }
 }
 
-inline void* HostIoWorkspaceSession::device_buffer(
-    const size_t required_bytes,
-    const char* context) {
+inline void* HostIoWorkspaceSession::device_buffer(const size_t required_bytes,
+                                                   const char* context) {
     return workspace_->device_buffer(next_device_slot_++, required_bytes, context);
 }
 
-inline void* HostIoWorkspaceSession::pinned_buffer(
-    const size_t required_bytes,
-    const char* context) {
+inline void* HostIoWorkspaceSession::pinned_buffer(const size_t required_bytes,
+                                                   const char* context) {
     return workspace_->pinned_buffer(next_pinned_slot_++, required_bytes, context);
 }
 
@@ -416,4 +390,4 @@ inline void clear_current_thread_host_io_workspace() noexcept {
     host_io_workspace.clear();
 }
 
-}  // namespace hnw::cuda
+} // namespace hnw::cuda

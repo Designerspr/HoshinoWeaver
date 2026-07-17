@@ -2,6 +2,8 @@
 
 #include "common/cpu_compat.h"
 
+#include <pybind11/numpy.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -11,12 +13,9 @@
 #include <type_traits>
 #include <vector>
 
-#include <pybind11/numpy.h>
-
 namespace {
 
-std::array<float, 5> parse_dist_coeffs(const py::object& dist_obj,
-                                       const char* name,
+std::array<float, 5> parse_dist_coeffs(const py::object& dist_obj, const char* name,
                                        bool* has_dist) {
     std::array<float, 5> coeffs = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     *has_dist = false;
@@ -26,17 +25,15 @@ std::array<float, 5> parse_dist_coeffs(const py::object& dist_obj,
 
     auto dist = dist_obj.cast<py::array_t<float, py::array::c_style | py::array::forcecast>>();
     if (dist.ndim() != 1 || dist.shape(0) != 5) {
-        throw std::invalid_argument(
-            std::string("camera_model_remap_cpu: ") + name +
-            " must be None or a 5-element array [k1, k2, p1, p2, k3]");
+        throw std::invalid_argument(std::string("camera_model_remap_cpu: ") + name +
+                                    " must be None or a 5-element array [k1, k2, p1, p2, k3]");
     }
 
     const float* ptr = dist.data();
     for (ssize_t idx = 0; idx < 5; ++idx) {
         if (!std::isfinite(ptr[idx])) {
-            throw std::invalid_argument(
-                std::string("camera_model_remap_cpu: ") + name +
-                " must contain only finite values");
+            throw std::invalid_argument(std::string("camera_model_remap_cpu: ") + name +
+                                        " must contain only finite values");
         }
         coeffs[static_cast<size_t>(idx)] = ptr[idx];
         *has_dist = *has_dist || ptr[idx] != 0.0f;
@@ -44,17 +41,14 @@ std::array<float, 5> parse_dist_coeffs(const py::object& dist_obj,
     return coeffs;
 }
 
-void validate_scalar_finite(const float value,
-                            const char* name,
-                            const bool non_zero = false) {
+void validate_scalar_finite(const float value, const char* name, const bool non_zero = false) {
     if (!std::isfinite(value)) {
-        throw std::invalid_argument(
-            std::string("camera_model_remap_cpu: ") + name +
-            " must contain only finite values");
+        throw std::invalid_argument(std::string("camera_model_remap_cpu: ") + name +
+                                    " must contain only finite values");
     }
     if (non_zero && value == 0.0f) {
-        throw std::invalid_argument(
-            std::string("camera_model_remap_cpu: ") + name + " must be non-zero");
+        throw std::invalid_argument(std::string("camera_model_remap_cpu: ") + name +
+                                    " must be non-zero");
     }
 }
 
@@ -71,13 +65,12 @@ void validate_rotation_finite(
 
 void validate_int_bounds(const ssize_t value, const char* name) {
     if (value > std::numeric_limits<int>::max()) {
-        throw std::invalid_argument(
-            std::string("camera_model_remap_cpu: ") + name + " is too large");
+        throw std::invalid_argument(std::string("camera_model_remap_cpu: ") + name +
+                                    " is too large");
     }
 }
 
-template <typename T>
-inline T cast_output(float value) {
+template <typename T> inline T cast_output(float value) {
     if constexpr (std::is_same_v<T, float>) {
         return value;
     } else if constexpr (std::is_same_v<T, unsigned char>) {
@@ -90,38 +83,21 @@ inline T cast_output(float value) {
     }
 }
 
-inline ssize_t source_offset(const int y,
-                             const int x,
-                             const int src_width,
-                             const int channels,
+inline ssize_t source_offset(const int y, const int x, const int src_width, const int channels,
                              const int c) {
-    return (static_cast<ssize_t>(y) * static_cast<ssize_t>(src_width) +
-            static_cast<ssize_t>(x)) *
+    return (static_cast<ssize_t>(y) * static_cast<ssize_t>(src_width) + static_cast<ssize_t>(x)) *
                static_cast<ssize_t>(channels) +
            static_cast<ssize_t>(c);
 }
 
 template <typename T>
 void camera_model_remap_cpu_kernel(
-    const T* HNW_RESTRICT image,
-    T* HNW_RESTRICT out,
-    const int src_height,
-    const int src_width,
-    const int channels,
-    const int out_height,
-    const int out_width,
-    const float fx_src,
-    const float fy_src,
-    const float cx_src,
-    const float cy_src,
-    const float fx_dst,
-    const float fy_dst,
-    const float cx_dst,
-    const float cy_dst,
-    const float* HNW_RESTRICT rotation_dst_to_src,
-    const bool src_has_dist,
-    const float* HNW_RESTRICT src_dist_coeffs,
-    const bool dst_has_dist,
+    const T* HNW_RESTRICT image, T* HNW_RESTRICT out, const int src_height, const int src_width,
+    const int channels, const int out_height, const int out_width, const float fx_src,
+    const float fy_src, const float cx_src, const float cy_src, const float fx_dst,
+    const float fy_dst, const float cx_dst, const float cy_dst,
+    const float* HNW_RESTRICT rotation_dst_to_src, const bool src_has_dist,
+    const float* HNW_RESTRICT src_dist_coeffs, const bool dst_has_dist,
     const float* HNW_RESTRICT dst_dist_coeffs) {
     const float r00 = rotation_dst_to_src[0];
     const float r01 = rotation_dst_to_src[1];
@@ -144,10 +120,8 @@ void camera_model_remap_cpu_kernel(
     const float dst_k3 = dst_dist_coeffs[4];
     const float inv_fx_dst = 1.0f / fx_dst;
     const float inv_fy_dst = 1.0f / fy_dst;
-    const ssize_t src_row_stride =
-        static_cast<ssize_t>(src_width) * static_cast<ssize_t>(channels);
-    const ssize_t out_row_stride =
-        static_cast<ssize_t>(out_width) * static_cast<ssize_t>(channels);
+    const ssize_t src_row_stride = static_cast<ssize_t>(src_width) * static_cast<ssize_t>(channels);
+    const ssize_t out_row_stride = static_cast<ssize_t>(out_width) * static_cast<ssize_t>(channels);
 
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
@@ -166,10 +140,8 @@ void camera_model_remap_cpu_kernel(
                     const float r6 = r4 * r2;
                     const float radial = 1.0f + dst_k1 * r2 + dst_k2 * r4 + dst_k3 * r6;
                     const float xy2 = 2.0f * x * y;
-                    const float delta_x =
-                        dst_p1 * xy2 + dst_p2 * (r2 + 2.0f * x * x);
-                    const float delta_y =
-                        dst_p1 * (r2 + 2.0f * y * y) + dst_p2 * xy2;
+                    const float delta_x = dst_p1 * xy2 + dst_p2 * (r2 + 2.0f * x * x);
+                    const float delta_y = dst_p1 * (r2 + 2.0f * y * y) + dst_p2 * xy2;
                     x = (xd - delta_x) / radial;
                     y = (yd - delta_y) / radial;
                 }
@@ -196,13 +168,10 @@ void camera_model_remap_cpu_kernel(
                 const float r6 = r4 * r2;
                 const float radial = 1.0f + src_k1 * r2 + src_k2 * r4 + src_k3 * r6;
                 const float xy2 = 2.0f * src_x_norm * src_y_norm;
-                const float x_dist = src_x_norm * radial +
-                                     src_p1 * xy2 +
+                const float x_dist = src_x_norm * radial + src_p1 * xy2 +
                                      src_p2 * (r2 + 2.0f * src_x_norm * src_x_norm);
-                const float y_dist =
-                    src_y_norm * radial +
-                    src_p1 * (r2 + 2.0f * src_y_norm * src_y_norm) +
-                    src_p2 * xy2;
+                const float y_dist = src_y_norm * radial +
+                                     src_p1 * (r2 + 2.0f * src_y_norm * src_y_norm) + src_p2 * xy2;
                 src_x_norm = x_dist;
                 src_y_norm = y_dist;
             }
@@ -230,18 +199,16 @@ void camera_model_remap_cpu_kernel(
             const float w11 = dx * dy;
 
             if (x0 >= 0 && x1 < src_width && y0 >= 0 && y1 < src_height) {
-                const ssize_t base00 =
-                    static_cast<ssize_t>(y0) * src_row_stride +
-                    static_cast<ssize_t>(x0) * static_cast<ssize_t>(channels);
+                const ssize_t base00 = static_cast<ssize_t>(y0) * src_row_stride +
+                                       static_cast<ssize_t>(x0) * static_cast<ssize_t>(channels);
                 const ssize_t base01 = base00 + static_cast<ssize_t>(channels);
                 const ssize_t base10 = base00 + src_row_stride;
                 const ssize_t base11 = base10 + static_cast<ssize_t>(channels);
                 for (int c = 0; c < channels; ++c) {
-                    const float accum =
-                        w00 * static_cast<float>(image[base00 + c]) +
-                        w01 * static_cast<float>(image[base01 + c]) +
-                        w10 * static_cast<float>(image[base10 + c]) +
-                        w11 * static_cast<float>(image[base11 + c]);
+                    const float accum = w00 * static_cast<float>(image[base00 + c]) +
+                                        w01 * static_cast<float>(image[base01 + c]) +
+                                        w10 * static_cast<float>(image[base10 + c]) +
+                                        w11 * static_cast<float>(image[base11 + c]);
                     out[out_base + c] = cast_output<T>(accum);
                 }
                 continue;
@@ -251,19 +218,19 @@ void camera_model_remap_cpu_kernel(
                 float accum = 0.0f;
                 if (x0 >= 0 && x0 < src_width && y0 >= 0 && y0 < src_height) {
                     accum += w00 * static_cast<float>(
-                        image[source_offset(y0, x0, src_width, channels, c)]);
+                                       image[source_offset(y0, x0, src_width, channels, c)]);
                 }
                 if (x1 >= 0 && x1 < src_width && y0 >= 0 && y0 < src_height) {
                     accum += w01 * static_cast<float>(
-                        image[source_offset(y0, x1, src_width, channels, c)]);
+                                       image[source_offset(y0, x1, src_width, channels, c)]);
                 }
                 if (x0 >= 0 && x0 < src_width && y1 >= 0 && y1 < src_height) {
                     accum += w10 * static_cast<float>(
-                        image[source_offset(y1, x0, src_width, channels, c)]);
+                                       image[source_offset(y1, x0, src_width, channels, c)]);
                 }
                 if (x1 >= 0 && x1 < src_width && y1 >= 0 && y1 < src_height) {
                     accum += w11 * static_cast<float>(
-                        image[source_offset(y1, x1, src_width, channels, c)]);
+                                       image[source_offset(y1, x1, src_width, channels, c)]);
                 }
                 out[out_base + c] = cast_output<T>(accum);
             }
@@ -274,20 +241,11 @@ void camera_model_remap_cpu_kernel(
 template <typename T>
 py::array_t<T> camera_model_remap_cpu_impl(
     const py::array_t<T, py::array::c_style | py::array::forcecast>& image,
-    const ssize_t out_height,
-    const ssize_t out_width,
-    const float fx_src,
-    const float fy_src,
-    const float cx_src,
-    const float cy_src,
-    const float fx_dst,
-    const float fy_dst,
-    const float cx_dst,
-    const float cy_dst,
-    const py::array_t<float, py::array::c_style | py::array::forcecast>&
-        rotation_dst_to_src,
-    const py::object& src_dist_coeffs_obj,
-    const py::object& dst_dist_coeffs_obj) {
+    const ssize_t out_height, const ssize_t out_width, const float fx_src, const float fy_src,
+    const float cx_src, const float cy_src, const float fx_dst, const float fy_dst,
+    const float cx_dst, const float cy_dst,
+    const py::array_t<float, py::array::c_style | py::array::forcecast>& rotation_dst_to_src,
+    const py::object& src_dist_coeffs_obj, const py::object& dst_dist_coeffs_obj) {
     if (out_height <= 0 || out_width <= 0) {
         throw std::invalid_argument(
             "camera_model_remap_cpu: output height and width must be positive");
@@ -301,8 +259,7 @@ py::array_t<T> camera_model_remap_cpu_impl(
             "camera_model_remap_cpu: image height and width must be positive");
     }
     if (image.ndim() == 3 && image.shape(2) <= 0) {
-        throw std::invalid_argument(
-            "camera_model_remap_cpu: image channels must be positive");
+        throw std::invalid_argument("camera_model_remap_cpu: image channels must be positive");
     }
     validate_int_bounds(out_height, "out_height");
     validate_int_bounds(out_width, "out_width");
@@ -312,8 +269,7 @@ py::array_t<T> camera_model_remap_cpu_impl(
         validate_int_bounds(image.shape(2), "image channels");
     }
     if (out_height > std::numeric_limits<int>::max() / out_width) {
-        throw std::invalid_argument(
-            "camera_model_remap_cpu: output image is too large");
+        throw std::invalid_argument("camera_model_remap_cpu: output image is too large");
     }
     if (rotation_dst_to_src.ndim() != 2 || rotation_dst_to_src.shape(0) != 3 ||
         rotation_dst_to_src.shape(1) != 3) {
@@ -352,119 +308,50 @@ py::array_t<T> camera_model_remap_cpu_impl(
     {
         py::gil_scoped_release release;
         camera_model_remap_cpu_kernel(
-            static_cast<const T*>(image_info.ptr),
-            static_cast<T*>(out_info.ptr),
-            src_height,
-            src_width,
-            channels,
-            static_cast<int>(out_height),
-            static_cast<int>(out_width),
-            fx_src,
-            fy_src,
-            cx_src,
-            cy_src,
-            fx_dst,
-            fy_dst,
-            cx_dst,
-            cy_dst,
-            static_cast<const float*>(rotation_info.ptr),
-            src_has_dist,
-            src_dist_coeffs.data(),
-            dst_has_dist,
-            dst_dist_coeffs.data());
+            static_cast<const T*>(image_info.ptr), static_cast<T*>(out_info.ptr), src_height,
+            src_width, channels, static_cast<int>(out_height), static_cast<int>(out_width), fx_src,
+            fy_src, cx_src, cy_src, fx_dst, fy_dst, cx_dst, cy_dst,
+            static_cast<const float*>(rotation_info.ptr), src_has_dist, src_dist_coeffs.data(),
+            dst_has_dist, dst_dist_coeffs.data());
     }
     return out;
 }
 
 py::array camera_model_remap_cpu_dispatch(
-    const py::array& image,
-    const ssize_t out_height,
-    const ssize_t out_width,
-    const float fx_src,
-    const float fy_src,
-    const float cx_src,
-    const float cy_src,
-    const float fx_dst,
-    const float fy_dst,
-    const float cx_dst,
-    const float cy_dst,
-    const py::array_t<float, py::array::c_style | py::array::forcecast>&
-        rotation_dst_to_src,
-    const py::object& src_dist_coeffs,
-    const py::object& dst_dist_coeffs) {
+    const py::array& image, const ssize_t out_height, const ssize_t out_width, const float fx_src,
+    const float fy_src, const float cx_src, const float cy_src, const float fx_dst,
+    const float fy_dst, const float cx_dst, const float cy_dst,
+    const py::array_t<float, py::array::c_style | py::array::forcecast>& rotation_dst_to_src,
+    const py::object& src_dist_coeffs, const py::object& dst_dist_coeffs) {
     if (py::isinstance<py::array_t<unsigned char>>(image)) {
         return camera_model_remap_cpu_impl<unsigned char>(
-            image.cast<py::array_t<unsigned char>>(),
-            out_height,
-            out_width,
-            fx_src,
-            fy_src,
-            cx_src,
-            cy_src,
-            fx_dst,
-            fy_dst,
-            cx_dst,
-            cy_dst,
-            rotation_dst_to_src,
-            src_dist_coeffs,
+            image.cast<py::array_t<unsigned char>>(), out_height, out_width, fx_src, fy_src, cx_src,
+            cy_src, fx_dst, fy_dst, cx_dst, cy_dst, rotation_dst_to_src, src_dist_coeffs,
             dst_dist_coeffs);
     }
     if (py::isinstance<py::array_t<unsigned short>>(image)) {
         return camera_model_remap_cpu_impl<unsigned short>(
-            image.cast<py::array_t<unsigned short>>(),
-            out_height,
-            out_width,
-            fx_src,
-            fy_src,
-            cx_src,
-            cy_src,
-            fx_dst,
-            fy_dst,
-            cx_dst,
-            cy_dst,
-            rotation_dst_to_src,
-            src_dist_coeffs,
+            image.cast<py::array_t<unsigned short>>(), out_height, out_width, fx_src, fy_src,
+            cx_src, cy_src, fx_dst, fy_dst, cx_dst, cy_dst, rotation_dst_to_src, src_dist_coeffs,
             dst_dist_coeffs);
     }
     if (py::isinstance<py::array_t<float>>(image)) {
         return camera_model_remap_cpu_impl<float>(
-            image.cast<py::array_t<float>>(),
-            out_height,
-            out_width,
-            fx_src,
-            fy_src,
-            cx_src,
-            cy_src,
-            fx_dst,
-            fy_dst,
-            cx_dst,
-            cy_dst,
-            rotation_dst_to_src,
-            src_dist_coeffs,
-            dst_dist_coeffs);
+            image.cast<py::array_t<float>>(), out_height, out_width, fx_src, fy_src, cx_src, cy_src,
+            fx_dst, fy_dst, cx_dst, cy_dst, rotation_dst_to_src, src_dist_coeffs, dst_dist_coeffs);
     }
     throw std::invalid_argument(
         "camera_model_remap_cpu: unsupported image dtype; expected uint8/uint16/float32");
 }
 
-}  // namespace
+} // namespace
 
 void bind_remap_ops(py::module_& m) {
-    m.def("camera_model_remap_cpu",
-          &camera_model_remap_cpu_dispatch,
-          py::arg("image"),
-          py::arg("out_height"),
-          py::arg("out_width"),
-          py::arg("fx_src"),
-          py::arg("fy_src"),
-          py::arg("cx_src"),
-          py::arg("cy_src"),
-          py::arg("fx_dst"),
-          py::arg("fy_dst"),
-          py::arg("cx_dst"),
-          py::arg("cy_dst"),
-          py::arg("rotation_dst_to_src"),
-          py::arg("src_dist_coeffs") = py::none(),
-          py::arg("dst_dist_coeffs") = py::none(),
-          "Apply a camera-model remap with fused grid generation and bilinear sampling using OpenMP.");
+    m.def("camera_model_remap_cpu", &camera_model_remap_cpu_dispatch, py::arg("image"),
+          py::arg("out_height"), py::arg("out_width"), py::arg("fx_src"), py::arg("fy_src"),
+          py::arg("cx_src"), py::arg("cy_src"), py::arg("fx_dst"), py::arg("fy_dst"),
+          py::arg("cx_dst"), py::arg("cy_dst"), py::arg("rotation_dst_to_src"),
+          py::arg("src_dist_coeffs") = py::none(), py::arg("dst_dist_coeffs") = py::none(),
+          "Apply a camera-model remap with fused grid generation and bilinear sampling using "
+          "OpenMP.");
 }

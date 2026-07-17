@@ -11,4 +11,4 @@ public:
         : std::runtime_error(message) {}
 };
 
-}  // namespace hnw
+} // namespace hnw

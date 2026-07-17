@@ -1,5 +1,4 @@
 #include "common/backend_info.h"
-
 #include "common/compat.h"
 #include "common/cuda_host_io_workspace.cuh"
 #include "common/cuda_runtime_utils.cuh"
@@ -24,14 +23,13 @@ py::dict cuda_error_info(const cudaError_t error) {
     info["available"] = false;
     info["status"] = "error";
     info["reason_code"] = "cuda_runtime_error";
-    info["category"] =
-        error == cudaErrorMemoryAllocation ? "resource" : "runtime";
+    info["category"] = error == cudaErrorMemoryAllocation ? "resource" : "runtime";
     info["error_code"] = static_cast<int>(error);
     info["reason"] = cudaGetErrorString(error);
     return info;
 }
 
-}  // namespace
+} // namespace
 
 py::dict cuda_memory_info_cuda_dict() {
     py::dict info;
@@ -67,18 +65,18 @@ py::dict cuda_memory_info_cuda_dict() {
 py::dict cuda_host_io_cache_info_cuda_dict() {
     py::dict info;
     info["available"] = true;
-    info["current_thread_device_bytes"] = static_cast<unsigned long long>(
-        hnw::cuda::host_io_workspace.retained_device_bytes());
-    info["current_thread_pinned_bytes"] = static_cast<unsigned long long>(
-        hnw::cuda::host_io_workspace.retained_pinned_bytes());
+    info["current_thread_device_bytes"] =
+        static_cast<unsigned long long>(hnw::cuda::host_io_workspace.retained_device_bytes());
+    info["current_thread_pinned_bytes"] =
+        static_cast<unsigned long long>(hnw::cuda::host_io_workspace.retained_pinned_bytes());
     info["process_device_bytes"] = static_cast<unsigned long long>(
         hnw::cuda::process_device_cache_bytes.load(std::memory_order_relaxed));
     info["process_pinned_bytes"] = static_cast<unsigned long long>(
         hnw::cuda::process_pinned_cache_bytes.load(std::memory_order_relaxed));
-    info["per_thread_limit_bytes"] = static_cast<unsigned long long>(
-        hnw::cuda::host_io_cache_per_thread_limit_bytes());
-    info["process_limit_bytes"] = static_cast<unsigned long long>(
-        hnw::cuda::host_io_cache_process_limit_bytes());
+    info["per_thread_limit_bytes"] =
+        static_cast<unsigned long long>(hnw::cuda::host_io_cache_per_thread_limit_bytes());
+    info["process_limit_bytes"] =
+        static_cast<unsigned long long>(hnw::cuda::host_io_cache_process_limit_bytes());
     return info;
 }
 

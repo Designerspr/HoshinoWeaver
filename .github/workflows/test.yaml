@@ -7,6 +7,23 @@ on:
     branches: [main]
 
 jobs:
+  format-cpp:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install clang-format
+        run: python -m pip install clang-format==20.1.8
+
+      - name: Check C++ and CUDA formatting
+        run: python csrc/check_format.py
+
   test-linux:
     runs-on: ubuntu-latest
     strategy:

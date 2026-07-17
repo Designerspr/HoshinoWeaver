@@ -2,31 +2,20 @@
 
 #include "common/compat.h"
 
+#include <pybind11/numpy.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <vector>
 
-#include <pybind11/numpy.h>
-
 void launch_star_detect_full_connected_components(
-    const double* image_host,
-    const uint8_t* external_mask_host,
-    const double* gaussian_kernel_host,
-    const uint8_t* dilate_kernel_host,
-    std::vector<double>* positions_xy_host,
-    std::vector<double>* areas_host,
-    std::vector<double>* intensities_host,
-    std::vector<double>* eccentricities_host,
-    int height,
-    int width,
-    int small_height,
-    int small_width,
-    int level,
-    int gaussian_ksize,
-    int dilate_height,
-    int dilate_width);
+    const double* image_host, const uint8_t* external_mask_host, const double* gaussian_kernel_host,
+    const uint8_t* dilate_kernel_host, std::vector<double>* positions_xy_host,
+    std::vector<double>* areas_host, std::vector<double>* intensities_host,
+    std::vector<double>* eccentricities_host, int height, int width, int small_height,
+    int small_width, int level, int gaussian_ksize, int dilate_height, int dilate_width);
 
 namespace {
 
@@ -40,10 +29,8 @@ ssize_t idwt_len(const ssize_t n) {
     return 2 * n - DB8_FILTER_LEN + 2;
 }
 
-std::pair<ssize_t, ssize_t> wavelet_output_shape(
-    const ssize_t height,
-    const ssize_t width,
-    const ssize_t level) {
+std::pair<ssize_t, ssize_t> wavelet_output_shape(const ssize_t height, const ssize_t width,
+                                                 const ssize_t level) {
     std::vector<std::pair<ssize_t, ssize_t>> details;
     details.reserve(static_cast<size_t>(level));
     ssize_t current_h = height;
@@ -62,18 +49,13 @@ std::pair<ssize_t, ssize_t> wavelet_output_shape(
 
 py::tuple star_detect_full_connected_components_impl(
     const py::array_t<double, py::array::c_style | py::array::forcecast>& image,
-    py::object mask_obj,
-    const ssize_t small_height,
-    const ssize_t small_width,
-    const ssize_t level,
+    py::object mask_obj, const ssize_t small_height, const ssize_t small_width, const ssize_t level,
     const py::array_t<double, py::array::c_style | py::array::forcecast>& gaussian_kernel,
     const py::array_t<uint8_t, py::array::c_style | py::array::forcecast>& dilate_kernel) {
     if (image.ndim() != 2) {
-        throw std::invalid_argument(
-            "star_detect_full_connected_components: image must be 2D");
+        throw std::invalid_argument("star_detect_full_connected_components: image must be 2D");
     }
-    if (image.shape(0) <= 0 || image.shape(1) <= 0 ||
-        small_height <= 0 || small_width <= 0) {
+    if (image.shape(0) <= 0 || image.shape(1) <= 0 || small_height <= 0 || small_width <= 0) {
         throw std::invalid_argument(
             "star_detect_full_connected_components: image dimensions must be positive");
     }
@@ -86,20 +68,17 @@ py::tuple star_detect_full_connected_components_impl(
     }
     if (image.shape(0) > std::numeric_limits<int>::max() / image.shape(1) ||
         small_height > std::numeric_limits<int>::max() / small_width) {
-        throw std::invalid_argument(
-            "star_detect_full_connected_components: image is too large");
+        throw std::invalid_argument("star_detect_full_connected_components: image is too large");
     }
     if (level <= 0 || level > std::numeric_limits<int>::max()) {
-        throw std::invalid_argument(
-            "star_detect_full_connected_components: invalid wavelet level");
+        throw std::invalid_argument("star_detect_full_connected_components: invalid wavelet level");
     }
     if (gaussian_kernel.ndim() != 1 || gaussian_kernel.shape(0) <= 0 ||
         gaussian_kernel.shape(0) > std::numeric_limits<int>::max()) {
         throw std::invalid_argument(
             "star_detect_full_connected_components: gaussian kernel must be 1D");
     }
-    if (dilate_kernel.ndim() != 2 || dilate_kernel.shape(0) <= 0 ||
-        dilate_kernel.shape(1) <= 0 ||
+    if (dilate_kernel.ndim() != 2 || dilate_kernel.shape(0) <= 0 || dilate_kernel.shape(1) <= 0 ||
         dilate_kernel.shape(0) > std::numeric_limits<int>::max() ||
         dilate_kernel.shape(1) > std::numeric_limits<int>::max()) {
         throw std::invalid_argument(
@@ -118,11 +97,9 @@ py::tuple star_detect_full_connected_components_impl(
         mask_ptr = mask.data();
     }
 
-    const auto [small_out_h, small_out_w] = wavelet_output_shape(
-        small_height, small_width, level);
+    const auto [small_out_h, small_out_w] = wavelet_output_shape(small_height, small_width, level);
     const ssize_t small_output_size = small_out_h * small_out_w;
-    if (small_out_h <= 0 || small_out_w <= 0 ||
-        small_out_h > std::numeric_limits<int>::max() ||
+    if (small_out_h <= 0 || small_out_w <= 0 || small_out_h > std::numeric_limits<int>::max() ||
         small_out_w > std::numeric_limits<int>::max() ||
         small_output_size > std::numeric_limits<int>::max()) {
         throw std::invalid_argument(
@@ -134,21 +111,11 @@ py::tuple star_detect_full_connected_components_impl(
     std::vector<double> intensities;
     std::vector<double> eccentricities;
     launch_star_detect_full_connected_components(
-        image.data(),
-        mask_ptr,
-        gaussian_kernel.data(),
-        dilate_kernel.data(),
-        &positions_xy,
-        &areas,
-        &intensities,
-        &eccentricities,
-        static_cast<int>(image.shape(0)),
-        static_cast<int>(image.shape(1)),
-        static_cast<int>(small_height),
-        static_cast<int>(small_width),
-        static_cast<int>(level),
-        static_cast<int>(gaussian_kernel.shape(0)),
-        static_cast<int>(dilate_kernel.shape(0)),
+        image.data(), mask_ptr, gaussian_kernel.data(), dilate_kernel.data(), &positions_xy, &areas,
+        &intensities, &eccentricities, static_cast<int>(image.shape(0)),
+        static_cast<int>(image.shape(1)), static_cast<int>(small_height),
+        static_cast<int>(small_width), static_cast<int>(level),
+        static_cast<int>(gaussian_kernel.shape(0)), static_cast<int>(dilate_kernel.shape(0)),
         static_cast<int>(dilate_kernel.shape(1)));
 
     const ssize_t out_count = static_cast<ssize_t>(areas.size());
@@ -159,23 +126,14 @@ py::tuple star_detect_full_connected_components_impl(
     std::copy(positions_xy.begin(), positions_xy.end(), positions.mutable_data());
     std::copy(areas.begin(), areas.end(), areas_out.mutable_data());
     std::copy(intensities.begin(), intensities.end(), intensities_out.mutable_data());
-    std::copy(
-        eccentricities.begin(), eccentricities.end(), eccentricities_out.mutable_data());
-    return py::make_tuple(
-        positions, areas_out, intensities_out, eccentricities_out);
+    std::copy(eccentricities.begin(), eccentricities.end(), eccentricities_out.mutable_data());
+    return py::make_tuple(positions, areas_out, intensities_out, eccentricities_out);
 }
 
-}  // namespace
+} // namespace
 
 void bind_star_detect_full_ops(py::module_& m) {
-    m.def(
-        "star_detect_full_connected_components_core",
-        &star_detect_full_connected_components_impl,
-        py::arg("image"),
-        py::arg("mask"),
-        py::arg("small_height"),
-        py::arg("small_width"),
-        py::arg("level"),
-        py::arg("gaussian_kernel"),
-        py::arg("dilate_kernel"));
+    m.def("star_detect_full_connected_components_core", &star_detect_full_connected_components_impl,
+          py::arg("image"), py::arg("mask"), py::arg("small_height"), py::arg("small_width"),
+          py::arg("level"), py::arg("gaussian_kernel"), py::arg("dilate_kernel"));
 }

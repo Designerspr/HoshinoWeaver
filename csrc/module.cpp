@@ -1,12 +1,10 @@
-#include <pybind11/pybind11.h>
-
 #include "common/backend_info.h"
 #include "common/cuda_error.h"
 #include "ops/cpu/alignment/alignment_ops.h"
 #include "ops/cpu/calibration/calibration_ops.h"
 #include "ops/cpu/detection/detection_ops.h"
-#include "ops/cpu/filter/filter_ops.h"
 #include "ops/cpu/fgp/fgp_ops.h"
+#include "ops/cpu/filter/filter_ops.h"
 #include "ops/cpu/max/max_ops.h"
 #include "ops/cpu/median/median_ops.h"
 #include "ops/cpu/noise/noise_ops.h"
@@ -14,6 +12,8 @@
 #include "ops/cpu/sigma_clip/sigma_clip_chunk_ops.h"
 #include "ops/cpu/star_shrink/star_shrink_ops.h"
 #include "ops/cpu/wavelet/wavelet_ops.h"
+
+#include <pybind11/pybind11.h>
 #if HNW_ENABLE_CUDA
 #include "ops/cuda/detection/star_detect_full_ops.h"
 #include "ops/cuda/fgp/huber_weighted_chunk_ops.h"
@@ -29,8 +29,8 @@ namespace py = pybind11;
 PYBIND11_MODULE(_C, m) {
     m.doc() = "Optional C++ ops for HoshinoWeaver";
 
-    py::register_exception<hnw::CudaRuntimeUnavailableError>(
-        m, "CudaRuntimeUnavailableError", PyExc_RuntimeError);
+    py::register_exception<hnw::CudaRuntimeUnavailableError>(m, "CudaRuntimeUnavailableError",
+                                                             PyExc_RuntimeError);
 
     bind_backend_info(m);
     bind_alignment_ops(m);
