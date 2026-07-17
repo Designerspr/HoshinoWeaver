@@ -18,6 +18,10 @@ class CustomOpUnavailableError(RuntimeError):
     """Raised when a native backend is unavailable and production may fallback."""
 
 
+class CustomOpResourceExhaustedError(RuntimeError):
+    """Raised when a native backend lacks resources for the requested input."""
+
+
 class CudaProbeError(RuntimeError):
     """Raised when a structured CUDA runtime probe reports a real error."""
 
@@ -70,6 +74,18 @@ def is_cuda_runtime_unavailable_error(exc: RuntimeError) -> bool:
         or "device is busy" in message
         or "device unavailable" in message
     )
+
+
+def is_cuda_resource_exhausted_error(exc: RuntimeError) -> bool:
+    if isinstance(exc, CustomOpResourceExhaustedError):
+        return True
+    module, _ = load_compiled_module()
+    exhausted_type = (
+        getattr(module, "CudaResourceExhaustedError", None)
+        if module is not None
+        else None
+    )
+    return exhausted_type is not None and isinstance(exc, exhausted_type)
 
 
 @lru_cache(maxsize=1)

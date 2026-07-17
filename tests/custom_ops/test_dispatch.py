@@ -5,6 +5,7 @@ import numpy as np
 
 import hoshicore._custom_op._dispatch as custom_op_dispatch
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
+from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
 import hoshicore._custom_op.ops.sigma_clip as sigma_clip_chunk_ops
 
 
@@ -93,6 +94,44 @@ class TestCustomOpDispatchHelpers(unittest.TestCase):
                     RuntimeError("structured CUDA runtime failure")
                 )
             )
+
+    def test_cuda_resource_classifier_requires_structured_error(self) -> None:
+        class CudaResourceExhaustedError(RuntimeError):
+            pass
+
+        module = mock.Mock(
+            CudaResourceExhaustedError=CudaResourceExhaustedError)
+        with mock.patch.object(
+            custom_op_dispatch,
+            "load_compiled_module",
+            return_value=(module, None),
+        ):
+            self.assertTrue(
+                is_cuda_resource_exhausted_error(
+                    CudaResourceExhaustedError("out of memory")
+                )
+            )
+            self.assertFalse(
+                is_cuda_resource_exhausted_error(
+                    RuntimeError("cudaMalloc: out of memory")
+                )
+            )
+
+    def test_cuda_resource_classifier_accepts_actual_native_exception(self) -> None:
+        module, error = custom_op_dispatch.load_compiled_module()
+        if module is None:
+            self.skipTest(error or "compiled custom ops unavailable")
+        if not hasattr(module, "CudaResourceExhaustedError"):
+            self.skipTest("CUDA resource exception is not built")
+
+        exc = module.CudaResourceExhaustedError("typed native resource error")
+        self.assertTrue(is_cuda_resource_exhausted_error(exc))
+        self.assertFalse(is_cuda_runtime_unavailable_error(exc))
+        self.assertFalse(
+            is_cuda_resource_exhausted_error(
+                RuntimeError("cudaMalloc: out of memory")
+            )
+        )
 
     def test_cuda_memory_probe_propagates_runtime_errors(self) -> None:
         module = mock.Mock()

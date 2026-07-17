@@ -23,6 +23,9 @@ inline void throw_if_failed(const cudaError_t error, const char* context) {
     if (runtime_unavailable(error)) {
         throw hnw::CudaRuntimeUnavailableError(message);
     }
+    if (error == cudaErrorMemoryAllocation) {
+        throw hnw::CudaResourceExhaustedError(message);
+    }
     throw std::runtime_error(message);
 }
 

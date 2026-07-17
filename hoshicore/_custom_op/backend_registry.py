@@ -8,6 +8,7 @@ from typing import Any, Callable, Collection, Mapping
 
 from hoshicore._custom_op._dispatch import (
     cuda_memory_info,
+    is_cuda_resource_exhausted_error,
     is_cuda_runtime_unavailable_error,
     load_compiled_module,
 )
@@ -356,16 +357,15 @@ def resolve_backend(
     )
 
 
-def resolve_after_runtime_unavailable(
+def _resolve_after_cuda_backend_failure(
     logical_op: str,
     failed_backend: str,
     exc: RuntimeError,
+    reason_code: str,
     *,
     load_module: ModuleLoader = load_compiled_module,
     build_info: Mapping[str, Any] | None = None,
 ) -> BackendSelection:
-    if failed_backend != "cuda_host_io" or not is_cuda_runtime_unavailable_error(exc):
-        raise exc
     selection = resolve_backend(
         logical_op,
         "auto",
@@ -381,14 +381,54 @@ def resolve_after_runtime_unavailable(
         placement=decision.placement,
         fallback=decision.fallback,
         native=decision.native,
-        reason_code="cuda_runtime_unavailable",
+        reason_code=reason_code,
     )
     return BackendSelection(
         selection.candidate,
         selection.module,
         str(exc),
-        "cuda_runtime_unavailable",
+        reason_code,
         decision,
+    )
+
+
+def resolve_after_runtime_unavailable(
+    logical_op: str,
+    failed_backend: str,
+    exc: RuntimeError,
+    *,
+    load_module: ModuleLoader = load_compiled_module,
+    build_info: Mapping[str, Any] | None = None,
+) -> BackendSelection:
+    if failed_backend != "cuda_host_io" or not is_cuda_runtime_unavailable_error(exc):
+        raise exc
+    return _resolve_after_cuda_backend_failure(
+        logical_op,
+        failed_backend,
+        exc,
+        "cuda_runtime_unavailable",
+        load_module=load_module,
+        build_info=build_info,
+    )
+
+
+def resolve_after_resource_exhausted(
+    logical_op: str,
+    failed_backend: str,
+    exc: RuntimeError,
+    *,
+    load_module: ModuleLoader = load_compiled_module,
+    build_info: Mapping[str, Any] | None = None,
+) -> BackendSelection:
+    if failed_backend != "cuda_host_io" or not is_cuda_resource_exhausted_error(exc):
+        raise exc
+    return _resolve_after_cuda_backend_failure(
+        logical_op,
+        failed_backend,
+        exc,
+        "cuda_resource_exhausted",
+        load_module=load_module,
+        build_info=build_info,
     )
 
 

@@ -11,4 +11,9 @@ public:
         : std::runtime_error(message) {}
 };
 
+class CudaResourceExhaustedError : public std::runtime_error {
+public:
+    explicit CudaResourceExhaustedError(const std::string& message) : std::runtime_error(message) {}
+};
+
 } // namespace hnw

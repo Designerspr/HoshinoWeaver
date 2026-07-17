@@ -1,5 +1,6 @@
 #include "common/backend_info.h"
 #include "common/cuda_error.h"
+#include "common/star_detect_capacity.h"
 #include "ops/cpu/alignment/alignment_ops.h"
 #include "ops/cpu/calibration/calibration_ops.h"
 #include "ops/cpu/detection/detection_ops.h"
@@ -31,6 +32,12 @@ PYBIND11_MODULE(_C, m) {
 
     py::register_exception<hnw::CudaRuntimeUnavailableError>(m, "CudaRuntimeUnavailableError",
                                                              PyExc_RuntimeError);
+    py::register_exception<hnw::CudaResourceExhaustedError>(m, "CudaResourceExhaustedError",
+                                                            PyExc_RuntimeError);
+#if HNW_ENABLE_CUDA
+    py::register_exception<hnw::StarDetectCapacityError>(m, "StarDetectCapacityError",
+                                                         PyExc_RuntimeError);
+#endif
 
     bind_backend_info(m);
     bind_alignment_ops(m);
