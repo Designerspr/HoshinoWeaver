@@ -169,6 +169,9 @@ synthetic starfield。
 
 - `python -m bench.cpu.kernels`
   算法内核微基准。默认运行已注册的代表性 kernel case，覆盖 stack、FGP、sigma clip、median/filter、alignment matching、wavelet/detection 等热点；需要精确对比时用 `--cases` 指定成对 backend。
+  星点 descriptor 双向最近邻可用
+  `--cases matching_cosine_bidirectional_nearest_numpy,matching_cosine_bidirectional_nearest_openmp,matching_cosine_bidirectional_nearest_cuda,matching_cosine_bidirectional_nearest_auto`
+  对比完整 host-in/out 路径，并用 `--alignment-points` 设置每侧星点规模。
 - `python -m bench.cpu.max_stack`
   大尺寸 `max` 专项 benchmark。比较单进程 `NumPy in-place stream`、多进程 `NumPy local-reduce`、`custom op OpenMP stream`。
 - `python -m bench.cpu.fgp_accumulate`
@@ -296,7 +299,7 @@ python -m bench.data_tools.generate_starfield_dataset --name align_u16_32f --fra
 3. `python -m bench.cli run pipeline.alignment -- --input-dir <image-dir> --method all`
    单独确认对齐链路的 `homography` 和 `camera_model` 两条路径。
 4. `python -m bench.cpu.kernels`
-   先看当前 stack kernel 热点方向，也包含 `fgp_masked_mean_merge`、`sigma_clip_fused_*`、`fgp_add_partial_reduce` 的独立 `numpy / compiled` microbenchmark。
+   先看当前 stack kernel 热点方向，也包含 `fgp_masked_mean_merge`、`sigma_clip_fused_*` 的独立 `numpy / compiled` microbenchmark。
 5. `python -m bench.cpu.max_stack` / `python -m bench.cpu.fgp_accumulate`
    跟进 `max / fgp_accumulate` 的 CPU kernel 优化。
 6. `python -m bench.cpu.alignment`
@@ -315,7 +318,7 @@ python -m bench.cli run pipeline.compute -- --input-dir <image-dir> --cases alig
 python -m bench.cli run pipeline.compute -- --cases alignment_camera_model,remap_camera_model --ref-projection fisheye --src-projection perspective --no-same-camera
 python -m bench.cli run pipeline.alignment -- --input-dir <image-dir> --method all
 python -m bench.cpu.kernels --frames 128 --height 1080 --width 1920 --dtype uint16 --input-mode synthetic
-python -m bench.cpu.kernels --frames 64 --height 2048 --width 3072 --dtype uint16 --input-mode synthetic --cases fgp_masked_mean_merge_stream_numpy,fgp_masked_mean_merge_stream_compiled,sigma_clip_fused_merge_stream_numpy,sigma_clip_fused_merge_stream_compiled,sigma_clip_fused_masked_merge_stream_numpy,sigma_clip_fused_masked_merge_stream_compiled,fgp_add_partial_reduce_numpy,fgp_add_partial_reduce_compiled
+python -m bench.cpu.kernels --frames 64 --height 2048 --width 3072 --dtype uint16 --input-mode synthetic --cases fgp_masked_mean_merge_stream_numpy,fgp_masked_mean_merge_stream_compiled,sigma_clip_fused_merge_stream_numpy,sigma_clip_fused_merge_stream_compiled,sigma_clip_fused_masked_merge_stream_numpy,sigma_clip_fused_masked_merge_stream_compiled
 python -m bench.cpu.kernels --frames 16 --height 2048 --width 3072 --dtype uint16 --input-mode synthetic --cases median_reduce_chunk_numpy,median_reduce_chunk_compiled --chunk-rows 32
 python -m bench.cpu.max_stack --frames 100 --height 4000 --width 6000 --dtype uint8 --workers 4 --openmp-threads auto --input-mode cache
 python -m bench.cpu.fgp_accumulate --frames 100 --height 4000 --width 6000 --dtype uint8 --openmp-threads auto --input-mode cache

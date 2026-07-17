@@ -5,6 +5,8 @@ import unittest
 
 import numpy as np
 
+from hoshicore._custom_op.cuda_memory import cuda_chunk_memory_model
+from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
 import hoshicore._custom_op.ops.max as max_ops
 
 
@@ -27,6 +29,9 @@ class TestCudaHostIoWorkspace(unittest.TestCase):
             self.assertGreaterEqual(info["process_limit_bytes"], 0)
             self.assertGreaterEqual(info["current_thread_device_bytes"], 0)
             self.assertGreaterEqual(info["current_thread_pinned_bytes"], 0)
+            self.assertFalse(info["measurement_active"])
+            self.assertGreaterEqual(info["last_device_peak_bytes"], 0)
+            self.assertGreaterEqual(info["last_pinned_peak_bytes"], 0)
             self.assertTrue(module.clear_cuda_host_io_cache())
         else:
             self.assertFalse(info["available"])
@@ -48,12 +53,38 @@ class TestCudaHostIoWorkspace(unittest.TestCase):
         after_huber = module.cuda_host_io_cache_info()
         self.assertGreater(after_huber["current_thread_device_bytes"], 0)
         self.assertEqual(after_huber["current_thread_pinned_bytes"], 0)
+        self.assertIn(
+            "huber_weighted_chunk_cuda", after_huber["last_operation"])
+        self.assertGreater(after_huber["last_device_peak_bytes"], 0)
+        self.assertEqual(after_huber["last_pinned_peak_bytes"], 0)
+        huber_estimate = cuda_chunk_memory_model(
+            "huber_weighted_chunk",
+            n_frames=stack.shape[0],
+            row_bytes=stack.shape[1] * stack.dtype.itemsize,
+            dtype_bytes=stack.dtype.itemsize,
+            include_weights=False,
+        ).estimate(1)
+        self.assertEqual(
+            after_huber["last_device_peak_bytes"],
+            huber_estimate.peak_device_bytes,
+        )
 
         module.sigma_clip_fused_chunk_cuda(stack, 3.0, 3.0, 2, None, False, 1)
         after_sigma = module.cuda_host_io_cache_info()
         self.assertEqual(
             after_sigma["current_thread_device_bytes"],
             after_huber["current_thread_device_bytes"],
+        )
+        sigma_estimate = cuda_chunk_memory_model(
+            "sigma_clip_fused_chunk",
+            n_frames=stack.shape[0],
+            row_bytes=stack.shape[1] * stack.dtype.itemsize,
+            dtype_bytes=stack.dtype.itemsize,
+            include_mask=False,
+        ).estimate(1)
+        self.assertEqual(
+            after_sigma["last_device_peak_bytes"],
+            sigma_estimate.peak_device_bytes,
         )
 
         image = np.arange(8 * 8, dtype=np.uint8).reshape(8, 8)
@@ -86,6 +117,35 @@ class TestCudaHostIoWorkspace(unittest.TestCase):
         after_clear = module.cuda_host_io_cache_info()
         self.assertEqual(after_clear["current_thread_device_bytes"], 0)
         self.assertEqual(after_clear["current_thread_pinned_bytes"], 0)
+
+    def test_matching_workspace_peak_matches_exact_estimator(self) -> None:
+        module = self._compiled_module()
+        memory_info = module.cuda_memory_info()
+        if not memory_info.get("available"):
+            self.skipTest(memory_info.get("reason", "CUDA runtime unavailable"))
+
+        rng = np.random.default_rng(23)
+        features1 = rng.normal(size=(37, 13))
+        features2 = rng.normal(size=(41, 13))
+        self.assertTrue(module.clear_cuda_host_io_cache())
+        self.addCleanup(module.clear_cuda_host_io_cache)
+
+        result = module.matching_cosine_bidirectional_nearest_cuda(
+            features1, features2)
+        self.assertIsNotNone(result)
+        info = module.cuda_host_io_cache_info()
+        estimate = cuda_memory_estimate(
+            "matching_cosine_bidirectional_nearest",
+            n1=features1.shape[0],
+            n2=features2.shape[0],
+            feature_dim=features1.shape[1],
+        )
+
+        self.assertEqual(
+            info["last_device_peak_bytes"], estimate.peak_device_bytes)
+        self.assertEqual(
+            info["last_pinned_peak_bytes"], estimate.peak_pinned_bytes)
+        self.assertIn("matching bidirectional nearest", info["last_operation"])
 
     def test_cuda_host_io_cache_isolated_per_worker_and_released_on_exit(self) -> None:
         module = self._compiled_module()

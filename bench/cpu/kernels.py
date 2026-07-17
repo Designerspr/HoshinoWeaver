@@ -157,8 +157,10 @@ CASE_NAMES = [
     "median_filter_2d_compiled",
     "extract_point_features_numpy",
     "extract_point_features_compiled",
-    "find_initial_match_numpy",
-    "find_initial_match_compiled",
+    "matching_cosine_bidirectional_nearest_numpy",
+    "matching_cosine_bidirectional_nearest_openmp",
+    "matching_cosine_bidirectional_nearest_cuda",
+    "matching_cosine_bidirectional_nearest_auto",
     "wavelet_dec_rec_core_numpy",
     "wavelet_dec_rec_core_compiled",
     "wavelet_dec_rec_core_cuda",
@@ -781,21 +783,38 @@ def bench_extract_point_features_backend(
     _ = extract(vec, vol, k)
 
 
-def bench_find_initial_match_backend(
+def build_matching_nearest_inputs(
+    n_points: int,
+    *,
+    seed: int,
+    feature_dim: int = 120,
+) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    features1 = rng.normal(size=(n_points, feature_dim))
+    features1 /= np.linalg.norm(features1, axis=1, keepdims=True)
+    n_points2 = n_points + max(1, n_points // 50)
+    features2 = rng.normal(size=(n_points2, feature_dim))
+    features2 /= np.linalg.norm(features2, axis=1, keepdims=True)
+    return features1, features2
+
+
+def bench_matching_nearest_backend(
     features1: np.ndarray,
     features2: np.ndarray,
-    pts1: np.ndarray,
-    pts2: np.ndarray,
-    vectors1: np.ndarray,
-    vectors2: np.ndarray,
     *,
     backend: str,
 ) -> None:
-    find_match = {
-        "numpy": alignment_ops.find_initial_match_numpy,
-        "compiled": alignment_ops.find_initial_match_compiled,
+    nearest = {
+        "numpy": alignment_ops.matching_cosine_bidirectional_nearest_numpy,
+        "openmp": (
+            alignment_ops.matching_cosine_bidirectional_nearest_cpu_compiled
+        ),
+        "cuda": alignment_ops.matching_cosine_bidirectional_nearest_cuda,
+        "auto": alignment_ops.matching_cosine_bidirectional_nearest,
     }[backend]
-    _ = find_match(features1, features2, pts1, pts2, vectors1, vectors2)
+    result = nearest(features1, features2)
+    if result is None:
+        raise RuntimeError("matching nearest benchmark encountered ambiguous input")
 
 
 def build_wavelet_input(frame: np.ndarray) -> np.ndarray:
@@ -1018,7 +1037,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     threshold_stats = None
     median_chunk_stacks = None
     alignment_inputs = None
-    alignment_features = None
+    matching_nearest_inputs = None
     wavelet_input = None
     sc_chunk_stack = None
     calibration_subtract_ref = None
@@ -1135,32 +1154,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
         return alignment_inputs
 
-    def get_alignment_features():
-        nonlocal alignment_features
-        if alignment_features is None:
-            vec, vec2, vol, vol2, _, _, k = get_alignment_inputs()
-            alignment_features = (
-                alignment_ops.extract_point_features_numpy(vec, vol, k),
-                alignment_ops.extract_point_features_numpy(vec2, vol2, k),
+    def get_matching_nearest_inputs():
+        nonlocal matching_nearest_inputs
+        if matching_nearest_inputs is None:
+            matching_nearest_inputs = build_matching_nearest_inputs(
+                args.alignment_points,
+                seed=args.seed,
             )
-        return alignment_features
+        return matching_nearest_inputs
 
     def bench_alignment_extract(backend: str) -> None:
         vec, _, vol, _, _, _, k = get_alignment_inputs()
         bench_extract_point_features_backend(vec, vol, k, backend=backend)
-
-    def bench_alignment_match(backend: str) -> None:
-        vec, vec2, _, _, pts, pts2, _ = get_alignment_inputs()
-        features1, features2 = get_alignment_features()
-        bench_find_initial_match_backend(
-            features1,
-            features2,
-            pts,
-            pts2,
-            vec,
-            vec2,
-            backend=backend,
-        )
 
     registry: dict[str, Any] = {
         "max_combine_int_weight": lambda: bench_max_combine(frames, weights, True),
@@ -1314,8 +1319,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "extract_point_features_numpy": lambda: bench_alignment_extract("numpy"),
         "extract_point_features_compiled": lambda: bench_alignment_extract("compiled"),
-        "find_initial_match_numpy": lambda: bench_alignment_match("numpy"),
-        "find_initial_match_compiled": lambda: bench_alignment_match("compiled"),
+        "matching_cosine_bidirectional_nearest_numpy": lambda: bench_matching_nearest_backend(
+            *get_matching_nearest_inputs(), backend="numpy"
+        ),
+        "matching_cosine_bidirectional_nearest_openmp": lambda: bench_matching_nearest_backend(
+            *get_matching_nearest_inputs(), backend="openmp"
+        ),
+        "matching_cosine_bidirectional_nearest_cuda": lambda: bench_matching_nearest_backend(
+            *get_matching_nearest_inputs(), backend="cuda"
+        ),
+        "matching_cosine_bidirectional_nearest_auto": lambda: bench_matching_nearest_backend(
+            *get_matching_nearest_inputs(), backend="auto"
+        ),
         "wavelet_dec_rec_core_numpy": lambda: bench_wavelet_dec_rec_core_backend(
             get_wavelet_input(),
             args.wavelet_level,

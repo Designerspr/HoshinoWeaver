@@ -27,6 +27,7 @@ add_library(hnw_ops_cpu_calibration STATIC
 
 add_library(hnw_ops_cpu_alignment STATIC
     ops/cpu/alignment/alignment_ops.cpp
+    ops/cpu/alignment/matching_bidirectional_nearest_ops.cpp
 )
 
 add_library(hnw_ops_cpu_fgp STATIC
@@ -105,6 +106,9 @@ pybind11_add_module(_C MODULE
 if(HNW_ENABLE_CUDA)
     target_sources(_C PRIVATE
         common/backend_cuda_info.cu
+        # Alignment matching distance and bidirectional nearest-neighbor reduction.
+        ops/cuda/alignment/matching_bidirectional_nearest_ops.cpp
+        ops/cuda/alignment/matching_bidirectional_nearest_ops.cu
         # Fused camera-model remap.
         ops/cuda/remap/camera_model_remap_fused_ops.cpp
         ops/cuda/remap/camera_model_remap_fused_ops.cu

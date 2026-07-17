@@ -2,7 +2,7 @@
 
 from hoshicore._custom_op.ops.alignment import (
     extract_point_features,
-    find_initial_match,
+    matching_cosine_bidirectional_nearest,
 )
 from hoshicore._custom_op.ops.calibration import (
     calibration_divide,
@@ -56,11 +56,11 @@ __all__ = [
     "huber_weighted_chunk",
     "huber_weighted_accumulate",
     "max_combine",
+    "matching_cosine_bidirectional_nearest",
     "median_filter_2d",
     "median_reduce_chunk",
     "noise_equalization_params",
     "noise_fill_local_mean",
-    "find_initial_match",
     "sigma_clip_fused_chunk",
     "sigma_clip_fused_masked_merge",
     "sigma_clip_fused_merge",

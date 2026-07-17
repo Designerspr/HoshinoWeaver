@@ -7,6 +7,10 @@ from hoshicore._custom_op import (
     custom_ops_available,
 )
 import hoshicore._custom_op.backend_registry as backend_registry
+from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
+from hoshicore._custom_op.cuda_memory import cuda_chunk_memory_model
+from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
+from hoshicore._custom_op.cuda_memory import cuda_memory_model_kind
 import hoshicore._custom_op.ops.max as max_ops
 
 
@@ -60,12 +64,14 @@ class TestBackendRegistry(CustomOpsTestCase):
         self.assertEqual(feature_candidates[0].backend, "openmp_cpu")
         self.assertEqual(feature_candidates[0].kernel_name, "extract_point_features")
 
-        match_candidates = backend_registry.registered_backend_candidates(
-            "find_initial_match"
+        matching_candidates = backend_registry.registered_backend_candidates(
+            "matching_cosine_bidirectional_nearest"
         )
-        self.assertEqual(len(match_candidates), 1)
-        self.assertEqual(match_candidates[0].backend, "openmp_cpu")
-        self.assertEqual(match_candidates[0].kernel_name, "find_initial_match")
+        self.assertEqual(len(matching_candidates), 2)
+        self.assertEqual(
+            {candidate.backend for candidate in matching_candidates},
+            {"cuda_host_io", "openmp_cpu"},
+        )
 
         remap_candidates = backend_registry.registered_backend_candidates(
             "camera_model_remap"
@@ -93,6 +99,181 @@ class TestBackendRegistry(CustomOpsTestCase):
         self.assertEqual(
             huber_chunk_candidates[0].kernel_name, "huber_weighted_chunk_cuda"
         )
+
+    def test_builtin_cuda_candidates_declare_consumed_memory_models(self) -> None:
+        candidates = backend_registry.registered_backend_candidates()
+
+        backend_registry.validate_cuda_memory_policy_declarations(
+            candidates,
+            require_memory_models=True,
+        )
+        cuda_candidates = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.backend == "cuda_host_io"
+        )
+        self.assertTrue(cuda_candidates)
+        self.assertTrue(
+            all(candidate.memory_model is not None for candidate in cuda_candidates)
+        )
+        for candidate in cuda_candidates:
+            self.assertEqual(
+                candidate.memory_model,
+                cuda_memory_model_kind(candidate.logical_op),
+            )
+        self.assertEqual(
+            {candidate.logical_op for candidate in cuda_candidates},
+            {
+                "camera_model_remap",
+                "huber_weighted_chunk",
+                "matching_cosine_bidirectional_nearest",
+                "sigma_clip_fused_chunk",
+                "star_detect_fused_pixel_components",
+                "star_mask_dog",
+                "star_shrink_dog_process",
+                "star_shrink_process",
+                "wavelet_dec_rec",
+                "wavelet_dec_rec_cuda_core",
+            },
+        )
+
+    def test_registered_cuda_chunk_models_are_consumable(self) -> None:
+        chunk_candidates = (
+            candidate
+            for candidate in backend_registry.registered_backend_candidates()
+            if candidate.memory_model == "cuda_chunk"
+        )
+
+        for candidate in chunk_candidates:
+            model = cuda_chunk_memory_model(
+                candidate.logical_op,
+                n_frames=4,
+                row_bytes=128,
+                dtype_bytes=2,
+            )
+            self.assertGreater(model.device_bytes_per_row, 0)
+
+    def test_registered_cuda_non_chunk_models_are_consumable(self) -> None:
+        sample_args = {
+            "camera_model_remap": {
+                "source_height": 8,
+                "source_width": 10,
+                "channels": 3,
+                "dtype_bytes": 2,
+                "out_height": 6,
+                "out_width": 7,
+            },
+            "matching_cosine_bidirectional_nearest": {
+                "n1": 17,
+                "n2": 19,
+                "feature_dim": 11,
+            },
+            "star_detect_fused_pixel_components": {
+                "height": 64,
+                "width": 80,
+                "small_height": 16,
+                "small_width": 20,
+                "level": 2,
+                "gaussian_ksize": 9,
+            },
+            "star_mask_dog": {
+                "height": 32,
+                "width": 48,
+                "channels": 3,
+                "dtype_bytes": 2,
+                "small_kernel_size": 9,
+                "large_kernel_size": 73,
+            },
+            "star_shrink_dog_process": {
+                "height": 32,
+                "width": 48,
+                "channels": 3,
+                "dtype_bytes": 2,
+                "small_kernel_size": 9,
+                "large_kernel_size": 73,
+            },
+            "star_shrink_process": {
+                "height": 32,
+                "width": 48,
+                "channels": 3,
+                "dtype_bytes": 2,
+            },
+            "wavelet_dec_rec": {"height": 64, "width": 80, "level": 2},
+            "wavelet_dec_rec_cuda_core": {
+                "height": 64,
+                "width": 80,
+                "level": 2,
+            },
+        }
+        candidates = (
+            candidate
+            for candidate in backend_registry.registered_backend_candidates()
+            if candidate.backend == "cuda_host_io"
+            and candidate.memory_model != "cuda_chunk"
+        )
+
+        for candidate in candidates:
+            estimate = cuda_memory_estimate(
+                candidate.logical_op,
+                **sample_args[candidate.logical_op],
+            )
+            self.assertEqual(estimate.logical_op, candidate.logical_op)
+            self.assertGreater(estimate.peak_device_bytes, 0)
+
+    def test_cuda_candidate_without_memory_declaration_is_rejected(self) -> None:
+        candidate = backend_registry.BackendCandidate(
+            "missing_memory_policy",
+            "cuda_host_io",
+            "missing_memory_policy_cuda",
+            build_flag="cuda",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "must declare"):
+            backend_registry.validate_cuda_memory_policy_declarations(
+                (candidate,))
+
+    def test_explicit_third_party_memory_deferral_is_compatible_but_not_builtin(
+        self,
+    ) -> None:
+        candidate = backend_registry.BackendCandidate(
+            "third_party_cuda_op",
+            "cuda_host_io",
+            "third_party_cuda_op_kernel",
+            build_flag="cuda",
+            memory_model_reason="third-party compatibility declaration",
+        )
+
+        backend_registry.validate_cuda_memory_policy_declarations((candidate,))
+        with self.assertRaisesRegex(RuntimeError, "must declare a consumed"):
+            backend_registry.validate_cuda_memory_policy_declarations(
+                (candidate,),
+                require_memory_models=True,
+            )
+
+    def test_cuda_candidate_with_unknown_memory_model_is_rejected(self) -> None:
+        candidate = backend_registry.BackendCandidate(
+            "unknown_memory_model",
+            "cuda_host_io",
+            "unknown_memory_model_cuda",
+            build_flag="cuda",
+            memory_model="typo",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unknown memory model"):
+            backend_registry.validate_cuda_memory_policy_declarations(
+                (candidate,))
+
+    def test_cuda_candidate_model_must_resolve_to_an_estimator(self) -> None:
+        candidate = backend_registry.BackendCandidate(
+            "missing_static_estimator",
+            "cuda_host_io",
+            "missing_static_estimator_cuda",
+            build_flag="cuda",
+            memory_model="static_estimator",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "without a registered estimator"):
+            backend_registry.validate_cuda_memory_policy_declarations((candidate,))
 
     def test_backend_registry_reports_missing_compiled_module(self) -> None:
         selection = backend_registry.select_backend(
@@ -357,6 +538,62 @@ class TestBackendRegistry(CustomOpsTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "out of memory"):
             backend_registry.resolve_after_runtime_unavailable(
+                "sigma_clip_fused_chunk",
+                "cuda_host_io",
+                RuntimeError("cudaMalloc: out of memory"),
+                load_module=loader,
+            )
+
+        loader.assert_not_called()
+
+    def test_resource_resolver_selects_cpu_with_distinct_reason(self) -> None:
+        class Module:
+            def sigma_clip_fused_chunk_cuda(self):
+                return None
+
+            def sigma_clip_fused_chunk(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        selection = backend_registry.resolve_after_resource_exhausted(
+            "sigma_clip_fused_chunk",
+            "cuda_host_io",
+            CustomOpResourceExhaustedError("estimated VRAM is insufficient"),
+            load_module=lambda: (Module(), None),
+        )
+
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(selection.reason_code, "cuda_resource_exhausted")
+        self.assertEqual(
+            selection.decision.reason_code, "cuda_resource_exhausted")
+
+    def test_resource_resolver_selects_numpy_without_cpu_candidate(self) -> None:
+        class Module:
+            def huber_weighted_chunk_cuda(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        selection = backend_registry.resolve_after_resource_exhausted(
+            "huber_weighted_chunk",
+            "cuda_host_io",
+            CustomOpResourceExhaustedError("estimated VRAM is insufficient"),
+            load_module=lambda: (Module(), None),
+        )
+
+        self.assertEqual(selection.backend, "numpy")
+        self.assertEqual(selection.reason_code, "cuda_resource_exhausted")
+        self.assertEqual(
+            selection.decision.reason_code, "cuda_resource_exhausted")
+
+    def test_resource_resolver_rejects_unstructured_oom_errors(self) -> None:
+        loader = mock.Mock(side_effect=AssertionError("resolver should not run"))
+
+        with self.assertRaisesRegex(RuntimeError, "out of memory"):
+            backend_registry.resolve_after_resource_exhausted(
                 "sigma_clip_fused_chunk",
                 "cuda_host_io",
                 RuntimeError("cudaMalloc: out of memory"),
