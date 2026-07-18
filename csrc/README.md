@@ -219,6 +219,11 @@ Preset 参考：
 
 所有 GPU 后端保持 CPU fallback 语义不变。
 
+运行时可通过 `HNW_CUSTOM_OPS_FALLBACK=cpu` 禁用 CUDA 并保留 OpenMP，或在
+pipeline 启动前调用 `hoshicore._custom_op.set_backend_preference("cpu")`。传入
+`"auto"` 恢复自动选择，传入 `None` 则恢复由环境变量控制。该接口为进程级设置，
+暂不包含 GUI wiring。
+
 ### CUDA host-I/O workspace 与显存治理
 
 生产 CUDA host-I/O kernel 统一通过 `common/cuda_host_io_workspace.cuh` 获取

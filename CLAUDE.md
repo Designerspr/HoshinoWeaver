@@ -106,7 +106,7 @@ NumPy when that backend is explicitly unavailable. The CUDA-only
 production fallback is Norma's OpenCV contour detector at the component layer,
 so the project still runs without compilation.
 
-Key env vars: `HNW_CUSTOM_OPS_FALLBACK` (`auto`|`numpy`), `HNW_CUSTOM_OPS_THREADS` (`auto`|int), `HNW_CUSTOM_OPS_DEBUG` (`0`|`1`).
+Key env vars: `HNW_CUSTOM_OPS_FALLBACK` (`auto`|`cpu`|`numpy`), `HNW_CUSTOM_OPS_THREADS` (`auto`|int), `HNW_CUSTOM_OPS_DEBUG` (`0`|`1`). `cpu` disables CUDA while preserving OpenMP; GUI/runtime callers may use `set_backend_preference()` before starting a pipeline.
 
 Build: `python csrc/build_ops.py`. Windows supports both MSVC and MinGW-w64 ucrt (`--compiler gcc`, CPU-only). See `csrc/README.md` for full build/platform/packaging details.
 

@@ -14,6 +14,10 @@ from loguru import logger
 from hoshicore._custom_op import thread_tuning
 
 
+_VALID_BACKEND_PREFERENCES = frozenset({"auto", "cpu", "numpy"})
+_backend_preference_override: str | None = None
+
+
 class CustomOpUnavailableError(RuntimeError):
     """Raised when a native backend is unavailable and production may fallback."""
 
@@ -50,11 +54,36 @@ def debug_log(module_name: str, message: str) -> None:
         print(text, file=sys.stderr)
 
 
-def fallback_preference() -> str:
+def get_backend_preference() -> str:
+    """Return the process-wide custom-op backend preference.
+
+    A runtime override takes precedence over ``HNW_CUSTOM_OPS_FALLBACK``. The
+    override is intended to be set before starting a pipeline.
+    """
+    if _backend_preference_override is not None:
+        return _backend_preference_override
     raw = os.environ.get("HNW_CUSTOM_OPS_FALLBACK", "auto").strip().lower()
-    if raw in {"auto", "numpy"}:
+    if raw in _VALID_BACKEND_PREFERENCES:
         return raw
     return "auto"
+
+
+def set_backend_preference(preference: str | None) -> None:
+    """Set a process-wide backend preference, or clear it with ``None``."""
+    global _backend_preference_override
+    if preference is None:
+        _backend_preference_override = None
+        return
+    normalized = preference.strip().lower()
+    if normalized not in _VALID_BACKEND_PREFERENCES:
+        choices = ", ".join(sorted(_VALID_BACKEND_PREFERENCES))
+        raise ValueError(f"backend preference must be one of: {choices}")
+    _backend_preference_override = normalized
+
+
+def fallback_preference() -> str:
+    """Compatibility name for the active custom-op backend preference."""
+    return get_backend_preference()
 
 
 def is_cuda_runtime_unavailable_error(exc: RuntimeError) -> bool:

@@ -156,6 +156,19 @@ def _mock_cuda_backend(
                 "numpy backend forced by preference",
                 "forced_numpy",
             )
+        if preference == "cpu":
+            if logical_op_arg == logical_op and cpu_available:
+                return backend_registry.BackendSelection(
+                    cpu_selection.candidate,
+                    cpu_selection.module,
+                    reason_code="forced_cpu",
+                )
+            return backend_registry.BackendSelection(
+                None,
+                None,
+                "CPU backend preference excludes CUDA",
+                "forced_cpu",
+            )
         if logical_op_arg == logical_op:
             probe = kwargs["cuda_probe"]()
             if not probe.get("available"):
@@ -452,6 +465,46 @@ def test_runtime_planner_ignores_cuda_budget_when_numpy_forced(tmp_path, monkeyp
     assert "gpu=" not in plan.decisions[0].reason
     assert plan.backend_hints["chunk"].backend == "numpy"
     assert plan.backend_hints["chunk"].reason_code == "forced_numpy"
+
+
+def test_runtime_planner_uses_cpu_cost_when_cpu_forced(tmp_path, monkeypatch):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    _mock_available_memory(monkeypatch, budget=12800)
+    _mock_cuda_backend(
+        monkeypatch,
+        "fixed_cuda_fallback_chunk",
+        cpu_available=True,
+    )
+    monkeypatch.setenv("HNW_CUSTOM_OPS_FALLBACK", "cpu")
+    monkeypatch.setattr(
+        runtime_plan_module,
+        "cuda_memory_info",
+        lambda: (_ for _ in ()).throw(AssertionError("CUDA must not be probed")),
+    )
+    dag = ValidatedDag(
+        nodes={
+            "chunk": {"op": "FixedCudaFallbackChunkOp", "configs": {}},
+        },
+        global_inputs={},
+        global_configs={},
+        output_links={},
+        node_deps={},
+        exec_order=["chunk"],
+    )
+
+    plan = plan_runtime(
+        dag,
+        {"runtime_planner": True},
+        {"fnames": [str(path)] * 4},
+        op_registry={"FixedCudaFallbackChunkOp": FixedCudaFallbackChunkOp},
+        preflight_report=_report(),
+    )
+
+    assert plan.config_overrides["chunk_rows"] == 64
+    assert "gpu=" not in plan.decisions[0].reason
+    assert plan.backend_hints["chunk"].backend == "openmp_cpu"
+    assert plan.backend_hints["chunk"].reason_code == "forced_cpu"
 
 
 def test_runtime_planner_keeps_hints_when_chunk_rows_is_explicit(

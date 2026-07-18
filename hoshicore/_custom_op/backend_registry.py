@@ -297,6 +297,18 @@ def select_backend(
             "logical_op_unregistered",
         )
 
+    cpu_only = preference == "cpu"
+    if cpu_only and all(
+        candidate.backend == "cuda_host_io" for candidate in candidates
+    ):
+        return BackendSelection(
+            None,
+            None,
+            "CPU backend preference excludes CUDA and no native CPU backend "
+            f"is registered for {logical_op}",
+            "forced_cpu",
+        )
+
     module, module_error = load_module()
     if module is None:
         return BackendSelection(
@@ -308,7 +320,10 @@ def select_backend(
 
     missing_kernel: str | None = None
     missing_build_flag: str | None = None
-    excluded = frozenset(exclude_backends)
+    excluded = set(exclude_backends)
+    if cpu_only:
+        excluded.add("cuda_host_io")
+    excluded = frozenset(excluded)
     for candidate in sorted(candidates, key=lambda item: item.priority, reverse=True):
         if candidate.backend in excluded:
             continue
@@ -320,7 +335,8 @@ def select_backend(
             if info and not info.get(candidate.build_flag):
                 missing_build_flag = candidate.build_flag
                 continue
-        return BackendSelection(candidate, module, None, "selected_native")
+        reason_code = "forced_cpu" if cpu_only else "selected_native"
+        return BackendSelection(candidate, module, None, reason_code)
 
     if missing_kernel is not None:
         return BackendSelection(

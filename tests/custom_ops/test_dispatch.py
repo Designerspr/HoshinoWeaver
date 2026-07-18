@@ -1,8 +1,10 @@
+import os
 import unittest
 from unittest import mock
 
 import numpy as np
 
+import hoshicore._custom_op as custom_ops
 import hoshicore._custom_op._dispatch as custom_op_dispatch
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
@@ -10,6 +12,35 @@ import hoshicore._custom_op.ops.sigma_clip as sigma_clip_chunk_ops
 
 
 class TestCustomOpDispatchHelpers(unittest.TestCase):
+    def tearDown(self) -> None:
+        custom_op_dispatch.set_backend_preference(None)
+
+    def test_backend_preference_accepts_cpu_from_environment(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"HNW_CUSTOM_OPS_FALLBACK": "cpu"}, clear=False
+        ):
+            self.assertEqual(
+                custom_op_dispatch.get_backend_preference(), "cpu")
+
+    def test_backend_preference_runtime_override_and_reset(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False
+        ):
+            custom_op_dispatch.set_backend_preference("cpu")
+            self.assertEqual(
+                custom_op_dispatch.get_backend_preference(), "cpu")
+            custom_op_dispatch.set_backend_preference(None)
+            self.assertEqual(
+                custom_op_dispatch.get_backend_preference(), "numpy")
+
+    def test_backend_preference_rejects_unknown_value(self) -> None:
+        with self.assertRaisesRegex(ValueError, "auto, cpu, numpy"):
+            custom_op_dispatch.set_backend_preference("gpu")
+
+    def test_backend_preference_is_exposed_by_public_facade(self) -> None:
+        custom_ops.set_backend_preference("cpu")
+        self.assertEqual(custom_ops.get_backend_preference(), "cpu")
+
     def test_compiled_threads_are_applied_on_every_native_call(self) -> None:
         module = mock.Mock()
         module.set_openmp_threads.return_value = True

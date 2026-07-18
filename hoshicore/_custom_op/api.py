@@ -1,5 +1,7 @@
 """Public facade for custom-op APIs."""
 
+from hoshicore._custom_op._dispatch import get_backend_preference
+from hoshicore._custom_op._dispatch import set_backend_preference
 from hoshicore._custom_op.ops.alignment import (
     extract_point_features,
     matching_cosine_bidirectional_nearest,
@@ -53,6 +55,7 @@ __all__ = [
     "extract_point_features",
     "fgp_accumulate",
     "fgp_masked_mean_merge",
+    "get_backend_preference",
     "huber_weighted_chunk",
     "huber_weighted_accumulate",
     "max_combine",
@@ -65,6 +68,7 @@ __all__ = [
     "sigma_clip_fused_masked_merge",
     "sigma_clip_fused_merge",
     "sigma_clip_iterative_chunk",
+    "set_backend_preference",
     "star_detect_fused_pixel_components",
     "star_mask_dog",
     "star_shrink_detect_mask",

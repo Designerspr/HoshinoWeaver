@@ -367,6 +367,70 @@ class TestBackendRegistry(CustomOpsTestCase):
         self.assertEqual(selection.backend, "openmp_cpu")
         self.assertEqual(selection.candidate.kernel_name, "camera_model_remap_cpu")
 
+    def test_cpu_preference_selects_openmp_without_cuda_probe(self) -> None:
+        class Module:
+            def camera_model_remap(self):
+                return None
+
+            def camera_model_remap_cpu(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        probe = mock.Mock(side_effect=AssertionError("CUDA must not be probed"))
+        selection = backend_registry.resolve_backend(
+            "camera_model_remap",
+            "cpu",
+            load_module=lambda: (Module(), None),
+            cuda_probe=probe,
+        )
+
+        self.assertTrue(selection.native)
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(selection.reason_code, "forced_cpu")
+        self.assertEqual(selection.decision.reason_code, "forced_cpu")
+        probe.assert_not_called()
+
+    def test_cpu_preference_uses_numpy_for_cuda_only_op(self) -> None:
+        loader = mock.Mock(side_effect=AssertionError("module must not load"))
+        probe = mock.Mock(side_effect=AssertionError("CUDA must not be probed"))
+
+        selection = backend_registry.resolve_backend(
+            "huber_weighted_chunk",
+            "cpu",
+            load_module=loader,
+            cuda_probe=probe,
+        )
+
+        self.assertFalse(selection.native)
+        self.assertEqual(selection.backend, "numpy")
+        self.assertEqual(selection.reason_code, "forced_cpu")
+        self.assertEqual(selection.decision.reason_code, "forced_cpu")
+        loader.assert_not_called()
+        probe.assert_not_called()
+
+    def test_cpu_preference_never_selects_registered_cuda_candidate(self) -> None:
+        class Module:
+            def build_info(self):
+                return {"cuda": True}
+
+        module = Module()
+        for candidate in backend_registry.registered_backend_candidates():
+            setattr(Module, candidate.kernel_name, lambda self: None)
+
+        logical_ops = {
+            candidate.logical_op
+            for candidate in backend_registry.registered_backend_candidates()
+        }
+        for logical_op in logical_ops:
+            selection = backend_registry.select_backend(
+                logical_op,
+                "cpu",
+                load_module=lambda: (module, None),
+            )
+            self.assertNotEqual(selection.backend, "cuda_host_io", logical_op)
+
     def test_backend_registry_reports_when_all_candidates_are_excluded(self) -> None:
         class Module:
             def huber_weighted_chunk_cuda(self):
