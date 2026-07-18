@@ -151,6 +151,9 @@ python csrc/check_format.py --fix
 - CUDA custom-op 还包含 alignment descriptor cosine 双向最近邻、standalone
   wavelet、star-shrink、sigma-clip/Huber chunk 与 Norma fused pixel/component
   detection；生产候选均声明并消费显存模型
+- OpenMP custom-op 为 Norma fused pixel/component detection 与 star-shrink DoG
+  mask 提供无 GPU 的原生路径；detection 仍在 host 侧复用同一套 OpenCV contour
+  几何和候选过滤语义
 
 ## 打包约定
 

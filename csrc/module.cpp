@@ -4,6 +4,7 @@
 #include "ops/cpu/alignment/alignment_ops.h"
 #include "ops/cpu/alignment/matching_bidirectional_nearest_ops.h"
 #include "ops/cpu/calibration/calibration_ops.h"
+#include "ops/cpu/detection/star_detect_fused_pixel_components_ops.h"
 #include "ops/cpu/fgp/fgp_ops.h"
 #include "ops/cpu/filter/filter_ops.h"
 #include "ops/cpu/max/max_ops.h"
@@ -11,6 +12,7 @@
 #include "ops/cpu/noise/noise_ops.h"
 #include "ops/cpu/remap/remap_ops.h"
 #include "ops/cpu/sigma_clip/sigma_clip_chunk_ops.h"
+#include "ops/cpu/star_shrink/star_mask_dog_ops.h"
 #include "ops/cpu/star_shrink/star_shrink_ops.h"
 #include "ops/cpu/wavelet/wavelet_ops.h"
 
@@ -44,6 +46,7 @@ PYBIND11_MODULE(_C, m) {
     bind_alignment_ops(m);
     bind_matching_bidirectional_nearest_cpu_ops(m);
     bind_calibration_ops(m);
+    bind_star_detect_fused_pixel_components_cpu_ops(m);
     bind_filter_ops(m);
     bind_fgp_ops(m);
     bind_max_ops(m);
@@ -51,6 +54,7 @@ PYBIND11_MODULE(_C, m) {
     bind_noise_ops(m);
     bind_remap_ops(m);
     bind_sigma_clip_chunk_ops(m);
+    bind_star_mask_dog_cpu_ops(m);
     bind_star_shrink_ops(m);
     bind_wavelet_ops(m);
 #if HNW_ENABLE_CUDA

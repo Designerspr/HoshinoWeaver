@@ -147,9 +147,11 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "cuda_host_io",
         "star_mask_dog_cuda",
         priority=10,
+        fallback="openmp_cpu",
         build_flag="cuda",
         memory_model="static_estimator",
     ),
+    BackendCandidate("star_mask_dog", "openmp_cpu", "star_mask_dog_cpu"),
     BackendCandidate(
         "star_shrink_dog_process",
         "cuda_host_io",
@@ -198,8 +200,15 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "star_detect_fused_pixel_components",
         "cuda_host_io",
         "star_detect_fused_pixel_components_cuda",
+        priority=10,
+        fallback="openmp_cpu",
         build_flag="cuda",
         memory_model="phase_estimator",
+    ),
+    BackendCandidate(
+        "star_detect_fused_pixel_components",
+        "openmp_cpu",
+        "star_detect_fused_pixel_components_cpu",
     ),
     BackendCandidate(
         "camera_model_remap",

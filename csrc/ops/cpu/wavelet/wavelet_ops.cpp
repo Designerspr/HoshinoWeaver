@@ -215,23 +215,11 @@ std::vector<double> idwt2(const std::vector<double>& approx, const DetailLevel& 
     return output;
 }
 
-py::array_t<double> wavelet_dec_rec_cpu_impl(
-    const py::array_t<double, py::array::c_style | py::array::forcecast>& image,
-    const ssize_t level) {
-    if (image.ndim() != 2) {
-        throw std::invalid_argument("wavelet_dec_rec_cpu: image must be 2D");
-    }
-    if (image.shape(0) <= 0 || image.shape(1) <= 0) {
-        throw std::invalid_argument("wavelet_dec_rec_cpu: image height and width must be positive");
-    }
-    if (level <= 0) {
-        throw std::invalid_argument("wavelet_dec_rec_cpu: invalid wavelet level");
-    }
-
-    ssize_t current_h = image.shape(0);
-    ssize_t current_w = image.shape(1);
-    const double* input = image.data();
-    std::vector<double> current(input, input + static_cast<size_t>(current_h * current_w));
+hnw::wavelet::CpuImage wavelet_dec_rec_cpu_core(const double* input, const ssize_t height,
+                                                const ssize_t width, const ssize_t level) {
+    ssize_t current_h = height;
+    ssize_t current_w = width;
+    std::vector<double> current(input, input + static_cast<size_t>(height * width));
     std::vector<DetailLevel> details(static_cast<size_t>(level));
 
     for (ssize_t idx = 0; idx < level; ++idx) {
@@ -250,20 +238,49 @@ py::array_t<double> wavelet_dec_rec_cpu_impl(
         current = idwt2(current, detail, zero_detail, &current_h, &current_w);
     }
 
-    py::array_t<double> output({current_h, current_w});
-    auto out = output.mutable_unchecked<2>();
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-    for (ssize_t y = 0; y < current_h; ++y) {
-        for (ssize_t x = 0; x < current_w; ++x) {
-            out(y, x) = current[static_cast<size_t>(y * current_w + x)];
-        }
+    return {std::move(current), current_h, current_w};
+}
+
+py::array_t<double> wavelet_dec_rec_cpu_impl(
+    const py::array_t<double, py::array::c_style | py::array::forcecast>& image,
+    const ssize_t level) {
+    if (image.ndim() != 2) {
+        throw std::invalid_argument("wavelet_dec_rec_cpu: image must be 2D");
     }
+    if (image.shape(0) <= 0 || image.shape(1) <= 0) {
+        throw std::invalid_argument("wavelet_dec_rec_cpu: image height and width must be positive");
+    }
+    if (level <= 0) {
+        throw std::invalid_argument("wavelet_dec_rec_cpu: invalid wavelet level");
+    }
+
+    hnw::wavelet::CpuImage reconstructed;
+    {
+        py::gil_scoped_release release;
+        reconstructed =
+            hnw::wavelet::dec_rec_cpu(image.data(), image.shape(0), image.shape(1), level);
+    }
+    py::array_t<double> output({reconstructed.height, reconstructed.width});
+    std::copy(reconstructed.values.begin(), reconstructed.values.end(), output.mutable_data());
     return output;
 }
 
 } // namespace
+
+hnw::wavelet::CpuImage hnw::wavelet::dec_rec_cpu(const double* image, const int64_t height,
+                                                 const int64_t width, const int64_t level) {
+    if (image == nullptr) {
+        throw std::invalid_argument("wavelet_dec_rec_cpu: image pointer must not be null");
+    }
+    if (height <= 0 || width <= 0) {
+        throw std::invalid_argument("wavelet_dec_rec_cpu: image height and width must be positive");
+    }
+    if (level <= 0) {
+        throw std::invalid_argument("wavelet_dec_rec_cpu: invalid wavelet level");
+    }
+    return wavelet_dec_rec_cpu_core(image, static_cast<ssize_t>(height),
+                                    static_cast<ssize_t>(width), static_cast<ssize_t>(level));
+}
 
 void bind_wavelet_ops(py::module_& m) {
     m.def("wavelet_dec_rec_cpu", &wavelet_dec_rec_cpu_impl, py::arg("image"), py::arg("level"));

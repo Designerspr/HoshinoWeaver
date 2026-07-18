@@ -52,7 +52,7 @@ def _validate_dog_image(image: np.ndarray, logical_op: str) -> np.ndarray:
     if image_arr.shape[0] <= 0 or image_arr.shape[1] <= 0:
         raise ValueError(f"{logical_op}: image height and width must be positive")
     if np.dtype(image_arr.dtype) not in _COMPILED_SUPPORTED_DTYPES:
-        raise ValueError(f"{logical_op}: CUDA backend supports uint8/uint16 only")
+        raise ValueError(f"{logical_op}: compiled backends support uint8/uint16 only")
     if not image_arr.flags.c_contiguous:
         image_arr = np.ascontiguousarray(image_arr)
     return image_arr
@@ -523,6 +523,31 @@ def star_mask_dog_compiled_cuda(
     )
 
 
+def star_mask_dog_compiled_cpu(
+    image: np.ndarray,
+    sigma_small: float = 1.5,
+    sigma_large: float = 12.0,
+    threshold_ratio: int | float = 3,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+) -> np.ndarray:
+    module, _ = _load_compiled_module_result()
+    if module is None or not hasattr(module, "star_mask_dog_cpu"):
+        raise RuntimeError("compiled custom op backend is unavailable")
+    image_arr = _validate_dog_image(image, "star_mask_dog")
+    _dog_kernel_size(sigma_small, "star_mask_dog")
+    _dog_kernel_size(sigma_large, "star_mask_dog")
+    _apply_compiled_threads("star_mask_dog", image_arr)
+    return module.star_mask_dog_cpu(
+        image_arr,
+        float(sigma_small),
+        float(sigma_large),
+        float(threshold_ratio),
+        int(open_ksize),
+        int(dilate_ksize),
+    )
+
+
 @lru_cache(maxsize=2)
 def _select_star_mask_dog_backend(preference: str) -> BackendSelection:
     return _select_backend(
@@ -530,6 +555,18 @@ def _select_star_mask_dog_backend(preference: str) -> BackendSelection:
         preference,
         load_module=_load_compiled_module_result,
     )
+
+
+def _star_mask_dog_backend(
+    selection: BackendSelection,
+) -> tuple[str, Callable[..., np.ndarray]]:
+    if not selection.native or selection.candidate is None:
+        return "numpy", star_mask_dog_numpy
+    if selection.candidate.kernel_name == "star_mask_dog_cuda":
+        return "cuda", star_mask_dog_compiled_cuda
+    if selection.candidate.kernel_name == "star_mask_dog_cpu":
+        return "cpu", star_mask_dog_compiled_cpu
+    raise RuntimeError(f"unknown star_mask_dog backend candidate: {selection.candidate}")
 
 
 def star_mask_dog(
@@ -552,64 +589,49 @@ def star_mask_dog(
         )
 
     selection = _select_star_mask_dog_backend(_fallback_preference())
-    if not selection.native or selection.candidate is None:
-        if selection.reason:
-            _debug_log(f"DoG mask compiled backend unavailable, reason: {selection.reason}")
-        return star_mask_dog_numpy(
-            image,
-            sigma_small=sigma_small,
-            sigma_large=sigma_large,
-            threshold_ratio=threshold_ratio,
-            open_ksize=open_ksize,
-            dilate_ksize=dilate_ksize,
-        )
-
-    if selection.candidate.backend == "cuda_host_io":
-        try:
-            return star_mask_dog_compiled_cuda(
-                image,
-                sigma_small=sigma_small,
-                sigma_large=sigma_large,
-                threshold_ratio=threshold_ratio,
-                open_ksize=open_ksize,
-                dilate_ksize=dilate_ksize,
-            )
-        except RuntimeError as exc:
-            if is_cuda_resource_exhausted_error(exc):
-                fallback_selection = resolve_after_resource_exhausted(
-                    "star_mask_dog",
-                    "cuda_host_io",
-                    exc,
-                    load_module=_load_compiled_module_result,
-                )
-                _debug_log(
-                    "CUDA DoG mask backend exhausted resources, falling back "
-                    f"to NumPy: {exc}"
-                )
-            else:
-                fallback_selection = resolve_after_runtime_unavailable(
-                    "star_mask_dog",
-                    "cuda_host_io",
-                    exc,
-                    load_module=_load_compiled_module_result,
-                )
-                _debug_log(
-                    "CUDA DoG mask backend unavailable at runtime, falling "
-                    f"back to NumPy: {exc}"
-                )
-            if fallback_selection.native:
-                raise RuntimeError(
-                    "star_mask_dog selected an unsupported native fallback"
-                )
-
-    return star_mask_dog_numpy(
-        image,
+    if selection.reason:
+        _debug_log(f"DoG mask compiled backend unavailable, reason: {selection.reason}")
+    backend_name, backend = _star_mask_dog_backend(selection)
+    kernel_kwargs = dict(
         sigma_small=sigma_small,
         sigma_large=sigma_large,
         threshold_ratio=threshold_ratio,
         open_ksize=open_ksize,
         dilate_ksize=dilate_ksize,
     )
+    if backend_name != "cuda":
+        return backend(image, **kernel_kwargs)
+
+    try:
+        return backend(image, **kernel_kwargs)
+    except RuntimeError as exc:
+        if is_cuda_resource_exhausted_error(exc):
+            fallback_selection = resolve_after_resource_exhausted(
+                "star_mask_dog",
+                "cuda_host_io",
+                exc,
+                load_module=_load_compiled_module_result,
+            )
+            _debug_log(
+                "CUDA DoG mask backend exhausted resources, falling back "
+                f"to the next backend: {exc}"
+            )
+        else:
+            fallback_selection = resolve_after_runtime_unavailable(
+                "star_mask_dog",
+                "cuda_host_io",
+                exc,
+                load_module=_load_compiled_module_result,
+            )
+            _debug_log(
+                "CUDA DoG mask backend unavailable at runtime, falling "
+                f"back to the next backend: {exc}"
+            )
+
+    fallback_name, fallback_backend = _star_mask_dog_backend(fallback_selection)
+    if fallback_name == "cuda":
+        raise RuntimeError("CUDA backend remained selected after runtime exclusion")
+    return fallback_backend(image, **kernel_kwargs)
 
 
 def star_shrink_dog_process_numpy(

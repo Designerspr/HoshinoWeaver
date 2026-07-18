@@ -79,6 +79,8 @@ FRAME_STREAM_CASE_NAMES = {
     "noise_fill_local_mean_stream_compiled",
     "star_shrink_detect_mask_stream_numpy",
     "star_shrink_detect_mask_stream_compiled",
+    "star_mask_dog_stream_numpy",
+    "star_mask_dog_stream_compiled",
     "star_shrink_process_stream_numpy",
     "star_shrink_process_stream_compiled",
     "fgp_accumulate_stream_numpy",
@@ -137,6 +139,8 @@ CASE_NAMES = [
     "noise_fill_local_mean_stream_compiled",
     "star_shrink_detect_mask_stream_numpy",
     "star_shrink_detect_mask_stream_compiled",
+    "star_mask_dog_stream_numpy",
+    "star_mask_dog_stream_compiled",
     "star_shrink_process_stream_numpy",
     "star_shrink_process_stream_compiled",
     "fgp_accumulate_stream_numpy",
@@ -468,6 +472,26 @@ def bench_star_shrink_detect_mask_stream_backend(
     }[backend]
     for frame in frames:
         detect(frame, ksize=13, threshold_ratio=1.0, open_ksize=3, dilate_ksize=0)
+
+
+def bench_star_mask_dog_stream_backend(
+    frames: list[np.ndarray],
+    *,
+    backend: str,
+) -> None:
+    detect = {
+        "numpy": star_shrink_ops.star_mask_dog_numpy,
+        "compiled": star_shrink_ops.star_mask_dog_compiled_cpu,
+    }[backend]
+    for frame in frames:
+        detect(
+            frame,
+            sigma_small=1.5,
+            sigma_large=12.0,
+            threshold_ratio=3.0,
+            open_ksize=3,
+            dilate_ksize=0,
+        )
 
 
 def bench_fgp_accumulate_stream_backend(
@@ -1236,6 +1260,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             backend="numpy",
         ),
         "star_shrink_detect_mask_stream_compiled": lambda: bench_star_shrink_detect_mask_stream_backend(
+            frames,
+            backend="compiled",
+        ),
+        "star_mask_dog_stream_numpy": lambda: bench_star_mask_dog_stream_backend(
+            frames,
+            backend="numpy",
+        ),
+        "star_mask_dog_stream_compiled": lambda: bench_star_mask_dog_stream_backend(
             frames,
             backend="compiled",
         ),

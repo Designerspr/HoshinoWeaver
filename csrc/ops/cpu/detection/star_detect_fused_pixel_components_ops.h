@@ -1,0 +1,9 @@
+#pragma once
+
+#include "common/compat.h"
+
+#include <pybind11/pybind11.h>
+
+namespace py = pybind11;
+
+void bind_star_detect_fused_pixel_components_cpu_ops(py::module_& m);

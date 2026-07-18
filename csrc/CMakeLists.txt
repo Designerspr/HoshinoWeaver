@@ -25,6 +25,10 @@ add_library(hnw_ops_cpu_calibration STATIC
     ops/cpu/calibration/calibration_ops.cpp
 )
 
+add_library(hnw_ops_cpu_detection STATIC
+    ops/cpu/detection/star_detect_fused_pixel_components_ops.cpp
+)
+
 add_library(hnw_ops_cpu_alignment STATIC
     ops/cpu/alignment/alignment_ops.cpp
     ops/cpu/alignment/matching_bidirectional_nearest_ops.cpp
@@ -63,6 +67,7 @@ add_library(hnw_ops_cpu_sigma_clip STATIC
 )
 
 add_library(hnw_ops_cpu_star_shrink STATIC
+    ops/cpu/star_shrink/star_mask_dog_ops.cpp
     ops/cpu/star_shrink/star_shrink_ops.cpp
 )
 
@@ -73,6 +78,7 @@ add_library(hnw_ops_cpu_wavelet STATIC
 set(hnw_cpu_targets
     hnw_ops_common
     hnw_ops_cpu_calibration
+    hnw_ops_cpu_detection
     hnw_ops_cpu_alignment
     hnw_ops_cpu_fgp
     hnw_ops_cpu_filter
@@ -97,6 +103,8 @@ foreach(target IN LISTS hnw_cpu_targets)
     hnw_link_openmp("${target}")
     hnw_enable_lto("${target}")
 endforeach()
+
+target_link_libraries(hnw_ops_cpu_detection PRIVATE hnw_ops_cpu_wavelet)
 
 pybind11_add_module(_C MODULE
     NO_EXTRAS
@@ -139,6 +147,7 @@ target_include_directories(
 target_link_libraries(_C PRIVATE
     hnw_ops_common
     hnw_ops_cpu_calibration
+    hnw_ops_cpu_detection
     hnw_ops_cpu_alignment
     hnw_ops_cpu_fgp
     hnw_ops_cpu_filter

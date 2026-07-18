@@ -24,10 +24,13 @@ class DetectedStars:
     volumes: NDArray[np.float64]
 
 
-class _CudaHybridGeometryMismatch(RuntimeError):
-    """CUDA component summaries cannot be mapped to exact host contours."""
+class _NativeHybridGeometryMismatch(RuntimeError):
+    """Native component summaries cannot be mapped to exact host contours."""
 
     pass
+
+
+_CudaHybridGeometryMismatch = _NativeHybridGeometryMismatch
 
 
 def _empty_detected_stars() -> DetectedStars:
@@ -132,7 +135,7 @@ def _measure_contour_candidates(
     return positions, areas, intensities, eccentricities
 
 
-def _measure_cuda_hybrid_contour_candidates(
+def _measure_native_hybrid_contour_candidates(
     component_positions: NDArray[np.float64],
     component_intensities: NDArray[np.float64],
     binary_mask: NDArray[np.uint8],
@@ -142,7 +145,7 @@ def _measure_cuda_hybrid_contour_candidates(
     NDArray[np.float64],
     NDArray[np.float64],
 ]:
-    """Recover exact contour geometry and attach CUDA component intensities."""
+    """Recover exact contour geometry and attach native component intensities."""
     contours = _find_star_contours(binary_mask)
     if not contours:
         empty = np.empty((0,), dtype=np.float64)
@@ -151,8 +154,8 @@ def _measure_cuda_hybrid_contour_candidates(
     ellipses = [cv2.fitEllipse(contour) for contour in contours]
     positions = np.asarray([ellipse[0] for ellipse in ellipses])
     if len(component_positions) < len(positions):
-        raise _CudaHybridGeometryMismatch(
-            "CUDA detector returned fewer components than contours")
+        raise _NativeHybridGeometryMismatch(
+            "Native detector returned fewer components than contours")
     distances = np.linalg.norm(
         positions[:, None, :] - component_positions[None, :, :], axis=2)
     component_indices = np.argmin(distances, axis=1)
@@ -160,8 +163,8 @@ def _measure_cuda_hybrid_contour_candidates(
         np.arange(len(positions)), component_indices]
     if (len(np.unique(component_indices)) != len(component_indices)
             or np.any(nearest_distances > 1.0)):
-        raise _CudaHybridGeometryMismatch(
-            "CUDA components cannot be mapped one-to-one to contours")
+        raise _NativeHybridGeometryMismatch(
+            "Native components cannot be mapped one-to-one to contours")
 
     areas = np.asarray([
         cv2.contourArea(contour) + 0.5 * len(contour)
@@ -174,6 +177,9 @@ def _measure_cuda_hybrid_contour_candidates(
         ]))
     intensities = component_intensities[component_indices]
     return positions, areas, intensities, eccentricities
+
+
+_measure_cuda_hybrid_contour_candidates = _measure_native_hybrid_contour_candidates
 
 
 def _detect_star_points_contour(
@@ -246,7 +252,7 @@ def _detect_star_points_opencv(*args, **kwargs) -> DetectedStars:
     return _detect_star_points_contour(*args, **kwargs)
 
 
-def _detect_star_points_cuda_hybrid(
+def _detect_star_points_native_hybrid(
     img_gray: NDArray,
     mask=None,
     resize_length=10000,
@@ -254,7 +260,7 @@ def _detect_star_points_cuda_hybrid(
     sigma: float = 2,
     min_star_points: int = 400,
 ) -> DetectedStars:
-    """Run fused CUDA pixel processing with exact OpenCV contour geometry."""
+    """Run fused native pixel processing with exact OpenCV contour geometry."""
     img_shape = img_gray.shape
     img_gray = _normalize_gray(img_gray)
     if np.ptp(img_gray) == 0:
@@ -272,10 +278,10 @@ def _detect_star_points_cuda_hybrid(
                 gaussian_ksize=gaussian_ksize,
                 sigma=sigma,
             ))
-        candidates = _measure_cuda_hybrid_contour_candidates(
+        candidates = _measure_native_hybrid_contour_candidates(
             component_positions, component_intensities, binary_mask)
         candidate_count = len(candidates[0])
-        logger.debug(f"{candidate_count} CUDA hybrid star candidates detected")
+        logger.debug(f"{candidate_count} native hybrid star candidates detected")
         if candidate_count < min_star_points and resize_factor < 1:
             logger.debug(
                 "Not enough points, resize factor is now increasing by 2")
@@ -289,8 +295,13 @@ def _detect_star_points_cuda_hybrid(
         )
     logger.debug(f"final resize factor = {resize_factor:.3f}")
     detected = _filter_star_candidates(*candidates)
-    logger.debug(f"Final CUDA hybrid star points = {len(detected.positions)}")
+    logger.debug(f"Final native hybrid star points = {len(detected.positions)}")
     return detected
+
+
+# Compatibility alias for existing benchmark/report tooling. The implementation
+# now supports both CUDA and OpenMP pixel/component backends.
+_detect_star_points_cuda_hybrid = _detect_star_points_native_hybrid
 
 
 def detect_star_points(
@@ -301,7 +312,7 @@ def detect_star_points(
     sigma: float = 2,
     min_star_points: int = 400,
 ) -> DetectedStars:
-    """Detect stars with CUDA pixel work plus exact host contour geometry."""
+    """Detect stars with native pixel work plus exact host contour geometry."""
     kwargs = {
         "mask": mask,
         "resize_length": resize_length,
@@ -310,23 +321,23 @@ def detect_star_points(
         "min_star_points": min_star_points,
     }
     try:
-        return _detect_star_points_cuda_hybrid(img_gray, **kwargs)
+        return _detect_star_points_native_hybrid(img_gray, **kwargs)
     except CustomOpUnavailableError as exc:
         logger.debug(
-            "CUDA star detector unavailable; using contour fallback: {}", exc)
-    except _CudaHybridGeometryMismatch as exc:
+            "Native star detector unavailable; using contour fallback: {}", exc)
+    except _NativeHybridGeometryMismatch as exc:
         logger.warning(
-            "CUDA star detector geometry guard failed; using contour fallback: {}",
+            "Native star detector geometry guard failed; using contour fallback: {}",
             exc,
         )
     except StarDetectCapacityError as exc:
         logger.warning(
-            "CUDA star detector capacity guard reached; using contour fallback: {}",
+            "Native star detector capacity guard reached; using contour fallback: {}",
             exc,
         )
     except CustomOpResourceExhaustedError as exc:
         logger.warning(
-            "CUDA star detector resources exhausted; using contour fallback: {}",
+            "Native star detector resources exhausted; using contour fallback: {}",
             exc,
         )
     return _detect_star_points_contour(img_gray, **kwargs)

@@ -6,6 +6,8 @@ import numpy as np
 
 from hoshicore._custom_op import build_info
 from hoshicore._custom_op.backend_registry import registered_backend_candidates
+from hoshicore._custom_op.backend_registry import BackendCandidate
+from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import CustomOpUnavailableError
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
@@ -55,6 +57,10 @@ class TestStarDetectCustomOps(unittest.TestCase):
                 and candidate.backend == "cuda_host_io"
                 and candidate.build_flag == "cuda"
                 for candidate in candidates))
+        self.assertTrue(
+            any(candidate.kernel_name == "star_detect_fused_pixel_components_cpu"
+                and candidate.backend == "openmp_cpu"
+                for candidate in candidates))
 
     def test_star_detect_fused_pixel_components_rejects_numpy_fallback(
             self) -> None:
@@ -65,7 +71,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
                 "os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"},
                 clear=False):
             detection_ops._select_star_detect_fused_pixel_components_backend.cache_clear()
-            with self.assertRaisesRegex(CustomOpUnavailableError, "requires the compiled CUDA"):
+            with self.assertRaisesRegex(CustomOpUnavailableError, "requires a compiled backend"):
                 detection_ops.star_detect_fused_pixel_components(
                     image, mask, 1.0)
 
@@ -81,15 +87,25 @@ class TestStarDetectCustomOps(unittest.TestCase):
         )
 
         compiled = mock.Mock(return_value=expected)
+        candidate = BackendCandidate(
+            "star_detect_fused_pixel_components",
+            "openmp_cpu",
+            "star_detect_fused_pixel_components_cpu",
+        )
+        selection = BackendSelection(candidate, object())
         with mock.patch.dict(
                 "os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "auto"},
                 clear=False):
             with mock.patch.object(
                     detection_ops,
                     "_select_star_detect_fused_pixel_components_backend",
-                    return_value=("compiled", compiled)):
-                got = detection_ops.star_detect_fused_pixel_components(
-                    image, mask, 0.5, gaussian_ksize=7, sigma=1.5)
+                    return_value=selection):
+                with mock.patch.object(
+                        detection_ops,
+                        "_star_detect_fused_pixel_components_cpu_validated",
+                        compiled):
+                    got = detection_ops.star_detect_fused_pixel_components(
+                        image, mask, 0.5, gaussian_ksize=7, sigma=1.5)
 
         compiled.assert_called_once()
         args = compiled.call_args.args
@@ -112,6 +128,12 @@ class TestStarDetectCustomOps(unittest.TestCase):
         )
         native = mock.Mock(return_value=expected)
         module = mock.Mock(star_detect_fused_pixel_components_cuda=native)
+        candidate = BackendCandidate(
+            "star_detect_fused_pixel_components",
+            "cuda_host_io",
+            "star_detect_fused_pixel_components_cuda",
+        )
+        selection = BackendSelection(candidate, module)
         admission = mock.MagicMock()
         admission.__enter__.return_value = mock.Mock(
             granted=True,
@@ -121,10 +143,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         with mock.patch.object(
             detection_ops,
             "_select_star_detect_fused_pixel_components_backend",
-            return_value=(
-                "compiled",
-                detection_ops._star_detect_fused_pixel_components_compiled_validated,
-            ),
+            return_value=selection,
         ):
             with mock.patch.object(
                 detection_ops,
@@ -151,36 +170,174 @@ class TestStarDetectCustomOps(unittest.TestCase):
         native.assert_called_once()
         self.assertIs(got, expected)
 
+    def test_star_detect_cuda_runtime_unavailable_falls_back_to_cpu(self) -> None:
+        image = np.arange(64, dtype=np.float64).reshape(8, 8)
+        expected = (
+            np.array([[2.0, 3.0]], dtype=np.float64),
+            np.array([5.0], dtype=np.float64),
+            np.ones(image.shape, dtype=np.uint8),
+        )
+        cuda_candidate = BackendCandidate(
+            "star_detect_fused_pixel_components",
+            "cuda_host_io",
+            "star_detect_fused_pixel_components_cuda",
+        )
+        cpu_candidate = BackendCandidate(
+            "star_detect_fused_pixel_components",
+            "openmp_cpu",
+            "star_detect_fused_pixel_components_cpu",
+        )
+        cuda_selection = BackendSelection(cuda_candidate, object())
+        cpu_selection = BackendSelection(cpu_candidate, object())
+
+        with mock.patch.object(
+                detection_ops,
+                "_select_star_detect_fused_pixel_components_backend",
+                return_value=cuda_selection):
+            with mock.patch.object(
+                    detection_ops,
+                    "_star_detect_fused_pixel_components_compiled_validated",
+                    side_effect=RuntimeError("no CUDA-capable device is detected")):
+                with mock.patch.object(
+                        detection_ops,
+                        "resolve_after_runtime_unavailable",
+                        return_value=cpu_selection):
+                    with mock.patch.object(
+                            detection_ops,
+                            "_star_detect_fused_pixel_components_cpu_validated",
+                            return_value=expected) as cpu_backend:
+                        got = detection_ops.star_detect_fused_pixel_components(
+                            image, None, 1.0)
+
+        cpu_backend.assert_called_once()
+        self.assertIs(got, expected)
+
+    def test_star_detect_cpu_backend_error_propagates(self) -> None:
+        image = np.arange(64, dtype=np.float64).reshape(8, 8)
+        candidate = BackendCandidate(
+            "star_detect_fused_pixel_components",
+            "openmp_cpu",
+            "star_detect_fused_pixel_components_cpu",
+        )
+        selection = BackendSelection(candidate, object())
+
+        with mock.patch.object(
+                detection_ops,
+                "_select_star_detect_fused_pixel_components_backend",
+                return_value=selection):
+            with mock.patch.object(
+                    detection_ops,
+                    "_star_detect_fused_pixel_components_cpu_validated",
+                    side_effect=RuntimeError("CPU detector failed")):
+                with self.assertRaisesRegex(RuntimeError, "CPU detector failed"):
+                    detection_ops.star_detect_fused_pixel_components(
+                        image, None, 1.0)
+
     def test_star_detect_fused_pixel_components_maps_capacity_error(self) -> None:
         image = np.arange(64, dtype=np.float64).reshape(8, 8)
+        candidate = BackendCandidate(
+            "star_detect_fused_pixel_components",
+            "cuda_host_io",
+            "star_detect_fused_pixel_components_cuda",
+        )
+        selection = BackendSelection(candidate, object())
         backend = mock.Mock(
             side_effect=detection_ops.StarDetectCapacityError(
                 "GPU CC did not converge"))
+        unavailable = BackendSelection(None, object(), "no CPU backend")
 
         with mock.patch.object(
                 detection_ops,
                 "_select_star_detect_fused_pixel_components_backend",
-                return_value=("compiled", backend)):
-            with self.assertRaisesRegex(
-                    detection_ops.StarDetectCapacityError,
-                    "did not converge"):
-                detection_ops.star_detect_fused_pixel_components(
-                    image, None, 1.0)
+                return_value=selection):
+            with mock.patch.object(
+                    detection_ops,
+                    "_star_detect_fused_pixel_components_compiled_validated",
+                    backend):
+                with mock.patch.object(
+                        detection_ops, "_select_backend", return_value=unavailable):
+                    with self.assertRaisesRegex(
+                            detection_ops.StarDetectCapacityError,
+                            "did not converge"):
+                        detection_ops.star_detect_fused_pixel_components(
+                            image, None, 1.0)
 
     def test_star_detect_fused_pixel_components_maps_resource_error(self) -> None:
         image = np.arange(64, dtype=np.float64).reshape(8, 8)
+        candidate = BackendCandidate(
+            "star_detect_fused_pixel_components",
+            "cuda_host_io",
+            "star_detect_fused_pixel_components_cuda",
+        )
+        selection = BackendSelection(candidate, object())
         backend = mock.Mock(
             side_effect=CustomOpResourceExhaustedError("cudaMalloc input"))
+        unavailable = BackendSelection(None, object(), "no CPU backend")
 
         with mock.patch.object(
                 detection_ops,
                 "_select_star_detect_fused_pixel_components_backend",
-                return_value=("compiled", backend)):
-            with self.assertRaisesRegex(
-                    CustomOpResourceExhaustedError,
-                    "resources exhausted"):
-                detection_ops.star_detect_fused_pixel_components(
-                    image, None, 1.0)
+                return_value=selection):
+            with mock.patch.object(
+                    detection_ops,
+                    "_star_detect_fused_pixel_components_compiled_validated",
+                    backend):
+                with mock.patch.object(
+                        detection_ops,
+                        "resolve_after_resource_exhausted",
+                        return_value=unavailable):
+                    with self.assertRaisesRegex(CustomOpUnavailableError, "no CPU backend"):
+                        detection_ops.star_detect_fused_pixel_components(
+                            image, None, 1.0)
+
+    def test_star_detect_fused_pixel_components_cpu_matches_opencv_on_synthetic(
+            self) -> None:
+        image = np.zeros((384, 384), dtype=np.float64)
+        for x, y, value in [(80, 90, 7.0), (140, 260, 9.0),
+                            (220, 130, 8.0), (300, 300, 10.0)]:
+            cv2.circle(image, (x, y), 5, value, -1)
+            cv2.circle(image, (x, y), 9, value * 0.35, 1)
+        image += np.linspace(0.0, 0.05, image.shape[1], dtype=np.float64)[None, :]
+
+        candidates = detection_ops.star_detect_fused_pixel_components_compiled_cpu(
+            image, None, 1.0, gaussian_ksize=9, sigma=2.0)
+        measured = star_detection._measure_cuda_hybrid_contour_candidates(*candidates)
+        got = star_detection._filter_star_candidates(*measured)
+        expected = star_detection._detect_star_points_opencv(
+            image,
+            min_star_points=0,
+            resize_length=10000,
+            gaussian_ksize=9,
+            sigma=2,
+        )
+        self.assertGreaterEqual(len(got.positions), 3)
+        self.assertEqual(len(got.positions), len(expected.positions))
+        distances = np.linalg.norm(
+            expected.positions[:, None, :] - got.positions[None, :, :], axis=2)
+        self.assertTrue(np.all(np.min(distances, axis=1) < 1.0))
+        self.assertTrue(np.all(np.min(distances, axis=0) < 1.0))
+        nearest = np.argmin(distances, axis=1)
+        np.testing.assert_allclose(
+            got.volumes[nearest], expected.volumes, rtol=1e-12, atol=1e-12)
+
+    def test_star_detect_fused_pixel_components_cpu_respects_external_mask(
+            self) -> None:
+        image = np.zeros((192, 256), dtype=np.float64)
+        cv2.circle(image, (64, 80), 6, 8.0, -1)
+        cv2.circle(image, (196, 110), 6, 10.0, -1)
+        mask = np.zeros(image.shape, dtype=np.uint8)
+        mask[:, :128] = 255
+
+        component_positions, component_intensities, binary_mask = (
+            detection_ops.star_detect_fused_pixel_components_compiled_cpu(
+                image, mask, 1.0, gaussian_ksize=9, sigma=2.0))
+
+        self.assertGreater(len(component_positions), 0)
+        self.assertEqual(len(component_positions), len(component_intensities))
+        self.assertTrue(np.all(component_positions[:, 0] < 128))
+        self.assertTrue(np.all(np.isfinite(component_intensities)))
+        self.assertTrue(np.all(component_intensities > 0))
+        self.assertEqual(np.count_nonzero(binary_mask[:, 128:]), 0)
 
     def test_star_detect_fused_pixel_components_compiled_matches_opencv_on_synthetic(
             self) -> None:
@@ -241,7 +398,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
 
         with mock.patch.object(
                 star_detection,
-                "_detect_star_points_cuda_hybrid",
+                "_detect_star_points_native_hybrid",
                 return_value=expected) as cuda_hybrid:
             with mock.patch.object(
                     star_detection,
@@ -261,7 +418,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         )
         with mock.patch.object(
                 star_detection,
-                "_detect_star_points_cuda_hybrid",
+                "_detect_star_points_native_hybrid",
                 side_effect=CustomOpUnavailableError("no CUDA")):
             with mock.patch.object(
                     star_detection,
@@ -301,7 +458,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         )
         with mock.patch.object(
                 star_detection,
-                "_detect_star_points_cuda_hybrid",
+                "_detect_star_points_native_hybrid",
                 side_effect=star_detection._CudaHybridGeometryMismatch(
                     "ambiguous mapping")):
             with mock.patch.object(
@@ -322,7 +479,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         )
         with mock.patch.object(
                 star_detection,
-                "_detect_star_points_cuda_hybrid",
+                "_detect_star_points_native_hybrid",
                 side_effect=detection_ops.StarDetectCapacityError(
                     "GPU CC did not converge")):
             with mock.patch.object(
@@ -335,7 +492,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         contour.assert_called_once()
         self.assertIs(got, expected)
 
-    def test_long_connected_structure_hits_capacity_guard_and_falls_back(
+    def test_long_connected_structure_tries_cpu_before_contour_fallback(
             self) -> None:
         if not build_info().get("cuda"):
             self.skipTest("CUDA fused pixel-component backend is not built")
@@ -356,17 +513,24 @@ class TestStarDetectCustomOps(unittest.TestCase):
             positions=np.empty((0, 2)),
             volumes=np.empty((0,)),
         )
-
+        cpu_impl = detection_ops._star_detect_fused_pixel_components_cpu_validated
         with mock.patch.object(
+                detection_ops,
+                "_star_detect_fused_pixel_components_cpu_validated",
+                wraps=cpu_impl,
+        ) as cpu_backend:
+            with mock.patch.object(
                 star_detection,
                 "_detect_star_points_contour",
-                return_value=expected) as contour:
-            got = star_detection.detect_star_points(
-                image,
-                resize_length=10000,
-                min_star_points=0,
-            )
+                return_value=expected,
+            ) as contour:
+                got = star_detection.detect_star_points(
+                    image,
+                    resize_length=10000,
+                    min_star_points=0,
+                )
 
+        cpu_backend.assert_called_once()
         contour.assert_called_once()
         self.assertIs(got, expected)
         self.assertFalse(
@@ -390,7 +554,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         )
         with mock.patch.object(
                 star_detection,
-                "_detect_star_points_cuda_hybrid",
+                "_detect_star_points_native_hybrid",
                 side_effect=CustomOpResourceExhaustedError(
                     "cudaMalloc image: out of memory")):
             with mock.patch.object(

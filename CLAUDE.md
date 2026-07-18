@@ -101,10 +101,11 @@ Nodes reference operators by class name (e.g., `TrailStackerOp`) or by SubDAG fi
 
 C++/pybind11 compiled extension (`_C`) with CPU/NumPy fallbacks. Most wrappers in
 `_custom_op/ops/` select a compiled CUDA/OpenMP backend and then fall back to
-NumPy when that backend is explicitly unavailable. The CUDA-only
-`star_detect_fused_pixel_components` wrapper is an internal exception: its
-production fallback is Norma's OpenCV contour detector at the component layer,
-so the project still runs without compilation.
+NumPy when that backend is explicitly unavailable. The
+`star_detect_fused_pixel_components` wrapper has CUDA and OpenMP native backends
+but intentionally no standalone NumPy implementation: its final production
+fallback is Norma's OpenCV contour detector at the component layer, so the
+project still runs without compilation.
 
 Key env vars: `HNW_CUSTOM_OPS_FALLBACK` (`auto`|`cpu`|`numpy`), `HNW_CUSTOM_OPS_THREADS` (`auto`|int), `HNW_CUSTOM_OPS_DEBUG` (`0`|`1`). `cpu` disables CUDA while preserving OpenMP; GUI/runtime callers may use `set_backend_preference()` before starting a pipeline.
 

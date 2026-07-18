@@ -22,7 +22,7 @@ from bench.data_tools.starfield import generate_starfield_frames
 from hoshicore._custom_op.ops.detection import star_detect_threshold_morph_numpy
 from hoshicore.component.norma.alignment import match_star_pairs, optimize_alignment
 from hoshicore.component.norma.detection import (
-    _detect_star_points_cuda_hybrid,
+    _detect_star_points_native_hybrid,
     _detect_star_points_opencv,
     _wavelet_dec_rec,
     detect_star_points,
@@ -57,16 +57,16 @@ DEFAULT_CASE_NAMES = [
     "remap_stream",
     "camera_model_pipeline",
 ]
-GPU_CASE_NAMES = [
-    "detect_cuda_hybrid_stream",
+NATIVE_CASE_NAMES = [
+    "detect_native_hybrid_stream",
 ]
 BASELINE_CASE_NAMES = [
     "detect_opencv_stream",
 ]
-QUALITY_CASE_NAME = "detect_cuda_hybrid_vs_contour_quality"
+QUALITY_CASE_NAME = "detect_native_hybrid_vs_contour_quality"
 CASE_NAMES = [
     *DEFAULT_CASE_NAMES,
-    *GPU_CASE_NAMES,
+    *NATIVE_CASE_NAMES,
     *BASELINE_CASE_NAMES,
     QUALITY_CASE_NAME,
 ]
@@ -83,7 +83,7 @@ ALL_FRAME_CASE_NAMES = {
     "detect_ellipse_intensity_stream",
     "features_stream",
     "geometry_stream",
-    "detect_cuda_hybrid_stream",
+    "detect_native_hybrid_stream",
     "detect_opencv_stream",
 }
 ALIGNED_FRAME_CASE_NAMES = {
@@ -94,10 +94,10 @@ ALIGNED_FRAME_CASE_NAMES = {
     "remap_stream",
     "camera_model_pipeline",
 }
-CUDA_HYBRID_QUALITY_THRESHOLDS = {
+NATIVE_HYBRID_QUALITY_THRESHOLDS = {
     "max_count_diff_ratio": 0.15,
-    "min_contour_to_cuda_hybrid_recall_1px": 0.95,
-    "max_contour_to_cuda_hybrid_p95_px": 0.1,
+    "min_contour_to_native_hybrid_recall_1px": 0.95,
+    "max_contour_to_native_hybrid_p95_px": 0.1,
     "max_pair_diff_ratio": 0.20,
     "max_homography_p95_px": 0.30,
 }
@@ -317,10 +317,10 @@ def bench_detect_opencv_stream(frames: list[np.ndarray]) -> None:
         _ = _detect_star_points_opencv(gray)
 
 
-def bench_detect_cuda_hybrid_stream(frames: list[np.ndarray]) -> None:
+def bench_detect_native_hybrid_stream(frames: list[np.ndarray]) -> None:
     for frame in frames:
         gray = to_gray_f64(frame)
-        _ = _detect_star_points_cuda_hybrid(gray)
+        _ = _detect_star_points_native_hybrid(gray)
 
 
 def bench_detect_prepare_stream(frames: list[np.ndarray]) -> None:
@@ -426,29 +426,29 @@ def _match_detected_stars(ref, src, shape: tuple[int, int]):
 
 def compare_detect_quality(frames: list[np.ndarray]) -> dict[str, Any]:
     contour_results = []
-    cuda_hybrid_results = []
+    native_hybrid_results = []
     per_frame = []
     for frame in frames:
         gray = to_gray_f64(frame)
         contour = _detect_star_points_opencv(gray)
-        cuda_hybrid = _detect_star_points_cuda_hybrid(gray)
+        native_hybrid = _detect_star_points_native_hybrid(gray)
         contour_results.append(contour)
-        cuda_hybrid_results.append(cuda_hybrid)
-        contour_to_cuda_hybrid = _nearest_stats(contour.positions,
-                                             cuda_hybrid.positions)
-        cuda_hybrid_to_contour = _nearest_stats(cuda_hybrid.positions,
-                                             contour.positions)
+        native_hybrid_results.append(native_hybrid)
+        contour_to_native_hybrid = _nearest_stats(
+            contour.positions, native_hybrid.positions)
+        native_hybrid_to_contour = _nearest_stats(
+            native_hybrid.positions, contour.positions)
         count_diff_ratio = 0.0
         if len(contour.positions) > 0:
             count_diff_ratio = (
-                len(cuda_hybrid.positions) -
+                len(native_hybrid.positions) -
                 len(contour.positions)) / len(contour.positions)
         per_frame.append({
             "contour_count": len(contour.positions),
-            "cuda_hybrid_count": len(cuda_hybrid.positions),
+            "native_hybrid_count": len(native_hybrid.positions),
             "count_diff_ratio": float(count_diff_ratio),
-            "contour_to_cuda_hybrid": contour_to_cuda_hybrid,
-            "cuda_hybrid_to_contour": cuda_hybrid_to_contour,
+            "contour_to_native_hybrid": contour_to_native_hybrid,
+            "native_hybrid_to_contour": native_hybrid_to_contour,
         })
 
     shape = frames[0].shape[:2]
@@ -457,24 +457,24 @@ def compare_detect_quality(frames: list[np.ndarray]) -> dict[str, Any]:
         try:
             contour_match = _match_detected_stars(
                 contour_results[0], contour_results[idx], shape)
-            cuda_hybrid_match = _match_detected_stars(
-                cuda_hybrid_results[0], cuda_hybrid_results[idx], shape)
+            native_hybrid_match = _match_detected_stars(
+                native_hybrid_results[0], native_hybrid_results[idx], shape)
         except Exception as exc:
             pair_reports.append({"index": idx, "error": f"{type(exc).__name__}: {exc}"})
             continue
         pair_diff_ratio = 0.0
         if len(contour_match.pair_idx) > 0:
             pair_diff_ratio = (
-                len(cuda_hybrid_match.pair_idx) -
+                len(native_hybrid_match.pair_idx) -
                 len(contour_match.pair_idx)) / len(contour_match.pair_idx)
         pair_reports.append({
             "index": idx,
             "contour_pairs": len(contour_match.pair_idx),
-            "cuda_hybrid_pairs": len(cuda_hybrid_match.pair_idx),
+            "native_hybrid_pairs": len(native_hybrid_match.pair_idx),
             "pair_diff_ratio": float(pair_diff_ratio),
             "homography_delta": _homography_delta(
                 contour_match.homography,
-                cuda_hybrid_match.homography,
+                native_hybrid_match.homography,
                 shape,
             ),
         })
@@ -492,22 +492,22 @@ def summarize_detect_quality(quality: dict[str, Any]) -> dict[str, Any]:
     successful_pairs = [pair for pair in pairs if "error" not in pair]
 
     max_count_diff_ratio = 0.0
-    min_contour_to_cuda_hybrid_recall_1px = 1.0
-    max_contour_to_cuda_hybrid_p95_px = 0.0
+    min_contour_to_native_hybrid_recall_1px = 1.0
+    max_contour_to_native_hybrid_p95_px = 0.0
     for frame in per_frame:
         max_count_diff_ratio = max(
             max_count_diff_ratio,
             abs(float(frame.get("count_diff_ratio", 0.0))),
         )
-        contour_to_cuda_hybrid = frame.get("contour_to_cuda_hybrid", {})
-        min_contour_to_cuda_hybrid_recall_1px = min(
-            min_contour_to_cuda_hybrid_recall_1px,
-            float(contour_to_cuda_hybrid.get("recall_1px", 0.0)),
+        contour_to_native_hybrid = frame.get("contour_to_native_hybrid", {})
+        min_contour_to_native_hybrid_recall_1px = min(
+            min_contour_to_native_hybrid_recall_1px,
+            float(contour_to_native_hybrid.get("recall_1px", 0.0)),
         )
-        p95_px = contour_to_cuda_hybrid.get("p95_px")
+        p95_px = contour_to_native_hybrid.get("p95_px")
         if p95_px is not None:
-            max_contour_to_cuda_hybrid_p95_px = max(
-                max_contour_to_cuda_hybrid_p95_px,
+            max_contour_to_native_hybrid_p95_px = max(
+                max_contour_to_native_hybrid_p95_px,
                 float(p95_px),
             )
 
@@ -526,29 +526,32 @@ def summarize_detect_quality(quality: dict[str, Any]) -> dict[str, Any]:
 
     metrics = {
         "max_count_diff_ratio": max_count_diff_ratio,
-        "min_contour_to_cuda_hybrid_recall_1px":
-            min_contour_to_cuda_hybrid_recall_1px,
-        "max_contour_to_cuda_hybrid_p95_px": max_contour_to_cuda_hybrid_p95_px,
+        "min_contour_to_native_hybrid_recall_1px":
+            min_contour_to_native_hybrid_recall_1px,
+        "max_contour_to_native_hybrid_p95_px":
+            max_contour_to_native_hybrid_p95_px,
         "max_pair_diff_ratio": max_pair_diff_ratio,
         "max_homography_p95_px": max_homography_p95_px,
         "failed_pair_count": len(failed_pairs),
     }
     passed = (
         len(failed_pairs) == 0
-        and max_count_diff_ratio <= CUDA_HYBRID_QUALITY_THRESHOLDS[
+        and max_count_diff_ratio <= NATIVE_HYBRID_QUALITY_THRESHOLDS[
             "max_count_diff_ratio"]
-        and min_contour_to_cuda_hybrid_recall_1px >= CUDA_HYBRID_QUALITY_THRESHOLDS[
-            "min_contour_to_cuda_hybrid_recall_1px"]
-        and max_contour_to_cuda_hybrid_p95_px <= CUDA_HYBRID_QUALITY_THRESHOLDS[
-            "max_contour_to_cuda_hybrid_p95_px"]
-        and max_pair_diff_ratio <= CUDA_HYBRID_QUALITY_THRESHOLDS[
+        and min_contour_to_native_hybrid_recall_1px >=
+        NATIVE_HYBRID_QUALITY_THRESHOLDS[
+            "min_contour_to_native_hybrid_recall_1px"]
+        and max_contour_to_native_hybrid_p95_px <=
+        NATIVE_HYBRID_QUALITY_THRESHOLDS[
+            "max_contour_to_native_hybrid_p95_px"]
+        and max_pair_diff_ratio <= NATIVE_HYBRID_QUALITY_THRESHOLDS[
             "max_pair_diff_ratio"]
-        and max_homography_p95_px <= CUDA_HYBRID_QUALITY_THRESHOLDS[
+        and max_homography_p95_px <= NATIVE_HYBRID_QUALITY_THRESHOLDS[
             "max_homography_p95_px"]
     )
     return {
         "passed": passed,
-        "thresholds": CUDA_HYBRID_QUALITY_THRESHOLDS,
+        "thresholds": NATIVE_HYBRID_QUALITY_THRESHOLDS,
         "metrics": metrics,
     }
 
@@ -789,7 +792,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     runners: dict[str, Any] = {
         "detect_stream": lambda: bench_detect_stream(frames),
         "detect_opencv_stream": lambda: bench_detect_opencv_stream(frames),
-        "detect_cuda_hybrid_stream": lambda: bench_detect_cuda_hybrid_stream(frames),
+        "detect_native_hybrid_stream": lambda: bench_detect_native_hybrid_stream(frames),
         "detect_prepare_stream": lambda: bench_detect_prepare_stream(frames),
         "detect_wavelet_stream": lambda: bench_detect_wavelet_stream(
             detect_payloads),
