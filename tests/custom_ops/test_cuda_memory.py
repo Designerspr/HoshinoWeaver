@@ -9,6 +9,7 @@ import numpy as np
 from hoshicore._custom_op import build_info
 from hoshicore._custom_op import cuda_memory
 from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
+from hoshicore._custom_op._dispatch import CustomOpCudaRuntimeUnavailableError
 from hoshicore._custom_op._dispatch import CudaProbeError
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op.ops import detection as detection_ops
@@ -484,13 +485,35 @@ class TestCudaMemoryEstimate(unittest.TestCase):
         clear_cache.assert_called_once_with()
         self.assertEqual(probe.call_count, 3)
 
-    def test_unavailable_probe_defers_to_backend_error_semantics(self) -> None:
+    def test_explicitly_unavailable_probe_uses_typed_fallback_semantics(self) -> None:
         info = {
             "available": False,
             "status": "explicitly_unavailable",
-            "reason_code": "cuda_runtime_unavailable",
-            "category": "availability",
-            "reason": "no CUDA device",
+            "reason_code": "cuda_compute_capability_unsupported",
+            "category": "compatibility",
+            "reason": "CUDA compute capability 5.2 is unsupported",
+        }
+        with mock.patch.object(
+                cuda_memory, "cuda_memory_info", return_value=info):
+            with self.assertRaisesRegex(
+                    CustomOpCudaRuntimeUnavailableError,
+                    "compute capability 5.2") as caught:
+                with cuda_memory.cuda_memory_admission(_estimate()):
+                    pass
+
+        self.assertEqual(
+            caught.exception.reason_code,
+            "cuda_compute_capability_unsupported",
+        )
+        self.assertTrue(is_cuda_runtime_unavailable_error(caught.exception))
+
+    def test_unavailable_build_probe_still_defers_to_backend_semantics(self) -> None:
+        info = {
+            "available": False,
+            "status": "unavailable",
+            "reason_code": "probe_unavailable",
+            "category": "build",
+            "reason": "compiled backend does not expose CUDA memory info",
         }
         with mock.patch.object(
                 cuda_memory, "cuda_memory_info", return_value=info):

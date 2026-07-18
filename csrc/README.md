@@ -195,7 +195,14 @@ hiddenimports=['hoshicore._custom_op._C']
 ### CUDA
 
 构建 CUDA 算子需要安装 CUDA Toolkit，版本选择支持本机 GPU 的即可。
-最终发布建议 12.8+，可覆盖所有架构的 NVIDIA GPU。
+最终发布建议 12.8+，覆盖本项目支持的 NVIDIA GPU 架构。
+
+发布构建与运行时支持的最低 compute capability 为 6.0（Pascal）。消费级产品可
+近似理解为 GTX 10 系及更新型号；Maxwell（GTX 900 系）及更早设备会在 runtime
+probe 阶段被明确排除并使用 CPU fallback，不会启动不兼容的 CUDA kernel。发布
+架构列表显式包含 `sm_60` 与消费级 GTX 10 系使用的 `sm_61`；使用 CUDA Toolkit
+12.8+ 的 Windows 发布构建还会生成 `sm_100`、`sm_101`、`sm_120`，覆盖数据中心
+与 GeForce RTX 50 系 Blackwell。较旧 toolkit 不会尝试编译这些目标。
 
 构建路径：
 
@@ -247,7 +254,10 @@ deferral reason 保持兼容，但仓库内建候选的 registry 校验不接受
 ---
 
 普通用户只需安装 NVIDIA 驱动（>= 570.65，对应发布构建的 CUDA 12.8），不需要 CUDA Toolkit。
-驱动版本要求与 GPU 型号无关，只要驱动足够新即可；驱动过旧或无 NVIDIA GPU 时自动回退 CPU。
+驱动版本要求与 GPU 型号无关，只要驱动足够新且设备 compute capability >= 6.0
+即可；驱动过旧、无 NVIDIA GPU 或设备架构过旧时自动回退 CPU。受支持设备上的
+`NoKernelImageForDevice` / PTX JIT 错误仍作为构建或运行时错误传播，避免掩盖损坏的
+发布包。
 
 ## 新增算子
 

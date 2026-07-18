@@ -542,6 +542,38 @@ class TestBackendRegistry(CustomOpsTestCase):
         self.assertEqual(selection.reason_code, "cuda_runtime_unavailable")
         self.assertEqual(selection.decision.reason_code, "cuda_runtime_unavailable")
 
+    def test_runtime_resolver_preserves_unsupported_device_reason(self) -> None:
+        class Module:
+            def camera_model_remap(self):
+                return None
+
+            def camera_model_remap_cpu(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        selection = backend_registry.resolve_backend(
+            "camera_model_remap",
+            load_module=lambda: (Module(), None),
+            cuda_probe=lambda: {
+                "available": False,
+                "status": "explicitly_unavailable",
+                "reason_code": "cuda_compute_capability_unsupported",
+                "reason": "CUDA compute capability 5.2 is unsupported",
+            },
+        )
+
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(
+            selection.reason_code,
+            "cuda_compute_capability_unsupported",
+        )
+        self.assertEqual(
+            selection.decision.reason_code,
+            "cuda_compute_capability_unsupported",
+        )
+
     def test_runtime_resolver_does_not_hide_probe_errors(self) -> None:
         class Module:
             def huber_weighted_chunk_cuda(self):

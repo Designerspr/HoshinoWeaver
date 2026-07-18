@@ -126,6 +126,18 @@ class TestCustomOpDispatchHelpers(unittest.TestCase):
                 )
             )
 
+    def test_cuda_runtime_unavailable_classifier_accepts_probe_exception(self) -> None:
+        exc = custom_op_dispatch.CustomOpCudaRuntimeUnavailableError(
+            "CUDA compute capability 5.2 is unsupported",
+            reason_code="cuda_compute_capability_unsupported",
+        )
+
+        self.assertTrue(is_cuda_runtime_unavailable_error(exc))
+        self.assertEqual(
+            exc.reason_code,
+            "cuda_compute_capability_unsupported",
+        )
+
     def test_cuda_resource_classifier_requires_structured_error(self) -> None:
         class CudaResourceExhaustedError(RuntimeError):
             pass
@@ -176,6 +188,28 @@ class TestCustomOpDispatchHelpers(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "out of memory"):
                 custom_op_dispatch.cuda_memory_info()
+
+    def test_cuda_memory_probe_reports_supported_compute_capability(self) -> None:
+        module, error = custom_op_dispatch.load_compiled_module()
+        if module is None:
+            self.skipTest(error or "compiled custom ops unavailable")
+        if not module.build_info().get("cuda"):
+            self.skipTest("CUDA backend is not built")
+
+        payload = custom_op_dispatch.cuda_memory_info()
+        if not payload.get("available"):
+            self.skipTest(str(payload.get("reason") or "CUDA runtime unavailable"))
+
+        capability = (
+            payload["compute_capability_major"],
+            payload["compute_capability_minor"],
+        )
+        minimum = (
+            payload["minimum_compute_capability_major"],
+            payload["minimum_compute_capability_minor"],
+        )
+        self.assertGreaterEqual(capability, minimum)
+        self.assertEqual(minimum, (6, 0))
 
     def test_cuda_memory_probe_rejects_incomplete_available_payload(self) -> None:
         module = mock.Mock()

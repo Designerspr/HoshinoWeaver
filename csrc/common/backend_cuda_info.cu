@@ -1,5 +1,6 @@
 #include "common/backend_info.h"
 #include "common/compat.h"
+#include "common/cuda_compatibility.h"
 #include "common/cuda_host_io_workspace.cuh"
 #include "common/cuda_runtime_utils.cuh"
 
@@ -29,6 +30,25 @@ py::dict cuda_error_info(const cudaError_t error) {
     return info;
 }
 
+py::dict cuda_unsupported_compute_capability_info(const int device,
+                                                  const cudaDeviceProp& properties) {
+    py::dict info;
+    info["available"] = false;
+    info["status"] = "explicitly_unavailable";
+    info["reason_code"] = "cuda_compute_capability_unsupported";
+    info["category"] = "compatibility";
+    info["device"] = device;
+    info["compute_capability_major"] = properties.major;
+    info["compute_capability_minor"] = properties.minor;
+    info["minimum_compute_capability_major"] = hnw::cuda::kMinimumComputeCapabilityMajor;
+    info["minimum_compute_capability_minor"] = hnw::cuda::kMinimumComputeCapabilityMinor;
+    info["reason"] = "CUDA compute capability " + std::to_string(properties.major) + "." +
+                     std::to_string(properties.minor) + " is unsupported; minimum is " +
+                     std::to_string(hnw::cuda::kMinimumComputeCapabilityMajor) + "." +
+                     std::to_string(hnw::cuda::kMinimumComputeCapabilityMinor);
+    return info;
+}
+
 } // namespace
 
 py::dict cuda_memory_info_cuda_dict() {
@@ -40,6 +60,18 @@ py::dict cuda_memory_info_cuda_dict() {
             return cuda_unavailable_info(error);
         }
         return cuda_error_info(error);
+    }
+
+    cudaDeviceProp properties{};
+    error = cudaGetDeviceProperties(&properties, device);
+    if (error != cudaSuccess) {
+        if (hnw::cuda::runtime_unavailable(error)) {
+            return cuda_unavailable_info(error);
+        }
+        return cuda_error_info(error);
+    }
+    if (!hnw::cuda::compute_capability_supported(properties.major, properties.minor)) {
+        return cuda_unsupported_compute_capability_info(device, properties);
     }
 
     size_t free_bytes = 0;
@@ -57,6 +89,10 @@ py::dict cuda_memory_info_cuda_dict() {
     info["reason_code"] = "cuda_available";
     info["category"] = "available";
     info["device"] = device;
+    info["compute_capability_major"] = properties.major;
+    info["compute_capability_minor"] = properties.minor;
+    info["minimum_compute_capability_major"] = hnw::cuda::kMinimumComputeCapabilityMajor;
+    info["minimum_compute_capability_minor"] = hnw::cuda::kMinimumComputeCapabilityMinor;
     info["free_bytes"] = static_cast<unsigned long long>(free_bytes);
     info["total_bytes"] = static_cast<unsigned long long>(total_bytes);
     return info;

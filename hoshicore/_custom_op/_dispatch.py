@@ -22,6 +22,14 @@ class CustomOpUnavailableError(RuntimeError):
     """Raised when a native backend is unavailable and production may fallback."""
 
 
+class CustomOpCudaRuntimeUnavailableError(CustomOpUnavailableError):
+    """Raised when the CUDA probe reports an explicitly unavailable runtime."""
+
+    def __init__(self, message: str, *, reason_code: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 class CustomOpResourceExhaustedError(RuntimeError):
     """Raised when a native backend lacks resources for the requested input."""
 
@@ -87,6 +95,8 @@ def fallback_preference() -> str:
 
 
 def is_cuda_runtime_unavailable_error(exc: RuntimeError) -> bool:
+    if isinstance(exc, CustomOpCudaRuntimeUnavailableError):
+        return True
     module, _ = load_compiled_module()
     unavailable_type = (
         getattr(module, "CudaRuntimeUnavailableError", None)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Collection, Mapping
 
 from hoshicore._custom_op._dispatch import (
@@ -422,20 +422,18 @@ def resolve_backend(
         exclude_backends=excluded,
     )
     fallback_decision = fallback_selection.to_decision(logical_op)
-    fallback_decision = BackendDecision(
-        logical_op=fallback_decision.logical_op,
-        backend=fallback_decision.backend,
-        kernel_name=fallback_decision.kernel_name,
-        placement=fallback_decision.placement,
-        fallback=fallback_decision.fallback,
-        native=fallback_decision.native,
-        reason_code="cuda_runtime_unavailable",
+    unavailable_reason_code = str(
+        probe.get("reason_code") or "cuda_runtime_unavailable"
+    )
+    fallback_decision = replace(
+        fallback_decision,
+        reason_code=unavailable_reason_code,
     )
     return BackendSelection(
         fallback_selection.candidate,
         fallback_selection.module,
         probe.get("reason") or fallback_selection.reason,
-        "cuda_runtime_unavailable",
+        unavailable_reason_code,
         fallback_decision,
     )
 
@@ -457,15 +455,7 @@ def _resolve_after_cuda_backend_failure(
         exclude_backends={failed_backend},
     )
     decision = selection.to_decision(logical_op)
-    decision = BackendDecision(
-        logical_op=decision.logical_op,
-        backend=decision.backend,
-        kernel_name=decision.kernel_name,
-        placement=decision.placement,
-        fallback=decision.fallback,
-        native=decision.native,
-        reason_code=reason_code,
-    )
+    decision = replace(decision, reason_code=reason_code)
     return BackendSelection(
         selection.candidate,
         selection.module,

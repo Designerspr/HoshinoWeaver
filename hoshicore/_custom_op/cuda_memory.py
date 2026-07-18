@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, Iterator
 
 from hoshicore._custom_op._dispatch import CudaProbeError
+from hoshicore._custom_op._dispatch import CustomOpCudaRuntimeUnavailableError
 from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import cuda_memory_info
 from hoshicore._custom_op._dispatch import load_compiled_module
@@ -612,6 +613,14 @@ def _probe_admission(
             ) from exc
         raise
     if not info.get("available"):
+        if info.get("status") == "explicitly_unavailable":
+            reason_code = str(
+                info.get("reason_code") or "cuda_runtime_unavailable"
+            )
+            raise CustomOpCudaRuntimeUnavailableError(
+                str(info.get("reason") or "CUDA runtime is unavailable"),
+                reason_code=reason_code,
+            )
         return CudaAdmissionDecision(
             logical_op=estimate.logical_op,
             granted=True,
