@@ -72,17 +72,42 @@ void validate_int_bounds(const ssize_t value, const char* name) {
     }
 }
 
-template <typename T> inline T cast_output(double value) {
+template <typename T> inline T cast_output(float value) {
     if constexpr (std::is_same_v<T, float>) {
-        return static_cast<float>(value);
+        return value;
     } else if constexpr (std::is_same_v<T, unsigned char>) {
-        value = std::min(std::max(value, 0.0), 255.0);
-        // Match the CUDA remap kernel's integer tie handling.
+        value = std::min(std::max(value, 0.0F), 255.0F);
         return static_cast<unsigned char>(std::nearbyint(value));
     } else {
-        value = std::min(std::max(value, 0.0), 65535.0);
+        value = std::min(std::max(value, 0.0F), 65535.0F);
         return static_cast<unsigned short>(std::nearbyint(value));
     }
+}
+
+template <typename T>
+inline T interpolate_opencv5(const float p00, const float p01, const float p10, const float p11,
+                             const float dx, const float dy, const bool exact_linear) {
+    if (exact_linear) {
+        return cast_output<T>(hnw::camera::bilinear_interpolate_exact(p00, p01, p10, p11, dx, dy));
+    }
+
+    const int frac_x = static_cast<int>(
+        std::nearbyint(dx * static_cast<float>(hnw::camera::REMAP_LINEAR_TABLE_SIZE)));
+    const int frac_y = static_cast<int>(
+        std::nearbyint(dy * static_cast<float>(hnw::camera::REMAP_LINEAR_TABLE_SIZE)));
+    if constexpr (std::is_same_v<T, unsigned char>) {
+        const int wx0 = hnw::camera::REMAP_LINEAR_TABLE_SIZE - frac_x;
+        const int wy0 = hnw::camera::REMAP_LINEAR_TABLE_SIZE - frac_y;
+        const int accum =
+            (static_cast<int>(p00) * wx0 * wy0 + static_cast<int>(p01) * frac_x * wy0 +
+             static_cast<int>(p10) * wx0 * frac_y + static_cast<int>(p11) * frac_x * frac_y) *
+            hnw::camera::REMAP_LINEAR_TABLE_WEIGHT_SCALE;
+        constexpr int rounding_delta = 1 << (hnw::camera::REMAP_LINEAR_COEF_BITS - 1);
+        return static_cast<unsigned char>((accum + rounding_delta) >>
+                                          hnw::camera::REMAP_LINEAR_COEF_BITS);
+    }
+    return cast_output<T>(
+        hnw::camera::bilinear_interpolate_table(p00, p01, p10, p11, frac_x, frac_y));
 }
 
 inline ssize_t source_offset(const int y, const int x, const int src_width, const int channels,
@@ -112,6 +137,7 @@ void camera_model_remap_cpu_kernel(
     const double r22 = rotation_dst_to_src[8];
     const double inv_fx_dst = 1.0 / fx_dst;
     const double inv_fy_dst = 1.0 / fy_dst;
+    const bool exact_linear = hnw::camera::remap_uses_exact_linear(channels);
     const ssize_t src_row_stride = static_cast<ssize_t>(src_width) * static_cast<ssize_t>(channels);
     const ssize_t out_row_stride = static_cast<ssize_t>(out_width) * static_cast<ssize_t>(channels);
 
@@ -153,7 +179,8 @@ void camera_model_remap_cpu_kernel(
                 continue;
             }
 
-            // cv2.remap consumes float32 maps before indexing its 1/32 table.
+            // OpenCV 5 uses exact float interpolation for C1/C3/C4. Other channel counts retain
+            // the legacy 1/32 lookup-table path.
             const float src_x_map = static_cast<float>(src_x);
             const float src_y_map = static_cast<float>(src_y);
             if (!(src_x_map > -1.0F && src_x_map < src_width && src_y_map > -1.0F &&
@@ -167,14 +194,8 @@ void camera_model_remap_cpu_kernel(
             const int y0 = static_cast<int>(std::floor(src_y_map));
             const int x1 = x0 + 1;
             const int y1 = y0 + 1;
-            const double dx_raw = static_cast<double>(src_x_map) - x0;
-            const double dy_raw = static_cast<double>(src_y_map) - y0;
-            const double dx = std::nearbyint(dx_raw * 32.0) * (1.0 / 32.0);
-            const double dy = std::nearbyint(dy_raw * 32.0) * (1.0 / 32.0);
-            const double w00 = (1.0 - dx) * (1.0 - dy);
-            const double w01 = dx * (1.0 - dy);
-            const double w10 = (1.0 - dx) * dy;
-            const double w11 = dx * dy;
+            const float dx = src_x_map - static_cast<float>(x0);
+            const float dy = src_y_map - static_cast<float>(y0);
 
             if (x0 >= 0 && x1 < src_width && y0 >= 0 && y1 < src_height) {
                 const ssize_t base00 = static_cast<ssize_t>(y0) * src_row_stride +
@@ -183,34 +204,34 @@ void camera_model_remap_cpu_kernel(
                 const ssize_t base10 = base00 + src_row_stride;
                 const ssize_t base11 = base10 + static_cast<ssize_t>(channels);
                 for (int c = 0; c < channels; ++c) {
-                    const double accum = w00 * static_cast<double>(image[base00 + c]) +
-                                         w01 * static_cast<double>(image[base01 + c]) +
-                                         w10 * static_cast<double>(image[base10 + c]) +
-                                         w11 * static_cast<double>(image[base11 + c]);
-                    out[out_base + c] = cast_output<T>(accum);
+                    out[out_base + c] = interpolate_opencv5<T>(
+                        static_cast<float>(image[base00 + c]),
+                        static_cast<float>(image[base01 + c]),
+                        static_cast<float>(image[base10 + c]),
+                        static_cast<float>(image[base11 + c]), dx, dy, exact_linear);
                 }
                 continue;
             }
 
             for (int c = 0; c < channels; ++c) {
-                double accum = 0.0;
+                float p00 = 0.0F;
+                float p01 = 0.0F;
+                float p10 = 0.0F;
+                float p11 = 0.0F;
                 if (x0 >= 0 && x0 < src_width && y0 >= 0 && y0 < src_height) {
-                    accum += w00 * static_cast<double>(
-                                       image[source_offset(y0, x0, src_width, channels, c)]);
+                    p00 = static_cast<float>(image[source_offset(y0, x0, src_width, channels, c)]);
                 }
                 if (x1 >= 0 && x1 < src_width && y0 >= 0 && y0 < src_height) {
-                    accum += w01 * static_cast<double>(
-                                       image[source_offset(y0, x1, src_width, channels, c)]);
+                    p01 = static_cast<float>(image[source_offset(y0, x1, src_width, channels, c)]);
                 }
                 if (x0 >= 0 && x0 < src_width && y1 >= 0 && y1 < src_height) {
-                    accum += w10 * static_cast<double>(
-                                       image[source_offset(y1, x0, src_width, channels, c)]);
+                    p10 = static_cast<float>(image[source_offset(y1, x0, src_width, channels, c)]);
                 }
                 if (x1 >= 0 && x1 < src_width && y1 >= 0 && y1 < src_height) {
-                    accum += w11 * static_cast<double>(
-                                       image[source_offset(y1, x1, src_width, channels, c)]);
+                    p11 = static_cast<float>(image[source_offset(y1, x1, src_width, channels, c)]);
                 }
-                out[out_base + c] = cast_output<T>(accum);
+                out[out_base + c] =
+                    interpolate_opencv5<T>(p00, p01, p10, p11, dx, dy, exact_linear);
             }
         }
     }

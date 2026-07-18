@@ -374,6 +374,7 @@ def camera_model_remap_numpy(
         interpolation=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
+        hint=cv2.ALGO_HINT_ACCURATE,
     )
     if image_arr.ndim == 3 and image_arr.shape[2] == 1 and remapped.ndim == 2:
         return remapped[:, :, None]

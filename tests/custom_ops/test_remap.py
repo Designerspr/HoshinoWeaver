@@ -328,6 +328,82 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
 
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
 
+    def test_camera_model_remap_cpu_matches_opencv5_channel_dispatch(self) -> None:
+        # OpenCV 5's exact path handles C1/C3/C4; other channel counts retain the
+        # legacy 1/32 table. These fractional samples distinguish the two paths.
+        cases = (
+            (np.uint8, 255, 0.1, 3, 2),
+            (np.uint16, 65535, 0.02, 26, 64),
+        )
+        for dtype, peak, offset, exact_value, table_value in cases:
+            base = np.array([[0, 0], [0, peak]], dtype=dtype)
+            kwargs = {
+                "out_height": 1,
+                "out_width": 1,
+                "fx_src": 1.0,
+                "fy_src": 1.0,
+                "cx_src": offset,
+                "cy_src": offset,
+                "fx_dst": 1.0,
+                "fy_dst": 1.0,
+                "cx_dst": 0.0,
+                "cy_dst": 0.0,
+                "rotation_dst_to_src": np.eye(3, dtype=np.float64),
+            }
+
+            for channels in (1, 2, 3, 4, 5):
+                with self.subTest(dtype=dtype.__name__, channels=channels):
+                    image = (
+                        base
+                        if channels == 1
+                        else np.repeat(base[:, :, None], channels, axis=2)
+                    )
+                    expected = remap_ops.camera_model_remap_numpy(image=image, **kwargs)
+                    got = remap_ops.camera_model_remap_cpu_compiled(image=image, **kwargs)
+                    expected_value = exact_value if channels in {1, 3, 4} else table_value
+
+                    np.testing.assert_array_equal(
+                        expected, np.full_like(expected, expected_value))
+                    np.testing.assert_array_equal(got, expected)
+
+    def test_camera_model_remap_cuda_matches_opencv5_channel_dispatch(self) -> None:
+        if not build_info().get("cuda"):
+            self.skipTest("CUDA remap backend is not built")
+
+        cases = ((np.uint8, 255, 0.1), (np.uint16, 65535, 0.02))
+        for dtype, peak, offset in cases:
+            base = np.array([[0, 0], [0, peak]], dtype=dtype)
+            kwargs = {
+                "out_height": 1,
+                "out_width": 1,
+                "fx_src": 1.0,
+                "fy_src": 1.0,
+                "cx_src": offset,
+                "cy_src": offset,
+                "fx_dst": 1.0,
+                "fy_dst": 1.0,
+                "cx_dst": 0.0,
+                "cy_dst": 0.0,
+                "rotation_dst_to_src": np.eye(3, dtype=np.float64),
+            }
+
+            for channels in (1, 2, 3, 4, 5):
+                with self.subTest(dtype=dtype.__name__, channels=channels):
+                    image = (
+                        base
+                        if channels == 1
+                        else np.repeat(base[:, :, None], channels, axis=2)
+                    )
+                    expected = remap_ops.camera_model_remap_numpy(image=image, **kwargs)
+                    try:
+                        got = remap_ops.camera_model_remap_compiled(image=image, **kwargs)
+                    except RuntimeError as exc:
+                        if remap_ops._is_cuda_runtime_unavailable_error(exc):
+                            self.skipTest(f"CUDA runtime unavailable: {exc}")
+                        raise
+
+                    np.testing.assert_array_equal(got, expected)
+
     def test_camera_model_remap_cpu_compiled_uint8_half_pixel_rounds_to_even(
             self) -> None:
         # Half-pixel ties are implementation-defined in OpenCV. This test fixes

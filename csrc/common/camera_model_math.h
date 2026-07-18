@@ -14,9 +14,44 @@ namespace hnw::camera {
 
 constexpr int PROJECTION_PERSPECTIVE = 0;
 constexpr int PROJECTION_FISHEYE = 1;
+constexpr int REMAP_LINEAR_TABLE_SIZE = 32;
+constexpr int REMAP_LINEAR_COEF_BITS = 15;
+constexpr int REMAP_LINEAR_TABLE_WEIGHT_SCALE =
+    (1 << REMAP_LINEAR_COEF_BITS) / (REMAP_LINEAR_TABLE_SIZE * REMAP_LINEAR_TABLE_SIZE);
 
 HNW_CAMERA_HD inline bool valid_projection(const int projection) {
     return projection == PROJECTION_PERSPECTIVE || projection == PROJECTION_FISHEYE;
+}
+
+HNW_CAMERA_HD inline bool remap_uses_exact_linear(const int channels) {
+    return channels == 1 || channels == 3 || channels == 4;
+}
+
+HNW_CAMERA_HD inline float bilinear_interpolate_exact(const float p00, const float p01,
+                                                      const float p10, const float p11,
+                                                      const float dx, const float dy) {
+#if defined(__CUDA_ARCH__)
+    const float top = fmaf(dx, p01 - p00, p00);
+    const float bottom = fmaf(dx, p11 - p10, p10);
+    return fmaf(dy, bottom - top, top);
+#else
+    const float top = std::fma(dx, p01 - p00, p00);
+    const float bottom = std::fma(dx, p11 - p10, p10);
+    return std::fma(dy, bottom - top, top);
+#endif
+}
+
+HNW_CAMERA_HD inline float bilinear_interpolate_table(const float p00, const float p01,
+                                                      const float p10, const float p11,
+                                                      const int frac_x, const int frac_y) {
+    constexpr float scale = 1.0F / static_cast<float>(REMAP_LINEAR_TABLE_SIZE);
+    const float dx = static_cast<float>(frac_x) * scale;
+    const float dy = static_cast<float>(frac_y) * scale;
+    const float w00 = (1.0F - dy) * (1.0F - dx);
+    const float w01 = (1.0F - dy) * dx;
+    const float w10 = dy * (1.0F - dx);
+    const float w11 = dy * dx;
+    return p00 * w00 + p01 * w01 + p10 * w10 + p11 * w11;
 }
 
 HNW_CAMERA_HD inline double solve_fisheye_theta(const double radius_distorted,

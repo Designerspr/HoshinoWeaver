@@ -215,6 +215,7 @@ def remap_with_cv2(image: np.ndarray,
         interpolation=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
+        hint=cv2.ALGO_HINT_ACCURATE,
     )
     if image.ndim == 3 and image.shape[2] == 1 and remapped.ndim == 2:
         return remapped[:, :, None]
