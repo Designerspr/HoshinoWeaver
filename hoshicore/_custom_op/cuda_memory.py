@@ -109,13 +109,15 @@ def estimate_camera_model_remap(
 
     source_bytes = source_height * source_width * channels * dtype_bytes
     output_bytes = out_height * out_width * channels * dtype_bytes
-    host_io_bytes = source_bytes + output_bytes
     return CudaMemoryEstimate(
         logical_op="camera_model_remap",
-        peak_device_bytes=host_io_bytes,
-        peak_pinned_bytes=host_io_bytes,
+        peak_device_bytes=source_bytes + output_bytes,
+        peak_pinned_bytes=max(source_bytes, output_bytes),
         confidence="exact",
-        reason="source and destination device buffers plus matching pinned staging",
+        reason=(
+            "source and destination device buffers plus one shared pinned "
+            "input/output staging buffer"
+        ),
     )
 
 

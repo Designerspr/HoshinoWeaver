@@ -606,6 +606,44 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                         atol=REMAP_NATIVE_FLOAT_ATOL,
                     )
 
+    def test_camera_model_remap_cuda_shared_staging_handles_larger_output(
+            self) -> None:
+        if not build_info().get("cuda"):
+            self.skipTest("CUDA remap backend is not built")
+
+        image = np.arange(7 * 9 * 3, dtype=np.uint16).reshape(7, 9, 3)
+        kwargs = {
+            "image": image,
+            "out_height": 11,
+            "out_width": 13,
+            "fx_src": 12.0,
+            "fy_src": 12.0,
+            "cx_src": 4.0,
+            "cy_src": 3.0,
+            "fx_dst": 16.0,
+            "fy_dst": 16.0,
+            "cx_dst": 6.0,
+            "cy_dst": 5.0,
+            "rotation_dst_to_src": np.eye(3, dtype=np.float64),
+            "src_dist_coeffs": np.array(
+                [0.01, -0.001, 0.0005, -0.0002, 0.0001],
+                dtype=np.float64,
+            ),
+            "dst_dist_coeffs": np.array(
+                [-0.008, 0.0008, -0.0003, 0.0001, -0.00005],
+                dtype=np.float64,
+            ),
+        }
+        expected = remap_ops.camera_model_remap_cpu_compiled(**kwargs)
+        try:
+            got = remap_ops.camera_model_remap_compiled(**kwargs)
+        except RuntimeError as exc:
+            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+                self.skipTest(f"CUDA runtime unavailable: {exc}")
+            raise
+
+        np.testing.assert_array_equal(got, expected)
+
     def test_camera_model_remap_cuda_projection_pairs_integer_dtypes_match_cpu(
             self) -> None:
         if not build_info().get("cuda"):

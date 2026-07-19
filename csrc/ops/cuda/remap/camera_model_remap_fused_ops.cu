@@ -166,6 +166,7 @@ void launch_camera_model_remap_fused_impl(
                              static_cast<size_t>(channels);
     const size_t src_bytes = src_total * sizeof(T);
     const size_t out_bytes = out_total * sizeof(T);
+    const size_t pinned_bytes = src_bytes > out_bytes ? src_bytes : out_bytes;
 
     auto workspace = hnw::cuda::acquire_host_io_workspace("camera_model_remap cudaGetDevice");
     try {
@@ -174,13 +175,13 @@ void launch_camera_model_remap_fused_impl(
         T* out_device = static_cast<T*>(
             workspace.device_buffer(out_bytes, "camera_model_remap cudaMalloc(out)"));
         cudaStream_t stream = workspace.stream();
-        void* pinned_image =
-            workspace.pinned_buffer(src_bytes, "camera_model_remap cudaMallocHost(image)");
-        void* pinned_out =
-            workspace.pinned_buffer(out_bytes, "camera_model_remap cudaMallocHost(out)");
-        std::memcpy(pinned_image, image_host, src_bytes);
-        const T* image_copy_src = static_cast<const T*>(pinned_image);
-        T* out_copy_dst = static_cast<T*>(pinned_out);
+        // The single stream orders H2D before kernel execution and D2H, so one staging buffer can
+        // safely serve as the H2D source first and the D2H destination later.
+        void* pinned_io =
+            workspace.pinned_buffer(pinned_bytes, "camera_model_remap cudaMallocHost(io)");
+        std::memcpy(pinned_io, image_host, src_bytes);
+        const T* image_copy_src = static_cast<const T*>(pinned_io);
+        T* out_copy_dst = static_cast<T*>(pinned_io);
 
         hnw::cuda::throw_if_failed(cudaMemcpyAsync(image_device, image_copy_src, src_bytes,
                                                    cudaMemcpyHostToDevice, stream),
@@ -205,7 +206,7 @@ void launch_camera_model_remap_fused_impl(
             "camera_model_remap cudaMemcpyAsync(out)");
         hnw::cuda::throw_if_failed(cudaStreamSynchronize(stream),
                                    "camera_model_remap cudaStreamSynchronize");
-        std::memcpy(out_host, pinned_out, out_bytes);
+        std::memcpy(out_host, pinned_io, out_bytes);
     } catch (...) {
         workspace.reset_after_error();
         throw;

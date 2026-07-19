@@ -78,20 +78,31 @@ class TestCudaMemoryEstimate(unittest.TestCase):
         self.assertEqual(small.confidence, "estimated")
 
     def test_camera_model_remap_estimate_is_exact(self) -> None:
-        estimate = cuda_memory.estimate_camera_model_remap(
-            source_height=12,
-            source_width=20,
-            channels=3,
-            dtype_bytes=2,
-            out_height=8,
-            out_width=16,
-        )
-        expected = (12 * 20 * 3 * 2) + (8 * 16 * 3 * 2)
+        for source_shape, output_shape in (
+            ((12, 20), (8, 16)),
+            ((8, 16), (12, 20)),
+            ((12, 20), (12, 20)),
+        ):
+            with self.subTest(source=source_shape, output=output_shape):
+                source_bytes = source_shape[0] * source_shape[1] * 3 * 2
+                output_bytes = output_shape[0] * output_shape[1] * 3 * 2
+                estimate = cuda_memory.estimate_camera_model_remap(
+                    source_height=source_shape[0],
+                    source_width=source_shape[1],
+                    channels=3,
+                    dtype_bytes=2,
+                    out_height=output_shape[0],
+                    out_width=output_shape[1],
+                )
 
-        self.assertEqual(estimate.logical_op, "camera_model_remap")
-        self.assertEqual(estimate.peak_device_bytes, expected)
-        self.assertEqual(estimate.peak_pinned_bytes, expected)
-        self.assertEqual(estimate.confidence, "exact")
+                self.assertEqual(estimate.logical_op, "camera_model_remap")
+                self.assertEqual(
+                    estimate.peak_device_bytes, source_bytes + output_bytes
+                )
+                self.assertEqual(
+                    estimate.peak_pinned_bytes, max(source_bytes, output_bytes)
+                )
+                self.assertEqual(estimate.confidence, "exact")
 
     def test_camera_model_remap_estimate_rejects_invalid_dimensions(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive dimensions"):
@@ -589,46 +600,52 @@ class TestCudaMemoryEstimate(unittest.TestCase):
         if not memory_info.get("available"):
             self.skipTest(memory_info.get("reason", "CUDA runtime unavailable"))
 
-        image = np.arange(32 * 40 * 3, dtype=np.uint16).reshape(32, 40, 3)
-        out_height = 24
-        out_width = 30
-        estimate = cuda_memory.estimate_camera_model_remap(
-            source_height=image.shape[0],
-            source_width=image.shape[1],
-            channels=image.shape[2],
-            dtype_bytes=image.dtype.itemsize,
-            out_height=out_height,
-            out_width=out_width,
-        )
-        self.assertTrue(module.clear_cuda_host_io_cache())
-        module.camera_model_remap(
-            image,
-            out_height,
-            out_width,
-            28.0,
-            28.0,
-            19.5,
-            15.5,
-            24.0,
-            24.0,
-            14.5,
-            11.5,
-            np.eye(3, dtype=np.float64),
-        )
-        cache_info = module.cuda_host_io_cache_info()
+        for source_shape, output_shape in (
+            ((32, 40), (24, 30)),
+            ((24, 30), (32, 40)),
+        ):
+            with self.subTest(source=source_shape, output=output_shape):
+                image = np.arange(
+                    source_shape[0] * source_shape[1] * 3, dtype=np.uint16
+                ).reshape(*source_shape, 3)
+                out_height, out_width = output_shape
+                estimate = cuda_memory.estimate_camera_model_remap(
+                    source_height=image.shape[0],
+                    source_width=image.shape[1],
+                    channels=image.shape[2],
+                    dtype_bytes=image.dtype.itemsize,
+                    out_height=out_height,
+                    out_width=out_width,
+                )
+                self.assertTrue(module.clear_cuda_host_io_cache())
+                module.camera_model_remap(
+                    image,
+                    out_height,
+                    out_width,
+                    28.0,
+                    28.0,
+                    (source_shape[1] - 1) * 0.5,
+                    (source_shape[0] - 1) * 0.5,
+                    24.0,
+                    24.0,
+                    (out_width - 1) * 0.5,
+                    (out_height - 1) * 0.5,
+                    np.eye(3, dtype=np.float64),
+                )
+                cache_info = module.cuda_host_io_cache_info()
 
-        self.assertEqual(
-            cache_info["last_operation"],
-            "camera_model_remap cudaGetDevice",
-        )
-        self.assertEqual(
-            cache_info["last_device_peak_bytes"],
-            estimate.peak_device_bytes,
-        )
-        self.assertEqual(
-            cache_info["last_pinned_peak_bytes"],
-            estimate.peak_pinned_bytes,
-        )
+                self.assertEqual(
+                    cache_info["last_operation"],
+                    "camera_model_remap cudaGetDevice",
+                )
+                self.assertEqual(
+                    cache_info["last_device_peak_bytes"],
+                    estimate.peak_device_bytes,
+                )
+                self.assertEqual(
+                    cache_info["last_pinned_peak_bytes"],
+                    estimate.peak_pinned_bytes,
+                )
 
     def test_star_shrink_process_estimate_matches_workspace_high_water(self) -> None:
         if not build_info().get("cuda"):
