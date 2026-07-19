@@ -101,6 +101,9 @@ jobs:
       - name: Build C++ custom ops
         run: python csrc/build_ops.py --compiler msvc
 
+      - name: Verify custom ops in clean PyInstaller package
+        run: python csrc/verify_packaged_custom_ops.py
+
       - name: Run tests (compiled backend)
         env:
           PYTHONPATH: ${{ github.workspace }}

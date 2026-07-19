@@ -179,6 +179,9 @@ ldd hoshicore/_custom_op/_C*.so | grep -E "cudart|gomp"
 # Windows (Developer Command Prompt)
 dumpbin /dependents hoshicore/_custom_op/_C*.pyd
 # 预期：出现 VCOMP140.DLL（正常），不应出现 cudart64_*.dll
+
+# 跨平台最小 frozen-package smoke；会清理 Python/编译器/CUDA 环境路径后启动
+python csrc/verify_packaged_custom_ops.py
 ```
 
 ### PyInstaller 收集
