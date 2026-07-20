@@ -251,19 +251,17 @@ __global__ void init_component_labels_kernel(const uint8_t* bw, int* labels, con
     labels[idx] = bw[idx] == 0 ? 0 : idx + 1;
 }
 
-__global__ void propagate_component_labels_kernel(const int* in_labels, int* out_labels,
-                                                  int* changed, const int height, const int width) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int total = height * width;
-    if (idx >= total) {
+__global__ void propagate_foreground_component_labels_kernel(const int* foreground_indices,
+                                                             const int foreground_count,
+                                                             const int* in_labels, int* out_labels,
+                                                             int* changed, const int height,
+                                                             const int width) {
+    const int item = blockIdx.x * blockDim.x + threadIdx.x;
+    if (item >= foreground_count) {
         return;
     }
+    const int idx = foreground_indices[item];
     const int current = in_labels[idx];
-    if (current == 0) {
-        out_labels[idx] = 0;
-        return;
-    }
-
     const int y = idx / width;
     const int x = idx - y * width;
     int best = current;
@@ -629,16 +627,20 @@ void launch_star_detect_fused_pixel_components(
                                                                      total);
         throw_if_cuda_failed(cudaGetLastError(),
                              "star_detect_fused_pixel_components label init launch");
+        throw_if_cuda_failed(cudaMemsetAsync(labels_b.get(), 0, plane_size * sizeof(int), stream),
+                             "star_detect_fused_pixel_components cudaMemset labels b");
         bw.reset();
 
         bool converged = false;
         const int max_label_iterations =
             std::min(std::max(height, width), hnw::star_detect::kMaxLabelIterations);
+        const int component_blocks = (foreground_count + threads - 1) / threads;
         for (int iter = 0; iter < max_label_iterations; ++iter) {
             throw_if_cuda_failed(cudaMemsetAsync(changed.get(), 0, sizeof(int), stream),
                                  "star_detect_fused_pixel_components cudaMemset changed");
-            propagate_component_labels_kernel<<<blocks, threads, 0, stream>>>(
-                labels_a.get(), labels_b.get(), changed.get(), height, width);
+            propagate_foreground_component_labels_kernel<<<component_blocks, threads, 0, stream>>>(
+                foreground_indices.get(), foreground_count, labels_a.get(), labels_b.get(),
+                changed.get(), height, width);
             throw_if_cuda_failed(cudaGetLastError(),
                                  "star_detect_fused_pixel_components label propagation launch");
             throw_if_cuda_failed(cudaMemcpyAsync(scalar_int, changed.get(), sizeof(int),
