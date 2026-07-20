@@ -12,6 +12,7 @@ from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import CustomOpCudaRuntimeUnavailableError
 from hoshicore._custom_op._dispatch import CudaProbeError
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
+from hoshicore._custom_op.ops import alignment as alignment_ops
 from hoshicore._custom_op.ops import detection as detection_ops
 from hoshicore._custom_op.ops import remap as remap_ops
 from hoshicore._custom_op.ops import star_shrink as star_shrink_ops
@@ -128,10 +129,16 @@ class TestCudaMemoryEstimate(unittest.TestCase):
         )
         features_bytes = (n1 + n2) * feature_dim * 8
         outputs_bytes = (n1 + n2) * 16
+        tile_size = cuda_memory.MATCHING_COSINE_TILE_SIZE
+        row_tiles = (n1 + tile_size - 1) // tile_size
+        col_tiles = (n2 + tile_size - 1) // tile_size
+        partial_candidates_bytes = (
+            n1 * col_tiles + n2 * row_tiles
+        ) * (8 + 8 + 4)
         expected_device = (
             features_bytes
             + (n1 + n2) * 8
-            + n1 * n2 * 8
+            + partial_candidates_bytes
             + outputs_bytes
             + 4
         )
@@ -144,6 +151,15 @@ class TestCudaMemoryEstimate(unittest.TestCase):
             features_bytes + outputs_bytes + 4,
         )
         self.assertEqual(estimate.confidence, "exact")
+
+    def test_matching_bidirectional_nearest_tile_size_matches_native(self) -> None:
+        module, error = alignment_ops._load_compiled_module_result()
+        if module is None or not module.build_info().get("cuda"):
+            self.skipTest(error or "CUDA matching backend is not built")
+        self.assertEqual(
+            module.MATCHING_COSINE_TILE_SIZE,
+            cuda_memory.MATCHING_COSINE_TILE_SIZE,
+        )
 
     def test_matching_bidirectional_nearest_estimate_rejects_invalid_shape(
         self,
@@ -589,6 +605,38 @@ class TestCudaMemoryEstimate(unittest.TestCase):
                             image, None, 1.0)
 
         native.assert_not_called()
+
+    def test_matching_estimate_matches_workspace_high_water(self) -> None:
+        if not build_info().get("cuda"):
+            self.skipTest("CUDA matching backend is not built")
+        module, error = alignment_ops._load_compiled_module_result()
+        if module is None:
+            self.skipTest(error or "compiled custom ops unavailable")
+        memory_info = module.cuda_memory_info()
+        if not memory_info.get("available"):
+            self.skipTest(memory_info.get("reason", "CUDA runtime unavailable"))
+
+        rng = np.random.default_rng(23)
+        features1 = rng.normal(size=(137, 31))
+        features2 = rng.normal(size=(149, 31))
+        estimate = cuda_memory.estimate_matching_cosine_bidirectional_nearest(
+            n1=features1.shape[0],
+            n2=features2.shape[0],
+            feature_dim=features1.shape[1],
+        )
+        self.assertTrue(module.clear_cuda_host_io_cache())
+        result = module.matching_cosine_bidirectional_nearest_cuda(
+            features1, features2
+        )
+        self.assertIsNotNone(result)
+        cache_info = module.cuda_host_io_cache_info()
+
+        self.assertEqual(
+            cache_info["last_device_peak_bytes"], estimate.peak_device_bytes
+        )
+        self.assertEqual(
+            cache_info["last_pinned_peak_bytes"], estimate.peak_pinned_bytes
+        )
 
     def test_camera_model_remap_estimate_matches_workspace_high_water(self) -> None:
         if not build_info().get("cuda"):

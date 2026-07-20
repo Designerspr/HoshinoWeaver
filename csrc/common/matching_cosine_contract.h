@@ -15,6 +15,7 @@ namespace hnw::matching {
 // orders. Treat nearest distances inside this conservative error envelope as
 // ambiguous so the Python wrapper can recover the exact SciPy argsort contract.
 constexpr double COSINE_NEAR_TIE_ERROR_FACTOR = 8.0;
+constexpr int COSINE_TILE_SIZE = 16;
 
 HNW_MATCHING_HOST_DEVICE inline bool cosine_distances_are_near(const double lhs, const double rhs,
                                                                const int64_t feature_dim) {

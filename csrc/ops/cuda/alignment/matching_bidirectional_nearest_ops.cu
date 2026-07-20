@@ -13,7 +13,9 @@
 
 namespace {
 
-constexpr int THREADS_PER_BLOCK = 256;
+constexpr int REDUCTION_THREADS = 256;
+constexpr int TILE_SIZE = hnw::matching::COSINE_TILE_SIZE;
+constexpr int TILE_THREADS = TILE_SIZE * TILE_SIZE;
 
 __global__ void feature_norms_kernel(const double* features, double* norms, const int64_t count,
                                      const int64_t dim, int* ambiguous) {
@@ -33,52 +35,108 @@ __global__ void feature_norms_kernel(const double* features, double* norms, cons
     }
 }
 
-__global__ void cosine_distance_matrix_kernel(const double* features1, const double* features2,
-                                              const double* norms1, const double* norms2,
-                                              double* distances, const int64_t n1, const int64_t n2,
-                                              const int64_t dim, int* ambiguous) {
-    const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const int64_t total = n1 * n2;
-    if (index >= total) {
-        return;
-    }
-    const int64_t row = index / n2;
-    const int64_t col = index - row * n2;
-    const double* feature1 = features1 + row * dim;
-    const double* feature2 = features2 + col * dim;
+__global__ void tiled_cosine_partial_nearest_kernel(
+    const double* features1, const double* features2, const double* norms1, const double* norms2,
+    double* row_partial_distances, int64_t* row_partial_indices, int* row_partial_ties,
+    double* col_partial_distances, int64_t* col_partial_indices, int* col_partial_ties,
+    const int64_t n1, const int64_t n2, const int64_t dim, const int64_t row_tiles,
+    const int64_t col_tiles, int* ambiguous) {
+    __shared__ double feature1_tile[TILE_SIZE][TILE_SIZE];
+    __shared__ double feature2_tile[TILE_SIZE][TILE_SIZE];
+    __shared__ double tile_distances[TILE_THREADS];
+
+    const int64_t tile_index = static_cast<int64_t>(blockIdx.x);
+    const int64_t tile_row = tile_index / col_tiles;
+    const int64_t tile_col = tile_index - tile_row * col_tiles;
+    const int local_row = threadIdx.x / TILE_SIZE;
+    const int local_col = threadIdx.x - local_row * TILE_SIZE;
+    const int64_t row = tile_row * TILE_SIZE + local_row;
+    const int64_t col = tile_col * TILE_SIZE + local_col;
     double dot = 0.0;
-    for (int64_t k = 0; k < dim; ++k) {
-        dot += feature1[k] * feature2[k];
+    for (int64_t base = 0; base < dim; base += TILE_SIZE) {
+        const int64_t feature_index = base + local_col;
+        feature1_tile[local_row][local_col] =
+            row < n1 && feature_index < dim ? features1[row * dim + feature_index] : 0.0;
+        feature2_tile[local_row][local_col] =
+            tile_col * TILE_SIZE + local_row < n2 && feature_index < dim
+                ? features2[(tile_col * TILE_SIZE + local_row) * dim + feature_index]
+                : 0.0;
+        __syncthreads();
+        if (row < n1 && col < n2) {
+            const int64_t chunk_size = dim - base < TILE_SIZE ? dim - base : TILE_SIZE;
+            for (int64_t k = 0; k < chunk_size; ++k) {
+                dot += feature1_tile[local_row][k] * feature2_tile[local_col][k];
+            }
+        }
+        __syncthreads();
     }
-    const double distance = 1.0 - dot / (norms1[row] * norms2[col]);
-    distances[index] = distance;
-    if (!isfinite(distance)) {
+
+    double distance = DBL_MAX;
+    if (row < n1 && col < n2) {
+        distance = 1.0 - dot / (norms1[row] * norms2[col]);
+    }
+    tile_distances[threadIdx.x] = distance;
+    if (row < n1 && col < n2 && !isfinite(distance)) {
         atomicExch(ambiguous, 1);
+    }
+    __syncthreads();
+
+    if (local_col == 0 && row < n1) {
+        double best_distance = DBL_MAX;
+        int64_t best_index = -1;
+        int tied = 0;
+        for (int candidate = 0; candidate < TILE_SIZE; ++candidate) {
+            const int64_t candidate_index = tile_col * TILE_SIZE + candidate;
+            if (candidate_index >= n2) {
+                break;
+            }
+            hnw::matching::update_best(best_distance, best_index, tied,
+                                       tile_distances[local_row * TILE_SIZE + candidate],
+                                       candidate_index, dim);
+        }
+        const int64_t partial_index = row * col_tiles + tile_col;
+        row_partial_distances[partial_index] = best_distance;
+        row_partial_indices[partial_index] = best_index;
+        row_partial_ties[partial_index] = tied;
+    }
+    if (local_row == 0 && col < n2) {
+        double best_distance = DBL_MAX;
+        int64_t best_index = -1;
+        int tied = 0;
+        for (int candidate = 0; candidate < TILE_SIZE; ++candidate) {
+            const int64_t candidate_index = tile_row * TILE_SIZE + candidate;
+            if (candidate_index >= n1) {
+                break;
+            }
+            hnw::matching::update_best(best_distance, best_index, tied,
+                                       tile_distances[candidate * TILE_SIZE + local_col],
+                                       candidate_index, dim);
+        }
+        const int64_t partial_index = col * row_tiles + tile_row;
+        col_partial_distances[partial_index] = best_distance;
+        col_partial_indices[partial_index] = best_index;
+        col_partial_ties[partial_index] = tied;
     }
 }
 
-template <bool ReduceRows>
-__global__ void nearest_reduce_kernel(const double* distances, const int64_t n1, const int64_t n2,
-                                      const int64_t feature_dim, int64_t* indices,
-                                      double* nearest_distances, int* ambiguous) {
-    __shared__ double shared_distances[THREADS_PER_BLOCK];
-    __shared__ int64_t shared_indices[THREADS_PER_BLOCK];
-    __shared__ int shared_ties[THREADS_PER_BLOCK];
+__global__ void partial_nearest_reduce_kernel(const double* partial_distances,
+                                              const int64_t* partial_indices,
+                                              const int* partial_ties, const int64_t partial_count,
+                                              const int64_t feature_dim, int64_t* indices,
+                                              double* nearest_distances, int* ambiguous) {
+    __shared__ double shared_distances[REDUCTION_THREADS];
+    __shared__ int64_t shared_indices[REDUCTION_THREADS];
+    __shared__ int shared_ties[REDUCTION_THREADS];
 
     const int64_t output_index = static_cast<int64_t>(blockIdx.x);
-    const int64_t reduce_count = ReduceRows ? n2 : n1;
     double best_distance = DBL_MAX;
     int64_t best_index = -1;
     int tied = 0;
-    for (int64_t candidate = threadIdx.x; candidate < reduce_count; candidate += blockDim.x) {
-        const int64_t matrix_index =
-            ReduceRows ? output_index * n2 + candidate : candidate * n2 + output_index;
-        const double distance = distances[matrix_index];
-        if (!isfinite(distance)) {
-            continue;
-        }
-        hnw::matching::update_best(best_distance, best_index, tied, distance, candidate,
-                                   feature_dim);
+    for (int64_t candidate = threadIdx.x; candidate < partial_count; candidate += blockDim.x) {
+        const int64_t partial_index = output_index * partial_count + candidate;
+        hnw::matching::merge_best(best_distance, best_index, tied, partial_distances[partial_index],
+                                  partial_indices[partial_index], partial_ties[partial_index],
+                                  feature_dim);
     }
     shared_distances[threadIdx.x] = best_distance;
     shared_indices[threadIdx.x] = best_index;
@@ -117,8 +175,16 @@ bool launch_matching_cosine_bidirectional_nearest_cuda(
         static_cast<size_t>(n2) * static_cast<size_t>(dim) * sizeof(double);
     const size_t norms1_bytes = static_cast<size_t>(n1) * sizeof(double);
     const size_t norms2_bytes = static_cast<size_t>(n2) * sizeof(double);
-    const size_t distance_bytes =
-        static_cast<size_t>(n1) * static_cast<size_t>(n2) * sizeof(double);
+    const int64_t row_tiles = (n1 + TILE_SIZE - 1) / TILE_SIZE;
+    const int64_t col_tiles = (n2 + TILE_SIZE - 1) / TILE_SIZE;
+    const size_t row_partial_count = static_cast<size_t>(n1) * static_cast<size_t>(col_tiles);
+    const size_t col_partial_count = static_cast<size_t>(n2) * static_cast<size_t>(row_tiles);
+    const size_t row_partial_distances_bytes = row_partial_count * sizeof(double);
+    const size_t row_partial_indices_bytes = row_partial_count * sizeof(int64_t);
+    const size_t row_partial_ties_bytes = row_partial_count * sizeof(int);
+    const size_t col_partial_distances_bytes = col_partial_count * sizeof(double);
+    const size_t col_partial_indices_bytes = col_partial_count * sizeof(int64_t);
+    const size_t col_partial_ties_bytes = col_partial_count * sizeof(int);
     const size_t row_indices_bytes = static_cast<size_t>(n1) * sizeof(int64_t);
     const size_t row_distances_bytes = static_cast<size_t>(n1) * sizeof(double);
     const size_t col_indices_bytes = static_cast<size_t>(n2) * sizeof(int64_t);
@@ -135,8 +201,22 @@ bool launch_matching_cosine_bidirectional_nearest_cuda(
             norms1_bytes, "matching bidirectional nearest cudaMalloc(norms1)"));
         auto* norms2_device = static_cast<double*>(workspace.device_buffer(
             norms2_bytes, "matching bidirectional nearest cudaMalloc(norms2)"));
-        auto* distances_device = static_cast<double*>(workspace.device_buffer(
-            distance_bytes, "matching bidirectional nearest cudaMalloc(distances)"));
+        auto* row_partial_distances_device = static_cast<double*>(workspace.device_buffer(
+            row_partial_distances_bytes,
+            "matching bidirectional nearest cudaMalloc(row partial distances)"));
+        auto* row_partial_indices_device = static_cast<int64_t*>(workspace.device_buffer(
+            row_partial_indices_bytes,
+            "matching bidirectional nearest cudaMalloc(row partial indices)"));
+        auto* row_partial_ties_device = static_cast<int*>(workspace.device_buffer(
+            row_partial_ties_bytes, "matching bidirectional nearest cudaMalloc(row partial ties)"));
+        auto* col_partial_distances_device = static_cast<double*>(workspace.device_buffer(
+            col_partial_distances_bytes,
+            "matching bidirectional nearest cudaMalloc(col partial distances)"));
+        auto* col_partial_indices_device = static_cast<int64_t*>(workspace.device_buffer(
+            col_partial_indices_bytes,
+            "matching bidirectional nearest cudaMalloc(col partial indices)"));
+        auto* col_partial_ties_device = static_cast<int*>(workspace.device_buffer(
+            col_partial_ties_bytes, "matching bidirectional nearest cudaMalloc(col partial ties)"));
         auto* row_indices_device = static_cast<int64_t*>(workspace.device_buffer(
             row_indices_bytes, "matching bidirectional nearest cudaMalloc(row_indices)"));
         auto* row_distances_device = static_cast<double*>(workspace.device_buffer(
@@ -177,25 +257,26 @@ bool launch_matching_cosine_bidirectional_nearest_cuda(
                                    "matching bidirectional nearest cudaMemsetAsync(ambiguous)");
 
         const int feature1_blocks =
-            static_cast<int>((n1 + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
+            static_cast<int>((n1 + REDUCTION_THREADS - 1) / REDUCTION_THREADS);
         const int feature2_blocks =
-            static_cast<int>((n2 + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
-        feature_norms_kernel<<<feature1_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+            static_cast<int>((n2 + REDUCTION_THREADS - 1) / REDUCTION_THREADS);
+        feature_norms_kernel<<<feature1_blocks, REDUCTION_THREADS, 0, stream>>>(
             features1_device, norms1_device, n1, dim, ambiguous_device);
-        feature_norms_kernel<<<feature2_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+        feature_norms_kernel<<<feature2_blocks, REDUCTION_THREADS, 0, stream>>>(
             features2_device, norms2_device, n2, dim, ambiguous_device);
-        const int64_t pair_count = n1 * n2;
-        const int distance_blocks =
-            static_cast<int>((pair_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
-        cosine_distance_matrix_kernel<<<distance_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-            features1_device, features2_device, norms1_device, norms2_device, distances_device, n1,
-            n2, dim, ambiguous_device);
-        nearest_reduce_kernel<true><<<static_cast<int>(n1), THREADS_PER_BLOCK, 0, stream>>>(
-            distances_device, n1, n2, dim, row_indices_device, row_distances_device,
-            ambiguous_device);
-        nearest_reduce_kernel<false><<<static_cast<int>(n2), THREADS_PER_BLOCK, 0, stream>>>(
-            distances_device, n1, n2, dim, col_indices_device, col_distances_device,
-            ambiguous_device);
+        const int64_t tile_count = row_tiles * col_tiles;
+        tiled_cosine_partial_nearest_kernel<<<static_cast<int>(tile_count), TILE_THREADS, 0,
+                                              stream>>>(
+            features1_device, features2_device, norms1_device, norms2_device,
+            row_partial_distances_device, row_partial_indices_device, row_partial_ties_device,
+            col_partial_distances_device, col_partial_indices_device, col_partial_ties_device, n1,
+            n2, dim, row_tiles, col_tiles, ambiguous_device);
+        partial_nearest_reduce_kernel<<<static_cast<int>(n1), REDUCTION_THREADS, 0, stream>>>(
+            row_partial_distances_device, row_partial_indices_device, row_partial_ties_device,
+            col_tiles, dim, row_indices_device, row_distances_device, ambiguous_device);
+        partial_nearest_reduce_kernel<<<static_cast<int>(n2), REDUCTION_THREADS, 0, stream>>>(
+            col_partial_distances_device, col_partial_indices_device, col_partial_ties_device,
+            row_tiles, dim, col_indices_device, col_distances_device, ambiguous_device);
         hnw::cuda::throw_if_failed(cudaGetLastError(),
                                    "matching bidirectional nearest kernel launch");
 

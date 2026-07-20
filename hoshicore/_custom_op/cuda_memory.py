@@ -17,6 +17,7 @@ CUDA_ADMISSION_FIXED_HEADROOM_BYTES = 256 * 1024 * 1024
 CUDA_ADMISSION_HEADROOM_FRACTION = 0.05
 STAR_DETECT_MAX_FOREGROUND_FRACTION = 0.25
 STAR_SHRINK_THREADS_PER_BLOCK = 256
+MATCHING_COSINE_TILE_SIZE = 16
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,11 @@ def estimate_matching_cosine_bidirectional_nearest(
 
     features_bytes = (n1 + n2) * feature_dim * 8
     norms_bytes = (n1 + n2) * 8
-    distance_matrix_bytes = n1 * n2 * 8
+    tile_size = MATCHING_COSINE_TILE_SIZE
+    row_tiles = (n1 + tile_size - 1) // tile_size
+    col_tiles = (n2 + tile_size - 1) // tile_size
+    partial_candidates = n1 * col_tiles + n2 * row_tiles
+    partial_candidates_bytes = partial_candidates * (8 + 8 + 4)
     nearest_outputs_bytes = (n1 + n2) * (8 + 8)
     status_bytes = 4
     return CudaMemoryEstimate(
@@ -142,7 +147,7 @@ def estimate_matching_cosine_bidirectional_nearest(
         peak_device_bytes=(
             features_bytes
             + norms_bytes
-            + distance_matrix_bytes
+            + partial_candidates_bytes
             + nearest_outputs_bytes
             + status_bytes
         ),
@@ -151,8 +156,8 @@ def estimate_matching_cosine_bidirectional_nearest(
         ),
         confidence="exact",
         reason=(
-            "two feature matrices, norms, full cosine distance matrix, "
-            "bidirectional nearest outputs, and ambiguity status"
+            "two feature matrices, norms, tiled row/column partial nearest "
+            "candidates, bidirectional nearest outputs, and ambiguity status"
         ),
     )
 

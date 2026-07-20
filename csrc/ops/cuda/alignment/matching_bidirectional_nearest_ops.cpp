@@ -1,6 +1,7 @@
 #include "matching_bidirectional_nearest_ops.h"
 
 #include "common/compat.h"
+#include "common/matching_cosine_contract.h"
 
 #include <pybind11/numpy.h>
 
@@ -32,10 +33,12 @@ py::object matching_cosine_bidirectional_nearest_cuda_impl(const FloatArray& fea
         throw std::invalid_argument(
             "matching_cosine_bidirectional_nearest: feature dimensions are too large");
     }
-    if (n1 > std::numeric_limits<int64_t>::max() / n2 ||
-        n1 * n2 > static_cast<int64_t>(std::numeric_limits<int>::max()) * 256) {
+    const int64_t tile_size = hnw::matching::COSINE_TILE_SIZE;
+    const int64_t row_tiles = (n1 + tile_size - 1) / tile_size;
+    const int64_t col_tiles = (n2 + tile_size - 1) / tile_size;
+    if (row_tiles > std::numeric_limits<int>::max() / col_tiles) {
         throw std::invalid_argument(
-            "matching_cosine_bidirectional_nearest: distance matrix is too large");
+            "matching_cosine_bidirectional_nearest: CUDA tile grid is too large");
     }
 
     py::array_t<int64_t> row_indices(n1);
@@ -70,6 +73,7 @@ py::object matching_cosine_bidirectional_nearest_cuda_impl(const FloatArray& fea
 } // namespace
 
 void bind_matching_bidirectional_nearest_cuda_ops(py::module_& m) {
+    m.attr("MATCHING_COSINE_TILE_SIZE") = py::int_(hnw::matching::COSINE_TILE_SIZE);
     m.def("matching_cosine_bidirectional_nearest_cuda",
           &matching_cosine_bidirectional_nearest_cuda_impl, py::arg("features1"),
           py::arg("features2"),
