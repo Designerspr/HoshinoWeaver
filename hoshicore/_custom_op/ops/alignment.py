@@ -78,7 +78,6 @@ def extract_point_features_numpy(
     vol = _as_float64_c("extract_point_features: vol", vol, 1)
     if len(vol) != len(vec):
         raise ValueError("extract_point_features: vol length must match vec")
-
     # Keep the fallback mathematically identical to Norma's canonical
     # implementation.
     from hoshicore.component.norma.matching import extract_point_features

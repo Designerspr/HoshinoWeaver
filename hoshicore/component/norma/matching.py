@@ -236,7 +236,7 @@ def _repair_pair_coverage(
 
     _, radial_bin, sector_bin = _pair_geometry_bins(pts, mutual_pair_idx,
                                                     coverage_ctx)
-    selected_mask = mutual_pair_dist < distance_threshold
+    selected_mask = mutual_pair_dist <= distance_threshold
     quality_cap = distance_threshold * coverage_ctx.quality_relax_ratio
 
     def _add_best(mask: NDArray[np.bool_], target_count: int) -> int:
@@ -967,17 +967,21 @@ def find_initial_match(features1: NDArray[np.float64],
 
     num1, num2 = dist_mat.shape
 
-    idx12 = np.argsort(dist_mat, axis=1)
-    idx21 = np.argsort(dist_mat, axis=0)
-    ind = idx21[0, idx12[:, 0]] == range(num1)
+    idx12 = np.argmin(dist_mat, axis=1)
+    idx21 = np.argmin(dist_mat, axis=0)
+    row_idx = np.arange(num1)
+    col_idx = np.arange(num2)
+    ind = idx21[idx12] == row_idx
     mutual_pair_count = int(np.count_nonzero(ind))
-    mutual_pair_idx = np.stack((np.where(ind)[0], idx12[ind, 0]), axis=-1)
+    mutual_pair_idx = np.stack((np.where(ind)[0], idx12[ind]), axis=-1)
 
-    d_th = min(np.percentile(dist_mat[range(num1), idx12[:, 0]], 30),
-               np.percentile(dist_mat[idx21[0, :], range(num2)], 30))
-    ind = np.logical_and(ind, dist_mat[range(num1), idx12[:, 0]] < d_th)
+    nearest12_dist = dist_mat[row_idx, idx12]
+    nearest21_dist = dist_mat[idx21, col_idx]
+    d_th = min(np.percentile(nearest12_dist, 30),
+               np.percentile(nearest21_dist, 30))
+    ind = np.logical_and(ind, nearest12_dist <= d_th)
 
-    pair_idx = np.stack((np.where(ind)[0], idx12[ind, 0]), axis=-1)
+    pair_idx = np.stack((np.where(ind)[0], idx12[ind]), axis=-1)
     percentile_pair_count = len(pair_idx)
 
     mutual_pair_dist = dist_mat[mutual_pair_idx[:, 0], mutual_pair_idx[:, 1]]

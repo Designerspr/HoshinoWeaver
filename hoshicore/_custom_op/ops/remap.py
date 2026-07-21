@@ -8,6 +8,7 @@ from typing import Callable
 
 import cv2
 import numpy as np
+from loguru import logger
 
 from hoshicore._custom_op._dispatch import debug_enabled as _debug_enabled
 from hoshicore._custom_op._dispatch import debug_log
@@ -457,22 +458,39 @@ def camera_model_remap(
         "src_dist_coeffs": src_dist_coeffs,
         "dst_dist_coeffs": dst_dist_coeffs,
     }
-    if backend_name != "numpy" and not _compiled_supports_dtype(image_arr.dtype):
+    original_kwargs = kwargs
+    restore_float64 = False
+    if backend_name != "numpy" and image_arr.dtype == np.float64:
+        kwargs = {**kwargs, "image": image_arr.astype(np.float32)}
+        restore_float64 = True
+    kernel_dtype = kwargs["image"].dtype
+    logger.debug(
+        "camera_model_remap: backend={} input_dtype={} kernel_dtype={} "
+        "shape={} output={}x{}",
+        backend_name, image_arr.dtype, kernel_dtype, image_arr.shape,
+        out_width, out_height)
+
+    def _restore_dtype(result: np.ndarray) -> np.ndarray:
+        if restore_float64:
+            return result.astype(np.float64)
+        return result
+
+    if backend_name != "numpy" and not _compiled_supports_dtype(kernel_dtype):
         _debug_log(
             f"compiled backend does not support dtype {image_arr.dtype}, falling back to numpy"
         )
-        return camera_model_remap_numpy(**kwargs)
+        return camera_model_remap_numpy(**original_kwargs)
     if backend_name == "numpy":
         return backend(**kwargs)
 
     try:
-        return backend(**kwargs)
+        return _restore_dtype(backend(**kwargs))
     except RuntimeError as exc:
         if backend_name != "cuda" or not is_cuda_runtime_unavailable_error(exc):
             raise
         if _camera_model_remap_cpu_fallback_available():
-            return camera_model_remap_cpu_compiled(**kwargs)
+            return _restore_dtype(camera_model_remap_cpu_compiled(**kwargs))
         _debug_log(
             f"compiled CUDA backend unavailable at runtime, falling back to numpy: {exc}"
         )
-        return camera_model_remap_numpy(**kwargs)
+        return camera_model_remap_numpy(**original_kwargs)

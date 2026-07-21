@@ -17,6 +17,31 @@ REMAP_FLOAT_ATOL = 5e-3
 
 
 class TestCameraModelRemapCustomOp(unittest.TestCase):
+    def test_project_image_from_camera_defaults_to_half_scale_coordinate_map(self) -> None:
+        intrinsics = Intrinsics(
+            focal_length_mm=20.0,
+            sensor_width_mm=36.0,
+            sensor_height_mm=24.0,
+            image_width_px=12,
+            image_height_px=8,
+        )
+        camera = CameraModel(intrinsics=intrinsics)
+        image = np.arange(8 * 12, dtype=np.uint16).reshape(8, 12)
+
+        approximate = camera.project_image_from_camera(camera, image, (12, 8))
+        exact = camera.project_image_from_camera(camera, image, (12, 8),
+                                                 map_scale=1.0)
+
+        np.testing.assert_array_equal(approximate, exact)
+
+    def test_project_image_from_camera_rejects_invalid_map_scale(self) -> None:
+        intrinsics = Intrinsics(20.0, 36.0, 24.0, 12, 8)
+        camera = CameraModel(intrinsics=intrinsics)
+        with self.assertRaisesRegex(ValueError, "map_scale"):
+            camera.project_image_from_camera(camera,
+                                             np.zeros((8, 12), dtype=np.uint8),
+                                             (12, 8), map_scale=0.0)
+
     def tearDown(self) -> None:
         remap_ops._load_compiled_module_result.cache_clear()
         remap_ops._select_camera_model_remap_backend.cache_clear()
@@ -403,7 +428,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         expected = remap_ops.camera_model_remap_numpy(**kwargs)
         np.testing.assert_array_equal(got, expected)
 
-    def test_camera_model_remap_float64_uses_numpy_fallback(self) -> None:
+    def test_camera_model_remap_float64_uses_float32_compiled_boundary(self) -> None:
         image = np.arange(18, dtype=np.float64).reshape(3, 3, 2)
         rotation = np.eye(3, dtype=np.float32)
         kwargs = {
@@ -420,7 +445,8 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
             "cy_dst": 1.0,
             "rotation_dst_to_src": rotation,
         }
-        compiled = mock.Mock(side_effect=AssertionError("compiled should not run"))
+        compiled = mock.Mock(return_value=np.full((2, 2, 2), 0.25,
+                                                   dtype=np.float32))
 
         with mock.patch.object(
                 remap_ops,
@@ -428,9 +454,11 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 return_value=("compiled", compiled)):
             got = camera_model_remap(**kwargs)
 
-        expected = remap_ops.camera_model_remap_numpy(**kwargs)
-        compiled.assert_not_called()
-        np.testing.assert_array_equal(got, expected)
+        compiled.assert_called_once()
+        self.assertEqual(compiled.call_args.kwargs["image"].dtype, np.float32)
+        self.assertEqual(got.dtype, np.float64)
+        np.testing.assert_array_equal(got, np.full((2, 2, 2), 0.25,
+                                                   dtype=np.float64))
 
     def test_camera_model_remap_rejects_nonfinite_distortion(self) -> None:
         image = np.arange(18, dtype=np.uint8).reshape(3, 3, 2)
@@ -667,7 +695,8 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 norma_types,
                 "custom_camera_model_remap",
                 wraps=norma_types.custom_camera_model_remap) as patched_custom:
-            got = dst_camera.project_image_from_camera(src_camera, img, (4, 4))
+            got = dst_camera.project_image_from_camera(src_camera, img, (4, 4),
+                                                       map_scale=1.0)
 
         patched_custom.assert_called_once()
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
@@ -711,7 +740,8 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 norma_types,
                 "custom_camera_model_remap",
                 wraps=norma_types.custom_camera_model_remap) as patched_custom:
-            got = dst_camera.project_image_from_camera(src_camera, img, (6, 5))
+            got = dst_camera.project_image_from_camera(src_camera, img, (6, 5),
+                                                       map_scale=1.0)
 
         patched_custom.assert_called_once()
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
@@ -734,7 +764,8 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
             distortion=Distortion(k1=-0.01, k2=0.001, p1=-0.0004, p2=0.0002),
         )
 
-        got = dst_camera.project_image_from_camera(src_camera, img, (6, 5))
+        got = dst_camera.project_image_from_camera(src_camera, img, (6, 5),
+                                                   map_scale=1.0)
         expected = dst_camera.project_image_from_camera(
             src_camera,
             img,

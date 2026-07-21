@@ -829,6 +829,7 @@ def align_frame_camera_model(
     src_candidate: AlignmentCameraCandidate,
     same_camera: bool = True,
     bootstrap_scales: tuple[float, ...] = DEFAULT_BOOTSTRAP_SCALES,
+    remap_map_scale: float = 0.5,
     guided_refine: bool = True,
     guided_refine_radius_px: float = 8.0,
     matching_path: str = DEFAULT_MATCHING_PATH,
@@ -980,4 +981,5 @@ def align_frame_camera_model(
         frame,
         (w, h),
         rotation_dst_to_src=rotation_ref_to_src,
+        map_scale=remap_map_scale,
     )

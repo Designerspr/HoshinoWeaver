@@ -370,6 +370,7 @@ class BaseCameraModel(abc.ABC):
         roi=None,
         interpolation=cv2.INTER_LINEAR,
         rotation_dst_to_src: Optional[NDArray[np.float64]] = None,
+        map_scale: float = 0.5,
     ) -> NDArray[np.uint8]:
         """Per-pixel remap: unproject dst pixels → project into src → remap.
 
@@ -377,9 +378,25 @@ class BaseCameraModel(abc.ABC):
         camera-local rays. Identity is used when it is omitted.
         Subclasses may override to add fast paths.
         """
+        if not 0.0 < map_scale <= 1.0:
+            raise ValueError("map_scale must be in (0, 1]")
         target_width, target_height = output_size
-        u_dst = np.arange(target_width, dtype=np.float32)
-        v_dst = np.arange(target_height, dtype=np.float32)
+        use_sparse_map = (map_scale < 1.0 and roi is None
+                          and interpolation == cv2.INTER_LINEAR)
+        grid_width = (max(2, round(target_width * map_scale))
+                      if use_sparse_map else target_width)
+        grid_height = (max(2, round(target_height * map_scale))
+                       if use_sparse_map else target_height)
+        if use_sparse_map:
+            sx = grid_width / target_width
+            sy = grid_height / target_height
+            u_dst = ((np.arange(grid_width, dtype=np.float64) + 0.5) / sx
+                     - 0.5)
+            v_dst = ((np.arange(grid_height, dtype=np.float64) + 0.5) / sy
+                     - 0.5)
+        else:
+            u_dst = np.arange(grid_width, dtype=np.float64)
+            v_dst = np.arange(grid_height, dtype=np.float64)
         u_grid, v_grid = np.meshgrid(u_dst, v_dst)
         dst_pixels = np.stack([u_grid.ravel(), v_grid.ravel()],
                               axis=1).astype(np.float64)
@@ -392,10 +409,33 @@ class BaseCameraModel(abc.ABC):
             src_vecs = (rotation @ src_vecs.T).T
         src_pixels = camera.project(src_vecs)
 
-        map_x = src_pixels[:, 0].reshape(target_height,
-                                         target_width).astype(np.float32)
-        map_y = src_pixels[:, 1].reshape(target_height,
-                                         target_width).astype(np.float32)
+        map_x = src_pixels[:, 0].reshape(grid_height,
+                                         grid_width).astype(np.float32)
+        map_y = src_pixels[:, 1].reshape(grid_height,
+                                         grid_width).astype(np.float32)
+        if use_sparse_map:
+            map_x = cv2.resize(map_x, (target_width, target_height),
+                               interpolation=cv2.INTER_LINEAR)
+            map_y = cv2.resize(map_y, (target_width, target_height),
+                               interpolation=cv2.INTER_LINEAR)
+            border_x = np.arange(target_width, dtype=np.float64)
+            border_y = np.arange(1, target_height - 1, dtype=np.float64)
+            border_pixels = np.concatenate((
+                np.column_stack((border_x, np.zeros(target_width))),
+                np.column_stack((border_x,
+                                 np.full(target_width, target_height - 1.0))),
+                np.column_stack((np.zeros(len(border_y)), border_y)),
+                np.column_stack((np.full(len(border_y), target_width - 1.0),
+                                 border_y)),
+            ))
+            border_vecs = self.unproject(border_pixels)
+            if rotation_dst_to_src is not None:
+                border_vecs = (rotation @ border_vecs.T).T
+            border_src = camera.project(border_vecs)
+            bx = border_pixels[:, 0].astype(np.intp)
+            by = border_pixels[:, 1].astype(np.intp)
+            map_x[by, bx] = border_src[:, 0].astype(np.float32)
+            map_y[by, bx] = border_src[:, 1].astype(np.float32)
 
         if roi is not None:
             x1, y1, x2, y2 = roi
@@ -436,14 +476,11 @@ class CameraModel(BaseCameraModel):
     def with_distortion(self, distortion: Distortion) -> "CameraModel":
         return super().with_distortion(distortion)
 
-    def _zero_distortion_rotation_dst_to_src(
+    def _fused_rotation_dst_to_src(
         self,
         camera: "CameraModel",
         rotation_dst_to_src: Optional[NDArray[np.float64]] = None,
     ) -> NDArray[np.float32] | None:
-        if not self.distortion.is_zero or not camera.distortion.is_zero:
-            return None
-
         rotation = np.eye(3, dtype=np.float32)
         if rotation_dst_to_src is not None:
             rotation = np.asarray(rotation_dst_to_src, dtype=np.float32)
@@ -451,7 +488,7 @@ class CameraModel(BaseCameraModel):
                 raise ValueError("rotation_dst_to_src must have shape (3, 3)")
         return rotation
 
-    def _project_image_from_camera_zero_distortion_fused(
+    def _project_image_from_camera_fused(
         self,
         camera: "CameraModel",
         img: NDArray[np.uint8],
@@ -460,7 +497,7 @@ class CameraModel(BaseCameraModel):
         interpolation=cv2.INTER_LINEAR,
         rotation_dst_to_src: Optional[NDArray[np.float64]] = None,
     ) -> NDArray[np.uint8] | None:
-        fused_rotation = self._zero_distortion_rotation_dst_to_src(
+        fused_rotation = self._fused_rotation_dst_to_src(
             camera, rotation_dst_to_src)
         if fused_rotation is None or roi is not None or interpolation != cv2.INTER_LINEAR:
             return None
@@ -479,6 +516,8 @@ class CameraModel(BaseCameraModel):
             cx_dst=float(self.K[0, 2]),
             cy_dst=float(self.K[1, 2]),
             rotation_dst_to_src=fused_rotation,
+            src_dist_coeffs=camera.dist_coeffs,
+            dst_dist_coeffs=self.dist_coeffs,
         )
 
     @classmethod
@@ -497,12 +536,15 @@ class CameraModel(BaseCameraModel):
                                   camera: BaseCameraModel,
                                   img: NDArray[np.uint8],
                                   output_size: tuple[int, int],
-                                  roi=None,
-                                  interpolation=cv2.INTER_LINEAR,
-                                  rotation_dst_to_src=None):
+                                   roi=None,
+                                   interpolation=cv2.INTER_LINEAR,
+                                   rotation_dst_to_src=None,
+                                   map_scale: float = 0.5):
         """Projects an image from `camera` into this camera's frame via remap."""
-        if isinstance(camera, CameraModel):
-            fused = self._project_image_from_camera_zero_distortion_fused(
+        if not 0.0 < map_scale <= 1.0:
+            raise ValueError("map_scale must be in (0, 1]")
+        if map_scale >= 1.0 and isinstance(camera, CameraModel):
+            fused = self._project_image_from_camera_fused(
                 camera,
                 img,
                 output_size,
@@ -517,7 +559,8 @@ class CameraModel(BaseCameraModel):
             output_size,
             roi=roi,
             interpolation=interpolation,
-            rotation_dst_to_src=rotation_dst_to_src)
+            rotation_dst_to_src=rotation_dst_to_src,
+            map_scale=map_scale)
 
 
 @dataclasses.dataclass(frozen=True)
