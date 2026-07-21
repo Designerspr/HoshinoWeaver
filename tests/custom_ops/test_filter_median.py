@@ -10,6 +10,7 @@ from hoshicore._custom_op import (
 )
 import hoshicore._custom_op.ops.filter as filter_ops
 import hoshicore._custom_op.ops.median as median_ops
+import hoshicore.component.norma.detection as norma_detection
 from hoshicore.component.frame_buffer import MemoryFrameBuffer
 import hoshicore.component.star_detect as star_detect
 import hoshicore.ops.sigma_clip_ops as sigma_clip_ops
@@ -187,7 +188,7 @@ class TestFilterMedianCustomOps(CustomOpsTestCase):
         filtered_bg = np.zeros_like(image)
 
         with mock.patch.object(
-            star_detect,
+            norma_detection,
             "median_filter_2d",
             return_value=filtered_bg,
         ) as patched_filter:
@@ -233,6 +234,58 @@ class TestFilterMedianCustomOps(CustomOpsTestCase):
         patched_median_blur.assert_not_called()
         self.assertEqual(mask.shape, image.shape)
         self.assertEqual(mask.dtype, np.uint8)
+
+    def test_star_detect_normalized_float_uses_uint16_median_working_data(
+        self,
+    ) -> None:
+        image = np.array([[0.0, 0.25, 1.0]], dtype=np.float32)
+        filtered_bg = np.zeros(image.shape, dtype=np.uint16)
+
+        with mock.patch.object(
+            norma_detection,
+            "median_filter_2d",
+            return_value=filtered_bg,
+        ) as patched_filter:
+            star_detect.detect_starmask_by_threshold_with_response(
+                image,
+                ksize=7,
+                threshold_ratio=1,
+                open_ksize=0,
+            )
+
+        working_image = patched_filter.call_args.args[0]
+        self.assertEqual(working_image.dtype, np.uint16)
+        np.testing.assert_array_equal(
+            working_image,
+            np.rint(image * 65535).astype(np.uint16),
+        )
+
+    def test_star_detect_response_subtraction_does_not_underflow(self) -> None:
+        image = np.zeros((3, 3), dtype=np.uint16)
+        filtered_bg = np.full_like(image, 1000)
+
+        with mock.patch.object(
+            norma_detection,
+            "median_filter_2d",
+            return_value=filtered_bg,
+        ):
+            mask, response = (
+                star_detect.detect_starmask_by_threshold_with_response(
+                    image,
+                    ksize=7,
+                    threshold_ratio=1,
+                    open_ksize=0,
+                )
+            )
+
+        self.assertEqual(response.dtype, np.float32)
+        self.assertTrue(np.all(response < 0))
+        self.assertFalse(np.any(mask))
+
+    def test_star_detect_rejects_unnormalized_float_input(self) -> None:
+        image = np.array([[0.0, 2.0]], dtype=np.float32)
+        with self.assertRaisesRegex(ValueError, "normalized to"):
+            star_detect.detect_starmask_by_threshold(image, ksize=7)
 
     def test_median_reduce_op_routes_chunk_through_custom_op(self) -> None:
         frame_buffer = MemoryFrameBuffer()
