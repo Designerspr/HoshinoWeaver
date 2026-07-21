@@ -3,10 +3,26 @@ import numpy as np
 import pytest
 
 from hoshicore.component.norma.matching import (
+    extract_asterism_tokens,
     extract_point_features,
+    find_asterism_initial_match,
+    find_guided_mutual_match,
     find_initial_match,
     fine_tune_rotation,
 )
+
+
+def _axis_angle_rotation(axis: np.ndarray, angle: float) -> np.ndarray:
+    axis = np.asarray(axis, dtype=np.float64)
+    axis /= np.linalg.norm(axis)
+    cross = np.array([
+        [0.0, -axis[2], axis[1]],
+        [axis[2], 0.0, -axis[0]],
+        [-axis[1], axis[0], 0.0],
+    ])
+    return (np.eye(3) * np.cos(angle)
+            + (1.0 - np.cos(angle)) * np.outer(axis, axis)
+            + np.sin(angle) * cross)
 
 
 def _make_features_with_controlled_diag_distance(diag_distances: list[float]) -> tuple[np.ndarray, np.ndarray]:
@@ -50,6 +66,62 @@ def test_angular_histogram_features_are_invariant_to_global_rotation():
                                atol=1e-10)
 
 
+def test_asterism_tokens_are_rotation_invariant():
+    rng = np.random.default_rng(2301)
+    vectors = rng.normal(size=(50, 3))
+    vectors[:, 2] += 4.0
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    rotation = _axis_angle_rotation(np.array([0.4, -0.2, 0.7]),
+                                    np.deg2rad(31.0))
+
+    tokens = extract_asterism_tokens(vectors, neighbor_count=8)
+    rotated = extract_asterism_tokens(
+        (rotation @ vectors.T).T, neighbor_count=8)
+
+    np.testing.assert_array_equal(rotated.anchor_indices,
+                                  tokens.anchor_indices)
+    np.testing.assert_allclose(rotated.values, tokens.values, rtol=1e-10,
+                               atol=1e-11)
+
+
+def test_asterism_matching_tolerates_missing_stars():
+    rng = np.random.default_rng(2302)
+    xy = rng.normal(scale=0.22, size=(80, 2))
+    vectors = np.column_stack((xy, np.ones(80)))
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    rotation = _axis_angle_rotation(np.array([0.3, -0.6, 0.2]),
+                                    np.deg2rad(17.0))
+    retained = np.sort(rng.choice(len(vectors), 60, replace=False))
+    permutation = rng.permutation(len(retained))
+    source = (rotation @ vectors[retained][permutation].T).T
+    expected_source = {
+        int(retained[permutation[index]]): index
+        for index in range(len(retained))
+    }
+
+    pairs = find_asterism_initial_match(vectors, source)
+    correct = sum(
+        expected_source.get(int(ref_index), -1) == int(src_index)
+        for ref_index, src_index in pairs)
+
+    assert len(pairs) >= 50
+    assert correct == len(pairs)
+
+
+def test_asterism_matching_abstains_without_repeated_constellation_votes():
+    rng = np.random.default_rng(2303)
+    first = rng.normal(size=(120, 3))
+    second = rng.normal(size=(110, 3))
+    first[:, 2] += 4.0
+    second[:, 2] += 4.0
+    first /= np.linalg.norm(first, axis=1, keepdims=True)
+    second /= np.linalg.norm(second, axis=1, keepdims=True)
+
+    pairs = find_asterism_initial_match(first, second)
+
+    assert len(pairs) == 0
+
+
 def test_low_ranked_neighbor_does_not_contribute_to_original_top_k():
     vectors = [np.array([0.0, 0.0, 1.0], dtype=np.float64)]
     for index, radius in enumerate(np.linspace(0.01, 0.08, 8)):
@@ -70,6 +142,62 @@ def test_low_ranked_neighbor_does_not_contribute_to_original_top_k():
 
     np.testing.assert_allclose(with_neighbor, without_neighbor, rtol=0,
                                atol=1e-12)
+
+
+def test_guided_mutual_match_uses_bidirectional_projected_positions():
+    pts1 = np.array([
+        [0.0, 0.0],
+        [10.0, 0.0],
+        [20.0, 0.0],
+    ])
+    pts2 = np.array([
+        [3.0, 1.0],
+        [13.0, 1.0],
+        [50.0, 1.0],
+    ])
+    predicted_pts2 = np.array([
+        [3.2, 1.1],
+        [13.2, 1.1],
+        [23.2, 1.1],
+    ])
+    predicted_pts1 = np.array([
+        [0.2, 0.1],
+        [10.2, 0.1],
+        [47.2, 0.1],
+    ])
+
+    pair_idx = find_guided_mutual_match(
+        pts1,
+        pts2,
+        predicted_pts2,
+        predicted_pts1,
+        max_distance_px=2.0,
+    )
+
+    np.testing.assert_array_equal(
+        pair_idx,
+        np.array([[0, 0], [1, 1]], dtype=np.int32),
+    )
+
+
+def test_guided_mutual_match_rejects_one_way_nearest_neighbor():
+    pts1 = np.array([[0.0, 0.0], [10.0, 0.0]])
+    pts2 = np.array([[1.0, 0.0], [30.0, 0.0]])
+    predicted_pts2 = np.array([[1.0, 0.0], [1.1, 0.0]])
+    predicted_pts1 = np.array([[10.0, 0.0], [10.0, 0.0]])
+
+    pair_idx = find_guided_mutual_match(
+        pts1,
+        pts2,
+        predicted_pts2,
+        predicted_pts1,
+        max_distance_px=2.0,
+    )
+
+    np.testing.assert_array_equal(
+        pair_idx,
+        np.array([[1, 0]], dtype=np.int32),
+    )
 
 
 def test_fine_tune_rotation_accepts_consistent_pairs_with_duplicates():

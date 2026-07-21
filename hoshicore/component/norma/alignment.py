@@ -14,8 +14,10 @@ from numpy.typing import NDArray
 
 from .geometry_view import GeometryView
 from .matching import (DEFAULT_COVERAGE_REPAIR, FISHEYE_ROTATION_VALIDATION,
-                       MatchResult, CoverageRepairContext,
-                       RotationValidationConfig, find_initial_match,
+                       AsterismMatchingConfig, MatchResult,
+                       CoverageRepairContext,
+                       RotationValidationConfig, find_guided_mutual_match,
+                       find_asterism_initial_match, find_initial_match,
                        fine_tune_rotation)
 from .optimization import (CameraOptimizationPolicy, CameraOptimizationState,
                            CameraSolvedParams, FlexibleOptimizationContext,
@@ -86,10 +88,10 @@ def match_star_pairs(
         "match_star_pairs: using rotation RANSAC refine initial_pairs={}",
         len(pair_idx),
     )
-    rotation, pair_idx = fine_tune_rotation(ref_geo.positions, src_geo.positions,
-                                           ref_geo.unit_vectors,
-                                           src_geo.unit_vectors, pair_idx,
-                                           rotation_validation_config)
+    initial_pair_count = len(pair_idx)
+    rotation, pair_idx = fine_tune_rotation(
+        ref_geo.positions, src_geo.positions, ref_geo.unit_vectors,
+        src_geo.unit_vectors, pair_idx, rotation_validation_config)
     homography = rotation_derived_homography(ref_geo.camera,
                                                   src_geo.camera,
                                                   rotation)
@@ -100,6 +102,47 @@ def match_star_pairs(
         src_pts=src_geo.positions[pair_idx[:, 1]],
         rotation=rotation,
         homography=homography,
+        initial_pair_count=initial_pair_count,
+    )
+
+
+def match_star_pairs_asterism(
+    ref_geo: GeometryView,
+    src_geo: GeometryView,
+    rotation_validation_config:
+    RotationValidationConfig = FISHEYE_ROTATION_VALIDATION,
+    asterism_config: AsterismMatchingConfig = AsterismMatchingConfig(),
+) -> MatchResult:
+    """Match sparse stars using local spherical-triangle voting."""
+    pair_idx = find_asterism_initial_match(
+        ref_geo.unit_vectors,
+        src_geo.unit_vectors,
+        config=asterism_config,
+    )
+    if len(pair_idx) < 6:
+        raise ValueError(
+            "asterism bootstrap requires at least 6 voted pairs, "
+            f"got {len(pair_idx)}")
+    logger.debug(
+        "match_star_pairs_asterism: using rotation RANSAC "
+        "voted_pairs={}", len(pair_idx))
+    initial_pair_count = len(pair_idx)
+    rotation, pair_idx = fine_tune_rotation(
+        ref_geo.positions,
+        src_geo.positions,
+        ref_geo.unit_vectors,
+        src_geo.unit_vectors,
+        pair_idx,
+        rotation_validation_config,
+    )
+    return MatchResult(
+        pair_idx=pair_idx,
+        ref_pts=ref_geo.positions[pair_idx[:, 0]],
+        src_pts=src_geo.positions[pair_idx[:, 1]],
+        rotation=rotation,
+        homography=rotation_derived_homography(
+            ref_geo.camera, src_geo.camera, rotation),
+        initial_pair_count=initial_pair_count,
     )
 
 
@@ -131,6 +174,183 @@ def rotation_derived_homography(
     if abs(float(H[2, 2])) > 1e-12:
         H = H / H[2, 2]
     return H.astype(np.float64, copy=False)
+
+
+def _points_in_geometry_bounds(
+    pts: NDArray[np.float64],
+    geo: GeometryView,
+) -> NDArray[np.bool_]:
+    height, width = geo.img_shape[:2]
+    return (
+        np.all(np.isfinite(pts), axis=1)
+        & (pts[:, 0] >= 0.0)
+        & (pts[:, 0] <= width - 1.0)
+        & (pts[:, 1] >= 0.0)
+        & (pts[:, 1] <= height - 1.0)
+    )
+
+
+def guided_mutual_rematch(
+    ref_geo: GeometryView,
+    src_geo: GeometryView,
+    alignment: AlignmentResult,
+    max_distance_px: float = 8.0,
+) -> MatchResult:
+    """Rematch all detected stars under an already optimized projection.
+
+    The global descriptors are intentionally not used here.  The current
+    camera models and rotation predict each complete point set into the other
+    image, after which a radius-limited mutual nearest-neighbor match is made
+    in native pixel coordinates.
+    """
+    rotation = np.asarray(alignment.rotation_ref_to_src, dtype=np.float64)
+    if rotation.shape != (3, 3) or not np.all(np.isfinite(rotation)):
+        raise ValueError("guided rematch requires a finite 3x3 rotation")
+
+    ref_rays = alignment.ref_camera.unproject(ref_geo.positions)
+    predicted_src = alignment.src_camera.project((rotation @ ref_rays.T).T)
+    src_rays = alignment.src_camera.unproject(src_geo.positions)
+    predicted_ref = alignment.ref_camera.project(
+        (rotation.T @ src_rays.T).T)
+
+    valid_ref_to_src = _points_in_geometry_bounds(predicted_src, src_geo)
+    valid_src_to_ref = _points_in_geometry_bounds(predicted_ref, ref_geo)
+    predicted_src = np.asarray(predicted_src, dtype=np.float64).copy()
+    predicted_ref = np.asarray(predicted_ref, dtype=np.float64).copy()
+    predicted_src[~valid_ref_to_src] = np.nan
+    predicted_ref[~valid_src_to_ref] = np.nan
+
+    pair_idx = find_guided_mutual_match(
+        ref_geo.positions,
+        src_geo.positions,
+        predicted_src,
+        predicted_ref,
+        max_distance_px=max_distance_px,
+    )
+    logger.debug(
+        "Guided mutual rematch: radius_px={:.3f} ref_points={} src_points={} "
+        "ref_predictions_in_bounds={} src_predictions_in_bounds={} pairs={}",
+        max_distance_px,
+        len(ref_geo.positions),
+        len(src_geo.positions),
+        int(np.count_nonzero(valid_ref_to_src)),
+        int(np.count_nonzero(valid_src_to_ref)),
+        len(pair_idx),
+    )
+    return MatchResult(
+        pair_idx=pair_idx,
+        ref_pts=ref_geo.positions[pair_idx[:, 0]],
+        src_pts=src_geo.positions[pair_idx[:, 1]],
+        rotation=rotation,
+        homography=rotation_derived_homography(
+            alignment.ref_camera,
+            alignment.src_camera,
+            rotation,
+        ),
+    )
+
+
+def filter_guided_match_spatially(
+    match: MatchResult,
+    alignment: AlignmentResult,
+    image_shape: tuple[int, ...],
+    grid_cols: int = 24,
+    grid_rows: int = 16,
+    min_support: int = 8,
+    sigma: float = 3.5,
+    floor_px: float = 1.5,
+) -> tuple[MatchResult, dict[str, float | int]]:
+    """Reject only locally inconsistent guided residual vectors.
+
+    The first-stage projection defines a residual vector for every guided pair.
+    Each image cell votes for its component-wise median vector; sparse cells
+    borrow the surrounding 3x3 cells.  A robust local MAD threshold removes
+    points that strongly disagree with that local vote.  Non-zero, spatially
+    varying residual fields are deliberately retained so they can still drive
+    focal/distortion refinement.
+    """
+    count = len(match.pair_idx)
+    if count == 0:
+        return match, {"input_pairs": 0, "kept_pairs": 0, "rejected_pairs": 0}
+    if grid_cols <= 0 or grid_rows <= 0:
+        raise ValueError("guided spatial-filter grid dimensions must be positive")
+
+    rotation = np.asarray(alignment.rotation_ref_to_src, dtype=np.float64)
+    ref_rays = alignment.ref_camera.unproject(match.ref_pts)
+    predicted_src = alignment.src_camera.project((rotation @ ref_rays.T).T)
+    residual = np.asarray(match.src_pts - predicted_src, dtype=np.float64)
+    finite = np.all(np.isfinite(residual), axis=1)
+
+    height, width = image_shape[:2]
+    col = np.clip((match.ref_pts[:, 0] * grid_cols / max(width, 1)).astype(int),
+                  0, grid_cols - 1)
+    row = np.clip((match.ref_pts[:, 1] * grid_rows / max(height, 1)).astype(int),
+                  0, grid_rows - 1)
+    cell = row * grid_cols + col
+    members = [np.flatnonzero((cell == idx) & finite)
+               for idx in range(grid_rows * grid_cols)]
+
+    keep = np.zeros(count, dtype=bool)
+    thresholds: list[float] = []
+    supported_cells = 0
+    for cell_idx, own_idx in enumerate(members):
+        if len(own_idx) == 0:
+            continue
+        support_idx = own_idx
+        if len(support_idx) < min_support:
+            cell_row, cell_col = divmod(cell_idx, grid_cols)
+            neighbors = [
+                members[r * grid_cols + c]
+                for r in range(max(0, cell_row - 1),
+                               min(grid_rows, cell_row + 2))
+                for c in range(max(0, cell_col - 1),
+                               min(grid_cols, cell_col + 2))
+                if len(members[r * grid_cols + c])
+            ]
+            if neighbors:
+                support_idx = np.concatenate(neighbors)
+        if len(support_idx) < min_support:
+            # Insufficient evidence is not evidence of an outlier.
+            keep[own_idx] = True
+            continue
+
+        supported_cells += 1
+        local_vote = np.median(residual[support_idx], axis=0)
+        support_deviation = np.linalg.norm(
+            residual[support_idx] - local_vote, axis=1)
+        deviation_median = float(np.median(support_deviation))
+        mad = float(np.median(np.abs(support_deviation - deviation_median)))
+        threshold = max(float(floor_px),
+                        deviation_median + float(sigma) * 1.4826 * mad)
+        thresholds.append(threshold)
+        own_deviation = np.linalg.norm(residual[own_idx] - local_vote, axis=1)
+        keep[own_idx] = own_deviation <= threshold
+
+    kept_idx = np.flatnonzero(keep & finite)
+    filtered = MatchResult(
+        pair_idx=match.pair_idx[kept_idx],
+        ref_pts=match.ref_pts[kept_idx],
+        src_pts=match.src_pts[kept_idx],
+        rotation=match.rotation,
+        homography=match.homography,
+    )
+    stats: dict[str, float | int] = {
+        "input_pairs": count,
+        "kept_pairs": len(kept_idx),
+        "rejected_pairs": count - len(kept_idx),
+        "supported_cells": supported_cells,
+        "grid_cols": grid_cols,
+        "grid_rows": grid_rows,
+        "threshold_median_px": (float(np.median(thresholds))
+                                if thresholds else float("nan")),
+    }
+    logger.debug(
+        "Guided spatial filter: pairs={}->{} rejected={} grid={}x{} "
+        "supported_cells={} threshold_median={:.3f}px",
+        count, len(kept_idx), count - len(kept_idx), grid_cols, grid_rows,
+        supported_cells, stats["threshold_median_px"],
+    )
+    return filtered, stats
 
 
 def optimize_alignment(
@@ -208,6 +428,40 @@ def optimize_alignment(
     res = run_flexible_optimization(x0, ctx, max_nfev=300)
     _log_flexible_optimization_summary(ctx, res.x)
     return _build_flexible_result(res.x, ctx, camera1, camera2)
+
+
+def guided_refine_alignment(
+    ref_geo: GeometryView,
+    src_geo: GeometryView,
+    alignment: AlignmentResult,
+    same_camera: bool = False,
+    max_distance_px: float = 8.0,
+    ref_policy: Optional[CameraOptimizationPolicy] = None,
+    src_policy: Optional[CameraOptimizationPolicy] = None,
+    focal_regularization_weight: float = 0.0,
+) -> tuple[AlignmentResult, MatchResult]:
+    """Run one optional local-rematch and camera re-optimization stage."""
+    guided_match = guided_mutual_rematch(
+        ref_geo,
+        src_geo,
+        alignment,
+        max_distance_px=max_distance_px,
+    )
+    if len(guided_match.pair_idx) < 6:
+        raise ValueError(
+            "guided refinement requires at least 6 mutual pairs, "
+            f"got {len(guided_match.pair_idx)}")
+
+    refined = optimize_alignment(
+        guided_match,
+        alignment.ref_camera,
+        alignment.src_camera,
+        same_camera=same_camera,
+        ref_policy=ref_policy,
+        src_policy=src_policy,
+        focal_regularization_weight=focal_regularization_weight,
+    )
+    return refined, guided_match
 
 
 def _camera_projection_type(camera: BaseCameraModel) -> str:

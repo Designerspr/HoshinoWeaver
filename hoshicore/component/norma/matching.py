@@ -17,6 +17,7 @@ class MatchResult:
     src_pts: NDArray[np.float64]
     rotation: NDArray[np.float64]
     homography: NDArray[np.float64] | None = None
+    initial_pair_count: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -63,6 +64,24 @@ class CoverageRepairContext:
     outer_min_keep_abs: int = 4
     outer_min_keep_ratio: float = 0.08
     quality_relax_ratio: float = 1.35
+
+
+@dataclasses.dataclass(frozen=True)
+class AsterismMatchingConfig:
+    """Local spherical-triangle token and voting parameters."""
+
+    neighbor_count: int = 8
+    edge_ratio_tolerance: float = 0.025
+    log_scale_tolerance: float = 0.04
+    token_distance_threshold: float = 1.0
+    min_votes: int = 5
+    min_vote_margin: int = 1
+
+
+@dataclasses.dataclass(frozen=True)
+class AsterismTokens:
+    values: NDArray[np.float64]
+    anchor_indices: NDArray[np.int32]
 
 
 FISHEYE_ROTATION_VALIDATION = RotationValidationConfig(
@@ -685,6 +704,226 @@ def extract_point_features(vec: NDArray[np.float64],
     features = features / np.sqrt(np.sum(features**2, axis=1)).reshape(
         (pts_num, 1))
     return features
+
+
+def extract_asterism_tokens(
+    vectors: NDArray[np.float64],
+    neighbor_count: int = 8,
+) -> AsterismTokens:
+    """Build unordered local spherical-triangle tokens for every star.
+
+    Each token distinguishes the center star from its two neighbors and stores
+    ``short_anchor_edge / long_anchor_edge``, ``neighbor_edge /
+    long_anchor_edge`` and ``log(long_anchor_edge)``. Unit-sphere chord lengths
+    avoid inverse trigonometry while remaining rotation invariant.
+    """
+    vectors = np.asarray(vectors, dtype=np.float64)
+    if vectors.ndim != 2 or vectors.shape[1:] != (3,):
+        raise ValueError("asterism tokens require an (N, 3) vector array")
+    if not np.all(np.isfinite(vectors)):
+        raise ValueError("asterism tokens require finite vectors")
+    if neighbor_count < 2:
+        raise ValueError("asterism neighbor_count must be at least 2")
+    if len(vectors) < 3:
+        raise ValueError("asterism tokens require at least 3 stars")
+
+    norms = np.linalg.norm(vectors, axis=1)
+    if np.any(norms <= 1e-12):
+        raise ValueError("asterism tokens require non-zero vectors")
+    unit = vectors / norms[:, np.newaxis]
+    k = min(int(neighbor_count), len(unit) - 1)
+    _, neighbor_indices = cKDTree(unit).query(unit, k=k + 1)
+    neighbor_indices = np.asarray(neighbor_indices[:, 1:], dtype=np.int32)
+
+    neighbor_vectors = unit[neighbor_indices]
+    anchor_dot = np.sum(unit[:, np.newaxis, :] * neighbor_vectors, axis=2)
+    anchor_edges = np.sqrt(
+        np.maximum(2.0 - 2.0 * np.clip(anchor_dot, -1.0, 1.0), 0.0))
+    left, right = np.triu_indices(k, k=1)
+    first_edge = anchor_edges[:, left]
+    second_edge = anchor_edges[:, right]
+    short_edge = np.minimum(first_edge, second_edge)
+    long_edge = np.maximum(first_edge, second_edge)
+
+    first_neighbor = neighbor_vectors[:, left, :]
+    second_neighbor = neighbor_vectors[:, right, :]
+    neighbor_dot = np.sum(first_neighbor * second_neighbor, axis=2)
+    neighbor_edge = np.sqrt(
+        np.maximum(2.0 - 2.0 * np.clip(neighbor_dot, -1.0, 1.0), 0.0))
+
+    valid = long_edge > 1e-12
+    values = np.stack((
+        short_edge[valid] / long_edge[valid],
+        neighbor_edge[valid] / long_edge[valid],
+        np.log(long_edge[valid]),
+    ), axis=1)
+    anchor_grid = np.broadcast_to(
+        np.arange(len(unit), dtype=np.int32)[:, np.newaxis], long_edge.shape)
+    return AsterismTokens(
+        values=np.ascontiguousarray(values, dtype=np.float64),
+        anchor_indices=np.ascontiguousarray(anchor_grid[valid], dtype=np.int32),
+    )
+
+
+def find_asterism_initial_match(
+    vectors1: NDArray[np.float64],
+    vectors2: NDArray[np.float64],
+    config: AsterismMatchingConfig = AsterismMatchingConfig(),
+) -> NDArray[np.int32]:
+    """Match stars by mutual local-triangle tokens and anchor-level voting."""
+    if (config.edge_ratio_tolerance <= 0
+            or config.log_scale_tolerance <= 0
+            or config.token_distance_threshold <= 0):
+        raise ValueError("asterism tolerances must be positive")
+    if config.min_votes < 1 or config.min_vote_margin < 0:
+        raise ValueError("asterism vote thresholds are invalid")
+
+    tokens1 = extract_asterism_tokens(vectors1, config.neighbor_count)
+    tokens2 = extract_asterism_tokens(vectors2, config.neighbor_count)
+    scale = np.array([
+        config.edge_ratio_tolerance,
+        config.edge_ratio_tolerance,
+        config.log_scale_tolerance,
+    ], dtype=np.float64)
+    values1 = tokens1.values / scale
+    values2 = tokens2.values / scale
+    distance12, nearest12 = cKDTree(values2).query(values1, k=1)
+    distance21, nearest21 = cKDTree(values1).query(values2, k=1)
+    token_indices1 = np.arange(len(values1), dtype=np.int64)
+    mutual = (
+        np.isfinite(distance12)
+        & (distance12 <= config.token_distance_threshold)
+        & (nearest21[nearest12] == token_indices1)
+        & (distance21[nearest12] <= config.token_distance_threshold)
+    )
+    if not np.any(mutual):
+        logger.debug("Asterism match: no mutually compatible tokens")
+        return np.empty((0, 2), dtype=np.int32)
+
+    token_pairs1 = token_indices1[mutual]
+    token_pairs2 = nearest12[mutual]
+    anchor1 = tokens1.anchor_indices[token_pairs1].astype(np.int64)
+    anchor2 = tokens2.anchor_indices[token_pairs2].astype(np.int64)
+    num2 = len(vectors2)
+    pair_codes = anchor1 * num2 + anchor2
+    unique_codes, votes = np.unique(pair_codes, return_counts=True)
+    pair_anchor1 = unique_codes // num2
+    pair_anchor2 = unique_codes % num2
+
+    best2_for_1 = np.full(len(vectors1), -1, dtype=np.int64)
+    best_votes1 = np.zeros(len(vectors1), dtype=np.int32)
+    second_votes1 = np.zeros(len(vectors1), dtype=np.int32)
+    best1_for_2 = np.full(len(vectors2), -1, dtype=np.int64)
+    best_votes2 = np.zeros(len(vectors2), dtype=np.int32)
+    second_votes2 = np.zeros(len(vectors2), dtype=np.int32)
+
+    for first, second, vote_count in zip(pair_anchor1, pair_anchor2, votes):
+        if vote_count > best_votes1[first]:
+            second_votes1[first] = best_votes1[first]
+            best_votes1[first] = vote_count
+            best2_for_1[first] = second
+        elif vote_count > second_votes1[first]:
+            second_votes1[first] = vote_count
+
+        if vote_count > best_votes2[second]:
+            second_votes2[second] = best_votes2[second]
+            best_votes2[second] = vote_count
+            best1_for_2[second] = first
+        elif vote_count > second_votes2[second]:
+            second_votes2[second] = vote_count
+
+    first_indices = np.flatnonzero(
+        (best2_for_1 >= 0)
+        & (best_votes1 >= config.min_votes)
+        & ((best_votes1 - second_votes1) >= config.min_vote_margin))
+    second_indices = best2_for_1[first_indices]
+    accepted = (
+        (best1_for_2[second_indices] == first_indices)
+        & (best_votes2[second_indices] >= config.min_votes)
+        & ((best_votes2[second_indices] - second_votes2[second_indices])
+           >= config.min_vote_margin)
+    )
+    pair_idx = np.column_stack(
+        (first_indices[accepted], second_indices[accepted])).astype(
+            np.int32, copy=False)
+    accepted_votes = best_votes1[first_indices[accepted]]
+    logger.debug(
+        "Asterism match: tokens={}/{} mutual_tokens={} voted_pairs={} "
+        "accepted_pairs={} votes_min/median/max={}/{:.1f}/{}",
+        len(tokens1.values),
+        len(tokens2.values),
+        int(np.count_nonzero(mutual)),
+        len(unique_codes),
+        len(pair_idx),
+        int(np.min(accepted_votes)) if len(accepted_votes) else 0,
+        float(np.median(accepted_votes)) if len(accepted_votes) else 0.0,
+        int(np.max(accepted_votes)) if len(accepted_votes) else 0,
+    )
+    return pair_idx
+
+
+def find_guided_mutual_match(
+    pts1: NDArray[np.float64],
+    pts2: NDArray[np.float64],
+    predicted_pts2: NDArray[np.float64],
+    predicted_pts1: NDArray[np.float64],
+    max_distance_px: float,
+) -> NDArray[np.int32]:
+    """Match two point sets using bidirectional projected-position guidance.
+
+    ``predicted_pts2[i]`` is the predicted location of ``pts1[i]`` in the
+    second image.  ``predicted_pts1[j]`` is the inverse prediction for
+    ``pts2[j]``.  Non-finite predictions are ignored.  A pair is retained only
+    when both nearest-neighbor searches agree and both native-image distances
+    are within ``max_distance_px``.
+    """
+    pts1 = np.asarray(pts1, dtype=np.float64)
+    pts2 = np.asarray(pts2, dtype=np.float64)
+    predicted_pts2 = np.asarray(predicted_pts2, dtype=np.float64)
+    predicted_pts1 = np.asarray(predicted_pts1, dtype=np.float64)
+
+    if (pts1.ndim != 2 or pts1.shape[1:] != (2, ) or pts2.ndim != 2
+            or pts2.shape[1:] != (2, )):
+        raise ValueError("guided mutual matching expects (N, 2) point arrays")
+    if predicted_pts2.shape != pts1.shape:
+        raise ValueError("predicted_pts2 must have the same shape as pts1")
+    if predicted_pts1.shape != pts2.shape:
+        raise ValueError("predicted_pts1 must have the same shape as pts2")
+    if not np.isfinite(max_distance_px) or max_distance_px <= 0:
+        raise ValueError("max_distance_px must be finite and positive")
+    if len(pts1) == 0 or len(pts2) == 0:
+        return np.empty((0, 2), dtype=np.int32)
+    if not np.all(np.isfinite(pts1)) or not np.all(np.isfinite(pts2)):
+        raise ValueError("guided mutual matching requires finite input points")
+
+    valid12 = np.all(np.isfinite(predicted_pts2), axis=1)
+    valid21 = np.all(np.isfinite(predicted_pts1), axis=1)
+
+    nearest12 = np.full(len(pts1), -1, dtype=np.int64)
+    distance12 = np.full(len(pts1), np.inf, dtype=np.float64)
+    if np.any(valid12):
+        distance12[valid12], nearest12[valid12] = cKDTree(pts2).query(
+            predicted_pts2[valid12], k=1)
+
+    nearest21 = np.full(len(pts2), -1, dtype=np.int64)
+    distance21 = np.full(len(pts2), np.inf, dtype=np.float64)
+    if np.any(valid21):
+        distance21[valid21], nearest21[valid21] = cKDTree(pts1).query(
+            predicted_pts1[valid21], k=1)
+
+    ref_indices = np.flatnonzero(
+        valid12 & (nearest12 >= 0) & (distance12 <= max_distance_px))
+    if len(ref_indices) == 0:
+        return np.empty((0, 2), dtype=np.int32)
+
+    src_indices = nearest12[ref_indices]
+    mutual = (
+        valid21[src_indices]
+        & (distance21[src_indices] <= max_distance_px)
+        & (nearest21[src_indices] == ref_indices)
+    )
+    return np.column_stack((ref_indices[mutual], src_indices[mutual])).astype(
+        np.int32, copy=False)
 
 
 def find_initial_match(features1: NDArray[np.float64],
