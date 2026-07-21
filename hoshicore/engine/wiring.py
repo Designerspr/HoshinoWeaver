@@ -456,6 +456,13 @@ async def run_dag(
 
     results: dict[str, Any] = {}
     watcher_task: asyncio.Task | None = None
+    # instantiate_and_wire returns feeder coroutine objects. Register them as
+    # Tasks before the first suspension point so GUI/qasync cancellation cannot
+    # discard never-started coroutine objects and emit "was never awaited".
+    feeder_tasks = [
+        asyncio.create_task(feeder, name=f"dag-feeder-{idx}")
+        for idx, feeder in enumerate(feeders)
+    ]
 
     async def _watch_external_cancel():
         """监听外部取消 → cancel_all + task.cancel 全部节点。"""
@@ -471,13 +478,19 @@ async def run_dag(
         async def _get_one(name, queue):
             items = []
             try:
-                while True:
-                    items.append(await queue.get())
+                length = await queue.get_length()
+                if length is not None:
+                    for _ in range(length):
+                        items.append(await queue.get())
+                else:
+                    while True:
+                        items.append(await queue.get())
             except StreamExhausted:
-                if items:
-                    results[name] = items[0] if len(items) == 1 else items
-            except (CancellationError, asyncio.CancelledError):
                 pass
+            except (CancellationError, asyncio.CancelledError):
+                return
+            if items:
+                results[name] = items[0] if len(items) == 1 else items
 
         await asyncio.gather(
             *[_get_one(n, q) for n, q in output_queues.items()])
@@ -485,7 +498,7 @@ async def run_dag(
     async def _run_feeders():
         """Feeder 包装，容忍取消。"""
         try:
-            await asyncio.gather(*feeders)
+            await asyncio.gather(*feeder_tasks)
         except (CancellationError, asyncio.CancelledError):
             pass
 
@@ -499,6 +512,11 @@ async def run_dag(
         logger.info("DAG cancelled by external request")
         raise asyncio.CancelledError("DAG cancelled by external request")
     finally:
+        for feeder_task in feeder_tasks:
+            if not feeder_task.done():
+                feeder_task.cancel()
+        if feeder_tasks:
+            await asyncio.gather(*feeder_tasks, return_exceptions=True)
         if watcher_task is not None and not watcher_task.done():
             watcher_task.cancel()
             try:

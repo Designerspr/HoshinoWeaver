@@ -15,6 +15,7 @@ from loguru import logger
 
 from ..component.norma.frame_align import (AlignmentError,
                                            CameraInitializationPolicy,
+                                           DEFAULT_MATCHING_PATH,
                                            align_frame_camera_model,
                                            align_frame_homography,
                                            build_camera_candidate)
@@ -48,6 +49,7 @@ class StarAlignmentOp(FilterBaseOp):
         "method":           {"type": "str",    "default": "distortion"},
         "camera_setup_mode": {"type": "str",   "default": None},
         "same_camera":      {"type": "bool",   "default": True},
+        "matching_path":    {"type": "str",    "default": DEFAULT_MATCHING_PATH},
         "distortion":       {"type": "list",   "default": None},
         "lens_type":        {"type": "str",    "default": None},
         "ref_lens_type":    {"type": "str",    "default": None},
@@ -77,6 +79,7 @@ class StarAlignmentOp(FilterBaseOp):
         method = configs.get('method', 'distortion')
         camera_setup_mode = configs.get('camera_setup_mode')
         same_camera = configs.get('same_camera', True)
+        matching_path = configs.get('matching_path', DEFAULT_MATCHING_PATH)
         init_distortion = configs.get('distortion')
         shared_lens_type = configs.get('lens_type')
         configured_ref_lens = configs.get('ref_lens_type')
@@ -193,7 +196,8 @@ class StarAlignmentOp(FilterBaseOp):
                         align_frame_camera_model,
                         frame_arr, ref_geo, ref_arr,
                         ref_candidate, src_candidate, same_camera,
-                        bootstrap_scales_tuple)
+                        bootstrap_scales_tuple,
+                        matching_path=matching_path)
                 else:
                     aligned_arr = await self._run_cpu(
                         align_frame_homography,

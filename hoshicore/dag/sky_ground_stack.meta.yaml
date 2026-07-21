@@ -41,6 +41,7 @@ configs:
   align_method: { type: str, default: "homography" }
   camera_setup_mode: { type: str, default: "auto" }
   same_camera: { type: bool, default: true }
+  matching_path: { type: str, default: "pywt_bootstrap_median_guided" }
   distortion: { type: list, default: null }
   lens_type: { type: str, default: null }       # null | "fisheye"
   ref_lens_type: { type: str, default: null }
@@ -171,6 +172,7 @@ nodes:
       method: configs.align_method
       camera_setup_mode: configs.camera_setup_mode
       same_camera: configs.same_camera
+      matching_path: configs.matching_path
       distortion: configs.distortion
       lens_type: configs.lens_type
       ref_lens_type: configs.ref_lens_type
