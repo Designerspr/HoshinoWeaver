@@ -3,8 +3,11 @@
 *.pyd
 *.dll
 *.so
+*.csv
 logs/
 build/
+benchmark_results/
+benchmarks/
 csrc/build
 ui/__pycache__
 __pycache__/

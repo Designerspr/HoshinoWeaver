@@ -1,14 +1,19 @@
 """Star point detection from images."""
 import dataclasses
-from math import log
 from time import perf_counter
 from typing import Optional
 
 import cv2
 import numpy as np
-import pywt
 from loguru import logger
 from numpy.typing import NDArray
+
+from hoshicore._custom_op._dispatch import CustomOpUnavailableError
+from hoshicore._custom_op.ops.detection import (
+    star_detect_bandpass_threshold_morph_numpy,
+    star_detect_full_connected_components,
+)
+from hoshicore._custom_op.ops.wavelet import wavelet_dec_rec
 
 try:
     from hoshicore._custom_op import median_filter_2d
@@ -20,6 +25,7 @@ except ImportError:
 
 MIN_STAR_AREA = 10
 STAR_FILTER_PERCENTILE = 10
+FULL_GPU_COMPONENT_FILTER_PERCENTILE = 22.5
 
 
 @dataclasses.dataclass
@@ -68,22 +74,7 @@ def _candidate_volumes_with_rescue(
 
 
 def _wavelet_dec_rec(img_blr, resize_factor=0.25):
-    img_shape = img_blr.shape
-    level = int(6 - log(1 / resize_factor, 2))
-
-    img_blr_resize = cv2.resize(img_blr,
-                                None,
-                                fx=resize_factor,
-                                fy=resize_factor)
-    coeffs = pywt.wavedec2(img_blr_resize, "db8", level=level)
-    coeffs[0].fill(0)
-    coeffs[-1][0].fill(0)
-    coeffs[-1][1].fill(0)
-    coeffs[-1][2].fill(0)
-
-    img_rec_resize = pywt.waverec2(coeffs, "db8")
-    img_rec = cv2.resize(img_rec_resize, (img_shape[1], img_shape[0]))
-    return img_rec
+    return wavelet_dec_rec(img_blr, resize_factor=resize_factor)
 
 
 def _bandpass_dog(img_blr: np.ndarray,
@@ -232,21 +223,30 @@ def detect_starmask_by_threshold_with_response(
     return star_mask, diff
 
 
-def detect_star_points(
+def _normalize_gray(img_gray: NDArray) -> NDArray[np.float64]:
+    if img_gray.dtype == np.float64:
+        return img_gray
+    if np.issubdtype(img_gray.dtype, np.integer):
+        return img_gray.astype(np.float64) / np.iinfo(img_gray.dtype).max
+    return img_gray.astype(np.float64)
+
+
+def _empty_detected_stars() -> DetectedStars:
+    return DetectedStars(
+        positions=np.empty((0, 2), dtype=np.float64),
+        volumes=np.empty((0, ), dtype=np.float64),
+    )
+
+
+def _prepare_detection_inputs(
     img_gray: NDArray,
     mask=None,
     resize_length=10000,
     gaussian_ksize: int = 9,
     sigma: float = 2,
-    min_star_points: int = 400,
-) -> DetectedStars:
+) -> tuple[NDArray[np.float64], NDArray[np.bool_], float]:
     img_shape = img_gray.shape
-    if img_gray.dtype != np.float64:
-        if np.issubdtype(img_gray.dtype, np.integer):
-            img_gray = img_gray.astype(np.float64) / np.iinfo(
-                img_gray.dtype).max
-        else:
-            img_gray = img_gray.astype(np.float64)
+    img_gray = _normalize_gray(img_gray)
 
     img_blr = cv2.GaussianBlur(img_gray, (gaussian_ksize, gaussian_ksize),
                                sigma)
@@ -268,12 +268,109 @@ def detect_star_points(
         logger.debug("Mask calculation Complete (using external mask only)")
     mask_rate = np.sum(mask) * 100.0 / np.prod(mask.shape)
     logger.debug(f"mask rate: {mask_rate:.2f}")
+    return img_blr, mask, resize_factor
+
+
+def _component_candidates_to_detected(
+    positions: NDArray[np.float64],
+    areas: NDArray[np.float64],
+    intensities: NDArray[np.float64],
+    eccentricities: NDArray[np.float64],
+) -> DetectedStars:
+    if len(positions) == 0:
+        return _empty_detected_stars()
+    valid_stars = np.logical_and(areas > MIN_STAR_AREA, eccentricities < 0.85)
+    # GPU CC 会比 contour 路径多保留少量弱候选；略收紧分位过滤可稳定下游匹配。
+    filter_percentile = FULL_GPU_COMPONENT_FILTER_PERCENTILE
+    valid_stars = np.logical_and(
+        np.logical_and(
+            valid_stars, areas > np.percentile(areas, filter_percentile)),
+        intensities > np.percentile(intensities, filter_percentile),
+    )
+    return DetectedStars(
+        positions=positions[valid_stars],
+        volumes=areas[valid_stars] * intensities[valid_stars],
+        intensities=intensities[valid_stars],
+    )
+
+
+def _detect_star_points_full_gpu(
+    img_gray: NDArray,
+    mask=None,
+    resize_length=10000,
+    gaussian_ksize: int = 9,
+    sigma: float = 2,
+    min_star_points: int = 400,
+) -> DetectedStars:
+    img_shape = img_gray.shape
+    img_gray = _normalize_gray(img_gray)
+
+    resize_factor = 1.0
+    while max(img_shape) * resize_factor > resize_length:
+        resize_factor /= 2.0
 
     while True:
-        img_rec = _wavelet_dec_rec(img_blr, resize_factor=resize_factor) * mask
-        bw = ((img_rec > np.percentile(img_rec[mask], 99.5)) * mask).astype(
-            np.uint8) * 255
-        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        positions, areas, intensities, eccentricities = (
+            star_detect_full_connected_components(
+                img_gray,
+                mask,
+                resize_factor,
+                gaussian_ksize=gaussian_ksize,
+                sigma=sigma,
+            )
+        )
+        candidate_count = len(positions)
+        logger.debug(f"{candidate_count} full GPU star candidates detected")
+        if candidate_count < min_star_points and resize_factor < 1:
+            logger.debug(
+                "Not enough points, resize factor is now increasing by 2")
+            resize_factor *= 2
+            continue
+        break
+
+    if candidate_count < min_star_points:
+        logger.warning(
+            f"Not enough points: expected {min_star_points}, got {candidate_count}"
+        )
+    logger.debug(f"final resize factor = {resize_factor:.3f}")
+
+    detected = _component_candidates_to_detected(
+        positions, areas, intensities, eccentricities)
+    logger.debug(f"Final star points = {len(detected.positions)}")
+    return detected
+
+
+def _detect_star_points_opencv(
+    img_gray: NDArray,
+    mask=None,
+    resize_length=10000,
+    gaussian_ksize: int = 9,
+    sigma: float = 2,
+    min_star_points: int = 400,
+) -> DetectedStars:
+    img_blr, detection_mask, resize_factor = _prepare_detection_inputs(
+        img_gray,
+        mask=mask,
+        resize_length=resize_length,
+        gaussian_ksize=gaussian_ksize,
+        sigma=sigma,
+    )
+
+    return _detect_star_points_opencv_prepared(
+        img_blr, detection_mask, resize_factor, min_star_points=min_star_points)
+
+
+def _detect_star_points_opencv_prepared(
+    img_blr: NDArray[np.float64],
+    detection_mask: NDArray[np.bool_],
+    resize_factor: float,
+    *,
+    min_star_points: int = 400,
+) -> DetectedStars:
+    while True:
+        # Production fallback 必须保持纯 CPU/OpenCV，不经过 staged GPU dispatch。
+        img_rec, bw = star_detect_bandpass_threshold_morph_numpy(
+            img_blr, detection_mask, resize_factor)
         contours, _ = cv2.findContours(bw, cv2.RETR_LIST,
                                        cv2.CHAIN_APPROX_NONE)
         contours = [contour for contour in contours if len(contour) > 5]
@@ -293,10 +390,7 @@ def detect_star_points(
     logger.debug(f"final resize factor = {resize_factor:.3f}")
 
     if not contours:
-        return DetectedStars(
-            positions=np.empty((0, 2), dtype=np.float64),
-            volumes=np.empty((0, ), dtype=np.float64),
-        )
+        return _empty_detected_stars()
 
     elps = [cv2.fitEllipse(contour) for contour in contours]
     centroids = np.array([e[0] for e in elps])
@@ -336,6 +430,38 @@ def detect_star_points(
     return DetectedStars(positions=star_pts,
                          volumes=areas * intensities,
                          intensities=intensities)
+
+
+def detect_star_points(
+    img_gray: NDArray,
+    mask=None,
+    resize_length=10000,
+    gaussian_ksize: int = 9,
+    sigma: float = 2,
+    min_star_points: int = 400,
+) -> DetectedStars:
+    try:
+        return _detect_star_points_full_gpu(
+            img_gray,
+            mask=mask,
+            resize_length=resize_length,
+            gaussian_ksize=gaussian_ksize,
+            sigma=sigma,
+            min_star_points=min_star_points,
+        )
+    except CustomOpUnavailableError as exc:
+        # Full GPU detector 不可用时，生产 fallback 必须回到原始 contour/OpenCV 路径。
+        logger.debug(
+            f"Full GPU star detector unavailable, falling back to contour detector: {exc}"
+        )
+        return _detect_star_points_opencv(
+            img_gray,
+            mask=mask,
+            resize_length=resize_length,
+            gaussian_ksize=gaussian_ksize,
+            sigma=sigma,
+            min_star_points=min_star_points,
+        )
 
 
 def detect_star_points_median_detailed(
@@ -501,22 +627,3 @@ def detect_star_points_median(
         enable_outer_rescue=enable_outer_rescue,
     )
     return details.detected_stars
-
-
-def _detect_star_points_opencv(*args, **kwargs) -> DetectedStars:
-    """Compatibility name for the production Python/OpenCV detector."""
-    return detect_star_points(*args, **kwargs)
-
-
-_FULL_GPU_FALLBACK_WARNED = False
-
-
-def _detect_star_points_full_gpu(*args, **kwargs) -> DetectedStars:
-    """Use the Python detector until the full custom-op path is integrated."""
-    global _FULL_GPU_FALLBACK_WARNED
-    if not _FULL_GPU_FALLBACK_WARNED:
-        logger.warning(
-            "Full-GPU Norma detection is not integrated with the current "
-            "pipeline; falling back to the Python/OpenCV detector")
-        _FULL_GPU_FALLBACK_WARNED = True
-    return detect_star_points(*args, **kwargs)
