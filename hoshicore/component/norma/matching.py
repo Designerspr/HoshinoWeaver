@@ -6,6 +6,7 @@ import numpy as np
 import numpy.linalg as la
 from loguru import logger
 from numpy.typing import NDArray
+from scipy.spatial import cKDTree
 from scipy.spatial import distance as spd
 
 
@@ -637,14 +638,23 @@ def extract_point_features(vec: NDArray[np.float64],
         (n, 120) feature matrix.
     """
     pts_num = len(vec)
-    dist_mat = 1 - spd.cdist(vec, vec, "cosine")
-    vec_dist_ind = np.argsort(-dist_mat)
-    dist_mat = np.clip(dist_mat, -1, 1)
+    neighbor_count = min(2 * k, pts_num)
+    if neighbor_count < k:
+        raise ValueError(
+            f"extract_point_features requires at least k={k} points, got {pts_num}")
 
-    dist_mat = np.arccos(dist_mat[np.array(range(pts_num))[:, np.newaxis],
-                                  vec_dist_ind[:, :2 * k]])
-    vol = vol[vec_dist_ind[:, :2 * k]]
-    vol_ind = np.argsort(-vol * dist_mat)
+    # Unit-vector chord distance is monotonic with angular distance, so the
+    # tree returns the same nearest-neighbor set without building an N x N
+    # cosine-distance matrix.
+    _, vec_dist_ind = cKDTree(vec).query(vec, k=neighbor_count)
+    if neighbor_count == 1:
+        vec_dist_ind = vec_dist_ind[:, np.newaxis]
+
+    neighbor_vec = vec[vec_dist_ind]
+    cos_dist = np.sum(vec[:, np.newaxis, :] * neighbor_vec, axis=2)
+    dist_mat = np.arccos(np.clip(cos_dist, -1, 1))
+    neighbor_vol = vol[vec_dist_ind]
+    vol_ind = np.argsort(-neighbor_vol * dist_mat)
 
     theta_feature = np.zeros((pts_num, k))
     rho_feature = np.zeros((pts_num, k))
@@ -660,7 +670,7 @@ def extract_point_features(vec: NDArray[np.float64],
         c = np.inner(angles, angles[0])
         theta_feature[i] = np.arctan2(s, c)
         rho_feature[i] = dist_mat[i, vol_ind[i, :k]]
-        vol_feature[i] = vol[i, vol_ind[i, :k]]
+        vol_feature[i] = neighbor_vol[i, vol_ind[i, :k]]
 
     fx = np.arange(-np.pi, np.pi, 3 * np.pi / 180)
     features = np.zeros((pts_num, len(fx)))

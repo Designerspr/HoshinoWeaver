@@ -2,7 +2,11 @@
 import numpy as np
 import pytest
 
-from hoshicore.component.norma.matching import find_initial_match, fine_tune_rotation
+from hoshicore.component.norma.matching import (
+    extract_point_features,
+    find_initial_match,
+    fine_tune_rotation,
+)
 
 
 def _make_features_with_controlled_diag_distance(diag_distances: list[float]) -> tuple[np.ndarray, np.ndarray]:
@@ -16,6 +20,56 @@ def _make_features_with_controlled_diag_distance(diag_distances: list[float]) ->
         features2[i, i] = cos_theta
         features2[i, n + i] = sin_theta
     return features1, features2
+
+
+def test_angular_histogram_features_are_invariant_to_global_rotation():
+    rng = np.random.default_rng(1234)
+    vectors = rng.normal(size=(40, 3))
+    vectors[:, 2] += 3.0
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    volumes = rng.uniform(0.5, 3.0, size=len(vectors))
+    angle = np.deg2rad(37.0)
+    axis = np.array([0.3, -0.4, 0.5], dtype=np.float64)
+    axis /= np.linalg.norm(axis)
+    cross = np.array([
+        [0.0, -axis[2], axis[1]],
+        [axis[2], 0.0, -axis[0]],
+        [-axis[1], axis[0], 0.0],
+    ])
+    rotation = (np.eye(3) * np.cos(angle)
+                + (1.0 - np.cos(angle)) * np.outer(axis, axis)
+                + np.sin(angle) * cross)
+
+    features = extract_point_features(vectors, volumes, k=8)
+    rotated_features = extract_point_features(
+        (rotation @ vectors.T).T, volumes, k=8)
+
+    assert features.shape == (40, 120)
+    assert np.all(np.isfinite(features))
+    np.testing.assert_allclose(rotated_features, features, rtol=1e-9,
+                               atol=1e-10)
+
+
+def test_low_ranked_neighbor_does_not_contribute_to_original_top_k():
+    vectors = [np.array([0.0, 0.0, 1.0], dtype=np.float64)]
+    for index, radius in enumerate(np.linspace(0.01, 0.08, 8)):
+        azimuth = index * 0.71
+        vector = np.array([
+            radius * np.cos(azimuth),
+            radius * np.sin(azimuth),
+            1.0,
+        ])
+        vectors.append(vector / np.linalg.norm(vector))
+    vectors = np.asarray(vectors)
+    volumes = np.array([1.0, 100.0, 100.0, 100.0, 0.5, 0.5, 0.0, 0.5,
+                        0.5])
+
+    without_neighbor = extract_point_features(vectors, volumes, k=3)[0]
+    volumes[5] = 10.0  # Still below the top-k volume*distance cutoff.
+    with_neighbor = extract_point_features(vectors, volumes, k=3)[0]
+
+    np.testing.assert_allclose(with_neighbor, without_neighbor, rtol=0,
+                               atol=1e-12)
 
 
 def test_fine_tune_rotation_accepts_consistent_pairs_with_duplicates():

@@ -79,45 +79,10 @@ def extract_point_features_numpy(
     if len(vol) != len(vec):
         raise ValueError("extract_point_features: vol length must match vec")
 
-    pts_num = len(vec)
-    dist_mat = 1 - spd.cdist(vec, vec, "cosine")
-    vec_dist_ind = np.argsort(-dist_mat)
-    dist_mat = np.clip(dist_mat, -1, 1)
-
-    dist_mat = np.arccos(dist_mat[np.array(range(pts_num))[:, np.newaxis],
-                                  vec_dist_ind[:, :2 * k]])
-    vol = vol[vec_dist_ind[:, :2 * k]]
-    vol_ind = np.argsort(-vol * dist_mat)
-
-    theta_feature = np.zeros((pts_num, k))
-    rho_feature = np.zeros((pts_num, k))
-    vol_feature = np.zeros((pts_num, k))
-
-    for i in range(pts_num):
-        v0 = vec[i]
-        vs = vec[vec_dist_ind[i, vol_ind[i, :k]]]
-        angles = np.inner(vs, _make_cross_matrix(v0))
-        angles = angles / la.norm(angles, axis=1)[:, np.newaxis]
-        cr = np.inner(angles, _make_cross_matrix(angles[0]))
-        s = la.norm(cr, axis=1) * np.sign(np.inner(cr, v0))
-        c = np.inner(angles, angles[0])
-        theta_feature[i] = np.arctan2(s, c)
-        rho_feature[i] = dist_mat[i, vol_ind[i, :k]]
-        vol_feature[i] = vol[i, vol_ind[i, :k]]
-
-    fx = np.arange(-np.pi, np.pi, 3 * np.pi / 180)
-    features = np.zeros((pts_num, len(fx)))
-    for i in range(k):
-        sigma = 2.5 * np.exp(-rho_feature[:, i] * 100) + .04
-        tmp = np.exp(-np.subtract.outer(theta_feature[:, i], fx)**2 / 2 /
-                     sigma[:, np.newaxis]**2)
-        tmp = tmp * (vol_feature[:, i] * rho_feature[:, i]**2 /
-                     sigma)[:, np.newaxis]
-        features += tmp
-
-    features = features / np.sqrt(np.sum(features**2, axis=1)).reshape(
-        (pts_num, 1))
-    return np.ascontiguousarray(features)
+    # Keep the fallback mathematically identical to Norma's canonical
+    # implementation.
+    from hoshicore.component.norma.matching import extract_point_features
+    return np.ascontiguousarray(extract_point_features(vec, vol, k=k))
 
 
 def extract_point_features_compiled(
@@ -131,7 +96,15 @@ def extract_point_features_compiled(
     vec_arr = _as_float64_c("extract_point_features: vec", vec, 2, 3)
     vol_arr = _as_float64_c("extract_point_features: vol", vol, 1)
     _apply_compiled_threads("extract_point_features", vec_arr)
-    return module.extract_point_features(vec_arr, vol_arr, int(k))
+    result = module.extract_point_features(vec_arr, vol_arr, int(k))
+    # Reject stale or incompatible local extensions rather than silently
+    # mixing descriptor layouts.
+    if result.ndim != 2 or result.shape != (len(vec_arr), 120):
+        _debug_log(
+            "compiled extract_point_features has an incompatible layout; "
+            "falling back to the canonical angular-histogram implementation")
+        return extract_point_features_numpy(vec_arr, vol_arr, k=k)
+    return result
 
 
 @lru_cache(maxsize=2)
