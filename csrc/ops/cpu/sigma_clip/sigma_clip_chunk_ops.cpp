@@ -62,7 +62,7 @@ void sigma_clip_iterative_chunk_kernel(
         // 1. Compute thresholds from current accepted stats.
         // Each idx is independent; pixel-parallel writes do not conflict.
 #if defined(_OPENMP) && HNW_ENABLE_OMP_SIMD
-#pragma omp parallel for simd schedule(static)
+        HNW_PRAGMA_OMP_PARALLEL_FOR_SIMD(schedule(static))
 #elif defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif

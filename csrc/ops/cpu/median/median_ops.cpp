@@ -37,7 +37,7 @@ void median_reduce_chunk_kernel(
     {
         std::vector<T> scratch(static_cast<size_t>(n_frames));
 #if HNW_ENABLE_OMP_SIMD
-#pragma omp for simd schedule(static)
+    HNW_PRAGMA_OMP_FOR_SIMD(schedule(static))
 #else
 #pragma omp for schedule(static)
 #endif

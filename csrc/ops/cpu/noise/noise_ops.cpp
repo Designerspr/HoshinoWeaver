@@ -72,7 +72,7 @@ void equalize_noise_correct_kernel(
 
     py::gil_scoped_release release;
 #if defined(_OPENMP) && HNW_ENABLE_OMP_SIMD
-#pragma omp parallel for simd schedule(static)
+    HNW_PRAGMA_OMP_PARALLEL_FOR_SIMD(schedule(static))
 #elif defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif

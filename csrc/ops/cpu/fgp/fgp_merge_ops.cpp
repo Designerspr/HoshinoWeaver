@@ -34,7 +34,7 @@ void fgp_add_inplace_kernel(py::buffer_info& sum_info,
 
     py::gil_scoped_release release;
 #if defined(_OPENMP) && HNW_ENABLE_OMP_SIMD
-#pragma omp parallel for simd schedule(static)
+    HNW_PRAGMA_OMP_PARALLEL_FOR_SIMD(schedule(static))
 #elif defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif

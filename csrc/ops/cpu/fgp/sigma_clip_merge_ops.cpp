@@ -38,7 +38,7 @@ void sigma_clip_fused_inplace_kernel(py::buffer_info& sum_info,
 
     if (!skip_zero_rgb || channels < 3) {
 #if defined(_OPENMP) && HNW_ENABLE_OMP_SIMD
-#pragma omp parallel for simd schedule(static)
+        HNW_PRAGMA_OMP_PARALLEL_FOR_SIMD(schedule(static))
 #elif defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
