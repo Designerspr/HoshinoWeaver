@@ -8,14 +8,19 @@ from typing import Any, Callable
 
 import numpy as np
 
+from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
+from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
+from hoshicore._custom_op.backend_registry import resolve_after_resource_exhausted
 from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
 from hoshicore._custom_op.backend_registry import resolve_backend as _resolve_backend
+from hoshicore._custom_op.cuda_memory import cuda_chunk_memory_model
+from hoshicore._custom_op.cuda_memory import cuda_memory_admission
 
 
 _debug_log = partial(debug_log, "fgp")
@@ -39,21 +44,6 @@ def _validate_target(base: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         raise ValueError("fgp_accumulate: base buffers must be C-contiguous")
     if not sum_mu.flags.writeable or not square_sum.flags.writeable or not count.flags.writeable:
         raise ValueError("fgp_accumulate: base buffers must be writeable")
-    return sum_mu, square_sum, count
-
-
-def _validate_peer(other: Any, shape: tuple[int, ...], *, op_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    sum_mu = np.asarray(other.sum_mu)
-    square_sum = np.asarray(other.square_sum)
-    count = np.asarray(other.n)
-    if sum_mu.shape != shape or square_sum.shape != shape or count.shape != shape:
-        raise ValueError(f"{op_name}: accumulator shape mismatch")
-    if not sum_mu.flags.c_contiguous:
-        sum_mu = np.ascontiguousarray(sum_mu)
-    if not square_sum.flags.c_contiguous:
-        square_sum = np.ascontiguousarray(square_sum)
-    if not count.flags.c_contiguous:
-        count = np.ascontiguousarray(count)
     return sum_mu, square_sum, count
 
 
@@ -134,28 +124,6 @@ def _maybe_prepare_target(base: Any, weight: Any) -> tuple[np.ndarray, np.ndarra
                 base.n = count.astype(DTYPE_UPSCALE_MAP[count.dtype])
                 sum_mu, square_sum, count = _validate_target(base)
         base.max_n = next_max_n
-    return sum_mu, square_sum, count
-
-
-def _maybe_prepare_target_add(base: Any, other: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    sum_mu, square_sum, count = _validate_target(base)
-    other_sum_mu, _, _ = _validate_peer(other, sum_mu.shape, op_name="fgp_add")
-    if getattr(base, "ddof", None) != getattr(other, "ddof", None):
-        raise ValueError("fgp_add: ddof mismatch")
-    if getattr(base, "max_n", None) is not None:
-        delta = int(getattr(other, "max_n", np.max(other.n)))
-        next_max_n = int(base.max_n) + delta
-        if next_max_n > base._safe_add_count():
-            base.upscale()
-            sum_mu, square_sum, count = _validate_target(base)
-        from hoshicore.component.data_container import DTYPE_MAX_VALUE, DTYPE_UPSCALE_MAP
-
-        if count.dtype in DTYPE_MAX_VALUE and next_max_n > DTYPE_MAX_VALUE[count.dtype]:
-            if count.dtype in DTYPE_UPSCALE_MAP:
-                base.n = count.astype(DTYPE_UPSCALE_MAP[count.dtype])
-                sum_mu, square_sum, count = _validate_target(base)
-        base.max_n = next_max_n
-    _validate_peer(other, sum_mu.shape, op_name="fgp_add")
     return sum_mu, square_sum, count
 
 
@@ -304,58 +272,6 @@ def fgp_accumulate(base: Any, fresh: np.ndarray, weight: Any = None,
         return _python_fallback(base, np.asarray(fresh), weight)
     _, backend = _select_fgp_backend(_fallback_preference())
     return backend(base, fresh, int_weight, skip_zero_rgb=skip_zero_rgb)
-
-
-def fgp_add_numpy(base: Any, other: Any) -> Any:
-    sum_mu, square_sum, count = _maybe_prepare_target_add(base, other)
-    other_sum_mu, other_square_sum, other_n = _validate_peer(
-        other,
-        sum_mu.shape,
-        op_name="fgp_add",
-    )
-    np.add(sum_mu, other_sum_mu, out=sum_mu, casting="unsafe")
-    np.add(square_sum, other_square_sum, out=square_sum, casting="unsafe")
-    np.add(count, other_n, out=count, casting="unsafe")
-    return base
-
-
-def fgp_add_compiled(base: Any, other: Any) -> Any:
-    module, _ = _load_compiled_module_result()
-    if module is None:
-        raise RuntimeError("compiled custom op backend is unavailable")
-    sum_mu, square_sum, count = _maybe_prepare_target_add(base, other)
-    other_sum_mu, other_square_sum, other_n = _validate_peer(
-        other,
-        sum_mu.shape,
-        op_name="fgp_add",
-    )
-    _apply_compiled_threads("fgp_add", sum_mu)
-    module.fgp_add(
-        sum_mu,
-        square_sum,
-        count,
-        other_sum_mu,
-        other_square_sum,
-        other_n,
-    )
-    return base
-
-
-@lru_cache(maxsize=2)
-def _select_fgp_add_backend(preference: str) -> tuple[str, Callable[[Any, Any], Any]]:
-    available, compiled_error = _compiled_backend_available("fgp_add", preference)
-    if available:
-        return "compiled", fgp_add_compiled
-
-    if compiled_error:
-        _debug_log(f"compiled backend unavailable, reason: {compiled_error}")
-
-    return "numpy", fgp_add_numpy
-
-
-def fgp_add(base: Any, other: Any) -> Any:
-    _, backend = _select_fgp_add_backend(_fallback_preference())
-    return backend(base, other)
 
 
 def huber_weighted_accumulate_numpy(
@@ -567,8 +483,27 @@ def huber_weighted_chunk_compiled_cuda(
         raise RuntimeError("compiled CUDA custom op backend is unavailable")
     stack_arr, ref_mean_arr, ref_std_arr, weights_arr = _validate_huber_chunk_inputs(
         stack, ref_mean, ref_std, weights)
-    return module.huber_weighted_chunk_cuda(
-        stack_arr, ref_mean_arr, ref_std_arr, float(huber_c), weights_arr)
+    model = cuda_chunk_memory_model(
+        "huber_weighted_chunk",
+        n_frames=stack_arr.shape[0],
+        row_bytes=stack_arr.shape[1] * stack_arr.dtype.itemsize,
+        dtype_bytes=stack_arr.dtype.itemsize,
+        include_weights=weights_arr is not None,
+    )
+    # The flattened plane is one modeled row, so estimate(1) covers this chunk.
+    with cuda_memory_admission(model.estimate(1)) as admission:
+        if not admission.granted:
+            raise CustomOpResourceExhaustedError(
+                "huber_weighted_chunk skipped CUDA because estimated peak "
+                f"{admission.estimated_peak_bytes} bytes exceeds usable VRAM"
+            )
+        return module.huber_weighted_chunk_cuda(
+            stack_arr,
+            ref_mean_arr,
+            ref_std_arr,
+            float(huber_c),
+            weights_arr,
+        )
 
 
 def _select_huber_chunk_backend(
@@ -610,15 +545,28 @@ def huber_weighted_chunk(
     try:
         return backend(stack, ref_mean, ref_std, huber_c, weights)
     except RuntimeError as exc:
-        resolve_after_runtime_unavailable(
-            "huber_weighted_chunk",
-            "cuda_host_io",
-            exc,
-            load_module=_load_compiled_module_result,
-        )
-        _debug_log(
-            f"compiled CUDA backend unavailable at runtime, falling back to numpy: {exc}"
-        )
+        if is_cuda_resource_exhausted_error(exc):
+            resolve_after_resource_exhausted(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                exc,
+                load_module=_load_compiled_module_result,
+            )
+            _debug_log(
+                "compiled CUDA backend exhausted resources, falling back to "
+                f"numpy: {exc}"
+            )
+        else:
+            resolve_after_runtime_unavailable(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                exc,
+                load_module=_load_compiled_module_result,
+            )
+            _debug_log(
+                "compiled CUDA backend unavailable at runtime, falling back "
+                f"to numpy: {exc}"
+            )
     return huber_weighted_chunk_numpy(stack, ref_mean, ref_std, huber_c, weights)
 
 
@@ -636,13 +584,22 @@ def try_huber_weighted_chunk_native(
     try:
         return backend(stack, ref_mean, ref_std, huber_c, weights)
     except RuntimeError as exc:
-        resolve_after_runtime_unavailable(
-            "huber_weighted_chunk",
-            "cuda_host_io",
-            exc,
-            load_module=_load_compiled_module_result,
-        )
-        _debug_log(f"compiled CUDA backend unavailable at runtime: {exc}")
+        if is_cuda_resource_exhausted_error(exc):
+            resolve_after_resource_exhausted(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                exc,
+                load_module=_load_compiled_module_result,
+            )
+            _debug_log(f"compiled CUDA backend exhausted resources: {exc}")
+        else:
+            resolve_after_runtime_unavailable(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                exc,
+                load_module=_load_compiled_module_result,
+            )
+            _debug_log(f"compiled CUDA backend unavailable at runtime: {exc}")
         return None
 
 

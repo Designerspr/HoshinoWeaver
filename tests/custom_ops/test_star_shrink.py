@@ -9,6 +9,7 @@ from hoshicore._custom_op import (
     star_shrink_process,
 )
 import hoshicore._custom_op.backend_registry as backend_registry
+from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import cuda_memory_info
 import hoshicore._custom_op.ops.star_shrink as star_shrink_ops
 
@@ -17,6 +18,15 @@ from tests.custom_ops._base import CustomOpsTestCase
 
 
 class TestStarShrinkCustomOps(CustomOpsTestCase):
+    @staticmethod
+    def _denied_admission() -> mock.MagicMock:
+        admission = mock.MagicMock()
+        admission.__enter__.return_value = mock.Mock(
+            granted=False,
+            estimated_peak_bytes=123456,
+        )
+        return admission
+
     def test_star_shrink_process_compiled_matches_numpy_uint16(self) -> None:
         rng = np.random.default_rng(2468)
         base = rng.normal(loc=12000.0, scale=1200.0, size=(16, 18)).clip(0, 50000)
@@ -139,6 +149,35 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
                 5,
             )
 
+    def test_star_shrink_process_cuda_admission_denial_stops_before_kernel(
+        self,
+    ) -> None:
+        image = np.zeros((8, 9, 3), dtype=np.uint16)
+        mask = np.ones(image.shape[:2], dtype=np.uint8)
+        native = mock.Mock()
+        module = mock.Mock(star_shrink_process_cuda=native)
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_load_compiled_module_result",
+            return_value=(module, None),
+        ):
+            with mock.patch.object(star_shrink_ops, "_apply_compiled_threads"):
+                with mock.patch.object(
+                    star_shrink_ops,
+                    "cuda_memory_admission",
+                    return_value=self._denied_admission(),
+                ):
+                    with self.assertRaisesRegex(
+                        CustomOpResourceExhaustedError,
+                        "estimated peak",
+                    ):
+                        star_shrink_ops.star_shrink_process_compiled_cuda(
+                            image, mask, 3, "CIRCLE", 1, 1.0, 5
+                        )
+
+        native.assert_not_called()
+
     def test_star_shrink_process_can_force_numpy_fallback(self) -> None:
         image = np.arange(6 * 7 * 3, dtype=np.uint8).reshape(6, 7, 3)
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -177,6 +216,16 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
             build_flag="cuda",
         )
         selection = backend_registry.BackendSelection(candidate, object(), None)
+        cpu_candidate = backend_registry.BackendCandidate(
+            "star_shrink_process",
+            "openmp_cpu",
+            "star_shrink_process",
+        )
+        cpu_selection = backend_registry.BackendSelection(
+            cpu_candidate,
+            object(),
+            None,
+        )
 
         with mock.patch.object(
             star_shrink_ops,
@@ -190,8 +239,8 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
             ) as mock_cuda:
                 with mock.patch.object(
                     star_shrink_ops,
-                    "_compiled_cpu_available",
-                    return_value=True,
+                    "resolve_after_runtime_unavailable",
+                    return_value=cpu_selection,
                 ):
                     with mock.patch.object(
                         star_shrink_ops,
@@ -210,6 +259,60 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
             1,
             1.0,
             5,
+        )
+        np.testing.assert_array_equal(got, expected)
+
+    def test_star_shrink_process_cuda_resource_exhaustion_falls_back_to_cpu(
+        self,
+    ) -> None:
+        image = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)
+        mask = np.ones(image.shape[:2], dtype=np.uint8)
+        cuda_candidate = backend_registry.BackendCandidate(
+            "star_shrink_process",
+            "cuda_host_io",
+            "star_shrink_process_cuda",
+            build_flag="cuda",
+        )
+        cpu_candidate = backend_registry.BackendCandidate(
+            "star_shrink_process",
+            "openmp_cpu",
+            "star_shrink_process",
+        )
+        cuda_selection = backend_registry.BackendSelection(
+            cuda_candidate, object(), None
+        )
+        cpu_selection = backend_registry.BackendSelection(
+            cpu_candidate, object(), None
+        )
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_select_star_shrink_process_backend",
+            return_value=cuda_selection,
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_process_compiled_cuda",
+                side_effect=CustomOpResourceExhaustedError("admission denied"),
+            ):
+                with mock.patch.object(
+                    star_shrink_ops,
+                    "resolve_after_resource_exhausted",
+                    return_value=cpu_selection,
+                ) as resolve:
+                    with mock.patch.object(
+                        star_shrink_ops,
+                        "star_shrink_process_compiled",
+                        wraps=star_shrink_ops.star_shrink_process_numpy,
+                    ) as cpu_backend:
+                        got = star_shrink_process(
+                            image, mask, 3, "CIRCLE", 1, 1.0, 5
+                        )
+
+        resolve.assert_called_once()
+        cpu_backend.assert_called_once()
+        expected = star_shrink_ops.star_shrink_process_numpy(
+            image, mask, 3, "CIRCLE", 1, 1.0, 5
         )
         np.testing.assert_array_equal(got, expected)
 
@@ -400,7 +503,7 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
         )
         np.testing.assert_array_equal(got, expected)
 
-    def test_star_mask_dog_cuda_runtime_falls_back_to_numpy(self) -> None:
+    def test_star_mask_dog_cuda_runtime_falls_back_to_cpu(self) -> None:
         image = np.zeros((9, 11), dtype=np.uint8)
         image[4, 5] = 255
         candidate = backend_registry.BackendCandidate(
@@ -411,6 +514,15 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
             build_flag="cuda",
         )
         selection = backend_registry.BackendSelection(candidate, object(), None)
+        cpu_candidate = backend_registry.BackendCandidate(
+            "star_mask_dog",
+            "openmp_cpu",
+            "star_mask_dog_cpu",
+        )
+        cpu_selection = backend_registry.BackendSelection(
+            cpu_candidate, object(), None)
+        expected = np.zeros(image.shape, dtype=np.uint8)
+        expected[4, 5] = 1
 
         with mock.patch.object(
             star_shrink_ops,
@@ -422,16 +534,142 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
                 "star_mask_dog_compiled_cuda",
                 side_effect=RuntimeError("no CUDA-capable device is detected"),
             ) as mock_cuda:
-                got = star_mask_dog(
-                    image,
-                    sigma_small=1.0,
-                    sigma_large=2.0,
-                    threshold_ratio=1.0,
-                    open_ksize=0,
-                    dilate_ksize=0,
-                )
+                with mock.patch.object(
+                    star_shrink_ops,
+                    "resolve_after_runtime_unavailable",
+                    return_value=cpu_selection,
+                ):
+                    with mock.patch.object(
+                        star_shrink_ops,
+                        "star_mask_dog_compiled_cpu",
+                        return_value=expected,
+                    ) as mock_cpu:
+                        got = star_mask_dog(
+                            image,
+                            sigma_small=1.0,
+                            sigma_large=2.0,
+                            threshold_ratio=1.0,
+                            open_ksize=0,
+                            dilate_ksize=0,
+                        )
 
         mock_cuda.assert_called_once()
+        mock_cpu.assert_called_once()
+        self.assertIs(got, expected)
+
+    def test_star_mask_dog_cpu_matches_numpy(self) -> None:
+        cases = [
+            (np.uint8, False, 0, 0),
+            (np.uint8, True, 3, 0),
+            (np.uint16, False, 0, 3),
+            (np.uint16, True, 3, 5),
+        ]
+        for dtype, rgb, open_ksize, dilate_ksize in cases:
+            with self.subTest(
+                    dtype=dtype,
+                    rgb=rgb,
+                    open_ksize=open_ksize,
+                    dilate_ksize=dilate_ksize):
+                max_value = np.iinfo(dtype).max
+                image = np.zeros((65, 67), dtype=dtype)
+                image[29:36, 30:37] = int(max_value * 0.85)
+                image[11:16, 14:19] = int(max_value * 0.55)
+                image[48:51, 49:52] = int(max_value * 0.35)
+                if rgb:
+                    image = np.repeat(image[:, :, None], 3, axis=2)
+                    image[:, :, 1] = (
+                        image[:, :, 1].astype(np.uint32) * 3 // 4
+                    ).astype(dtype)
+
+                kwargs = {
+                    "sigma_small": 1.0,
+                    "sigma_large": 3.0,
+                    "threshold_ratio": 1.0,
+                    "open_ksize": open_ksize,
+                    "dilate_ksize": dilate_ksize,
+                }
+                got = star_shrink_ops.star_mask_dog_compiled_cpu(
+                    image, **kwargs)
+                expected = star_shrink_ops.star_mask_dog_numpy(
+                    image, **kwargs)
+
+                self.assertEqual(got.shape, expected.shape)
+                self.assertEqual(got.dtype, expected.dtype)
+                expected_bool = expected > 0
+                got_bool = got > 0
+                self.assertGreater(np.count_nonzero(expected_bool), 0)
+                intersection = np.count_nonzero(expected_bool & got_bool)
+                precision = intersection / max(1, np.count_nonzero(got_bool))
+                recall = intersection / np.count_nonzero(expected_bool)
+                self.assertGreaterEqual(precision, 0.995)
+                self.assertGreaterEqual(recall, 0.995)
+
+    def test_star_mask_dog_cpu_backend_error_propagates(self) -> None:
+        image = np.zeros((9, 11), dtype=np.uint8)
+        candidate = backend_registry.BackendCandidate(
+            "star_mask_dog",
+            "openmp_cpu",
+            "star_mask_dog_cpu",
+        )
+        selection = backend_registry.BackendSelection(candidate, object(), None)
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_select_star_mask_dog_backend",
+            return_value=selection,
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_mask_dog_compiled_cpu",
+                side_effect=RuntimeError("CPU DoG failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "CPU DoG failed"):
+                    star_mask_dog(image, open_ksize=0)
+
+    def test_star_mask_dog_cuda_resource_exhaustion_falls_back_to_numpy(
+        self,
+    ) -> None:
+        image = np.zeros((9, 11), dtype=np.uint8)
+        image[4, 5] = 255
+        candidate = backend_registry.BackendCandidate(
+            "star_mask_dog",
+            "cuda_host_io",
+            "star_mask_dog_cuda",
+            build_flag="cuda",
+        )
+        selection = backend_registry.BackendSelection(candidate, object(), None)
+        numpy_selection = backend_registry.BackendSelection(
+            None,
+            None,
+            "CUDA resource exhausted",
+            "cuda_resource_exhausted",
+        )
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_select_star_mask_dog_backend",
+            return_value=selection,
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_mask_dog_compiled_cuda",
+                side_effect=CustomOpResourceExhaustedError("admission denied"),
+            ):
+                with mock.patch.object(
+                    star_shrink_ops,
+                    "resolve_after_resource_exhausted",
+                    return_value=numpy_selection,
+                ) as resolve:
+                    got = star_mask_dog(
+                        image,
+                        sigma_small=1.0,
+                        sigma_large=2.0,
+                        threshold_ratio=1.0,
+                        open_ksize=0,
+                        dilate_ksize=0,
+                    )
+
+        resolve.assert_called_once()
         expected = star_shrink_ops.star_mask_dog_numpy(
             image,
             sigma_small=1.0,
@@ -473,6 +711,35 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
         self.assertLessEqual(
             abs(int(np.count_nonzero(got)) - int(np.count_nonzero(expected))), 8
         )
+
+    def test_star_mask_dog_cuda_admission_denial_stops_before_kernel(self) -> None:
+        image = np.zeros((9, 11), dtype=np.uint8)
+        native = mock.Mock()
+        module = mock.Mock(star_mask_dog_cuda=native)
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_load_compiled_module_result",
+            return_value=(module, None),
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "cuda_memory_admission",
+                return_value=self._denied_admission(),
+            ):
+                with self.assertRaisesRegex(
+                    CustomOpResourceExhaustedError,
+                    "estimated peak",
+                ):
+                    star_shrink_ops.star_mask_dog_compiled_cuda(
+                        image,
+                        sigma_small=1.0,
+                        sigma_large=3.0,
+                        open_ksize=0,
+                        dilate_ksize=0,
+                    )
+
+        native.assert_not_called()
 
     def test_star_shrink_dog_process_can_force_numpy_fallback(self) -> None:
         image = np.zeros((17, 19, 3), dtype=np.uint8)
@@ -578,6 +845,71 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
         )
         np.testing.assert_array_equal(got, expected)
 
+    def test_star_shrink_dog_process_resource_exhaustion_uses_composed_path(
+        self,
+    ) -> None:
+        image = np.zeros((11, 13, 3), dtype=np.uint8)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[4:7, 5:8] = 1
+        candidate = backend_registry.BackendCandidate(
+            "star_shrink_dog_process",
+            "cuda_host_io",
+            "star_shrink_dog_process_cuda",
+            build_flag="cuda",
+        )
+        selection = backend_registry.BackendSelection(candidate, object(), None)
+        numpy_selection = backend_registry.BackendSelection(
+            None,
+            None,
+            "CUDA resource exhausted",
+            "cuda_resource_exhausted",
+        )
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_select_star_shrink_dog_process_backend",
+            return_value=selection,
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_dog_process_compiled_cuda",
+                side_effect=CustomOpResourceExhaustedError("admission denied"),
+            ):
+                with mock.patch.object(
+                    star_shrink_ops,
+                    "resolve_after_resource_exhausted",
+                    return_value=numpy_selection,
+                ) as resolve:
+                    with mock.patch.object(
+                        star_shrink_ops, "star_mask_dog", return_value=mask
+                    ) as mask_backend:
+                        with mock.patch.object(
+                            star_shrink_ops,
+                            "star_shrink_process",
+                            wraps=star_shrink_ops.star_shrink_process_numpy,
+                        ) as process_backend:
+                            got = star_shrink_dog_process(
+                                image,
+                                sigma_small=1.0,
+                                sigma_large=2.0,
+                                threshold_ratio=1.0,
+                                open_ksize=0,
+                                dilate_ksize=0,
+                                shrink_ksize=3,
+                                shrink_shape="CIRCLE",
+                                shrink_times=1,
+                                shrink_ratio=1.0,
+                                deringing_ksize=5,
+                            )
+
+        resolve.assert_called_once()
+        mask_backend.assert_called_once()
+        process_backend.assert_called_once()
+        expected = star_shrink_ops.star_shrink_process_numpy(
+            image, mask, 3, "CIRCLE", 1, 1.0, 5
+        )
+        np.testing.assert_array_equal(got, expected)
+
     def test_star_shrink_dog_process_cuda_backend_error_propagates(self) -> None:
         image = np.zeros((11, 13, 3), dtype=np.uint8)
         candidate = backend_registry.BackendCandidate(
@@ -657,3 +989,39 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
         self.assertEqual(got.dtype, image.dtype)
         self.assertEqual(got.shape, image.shape)
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
+
+    def test_star_shrink_dog_process_cuda_admission_denial_stops_before_kernel(
+        self,
+    ) -> None:
+        image = np.zeros((9, 11, 3), dtype=np.uint16)
+        native = mock.Mock()
+        module = mock.Mock(star_shrink_dog_process_cuda=native)
+
+        with mock.patch.object(
+            star_shrink_ops,
+            "_load_compiled_module_result",
+            return_value=(module, None),
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "cuda_memory_admission",
+                return_value=self._denied_admission(),
+            ):
+                with self.assertRaisesRegex(
+                    CustomOpResourceExhaustedError,
+                    "estimated peak",
+                ):
+                    star_shrink_ops.star_shrink_dog_process_compiled_cuda(
+                        image,
+                        sigma_small=1.0,
+                        sigma_large=3.0,
+                        open_ksize=0,
+                        dilate_ksize=0,
+                        shrink_ksize=3,
+                        shrink_shape="CIRCLE",
+                        shrink_times=1,
+                        shrink_ratio=1.0,
+                        deringing_ksize=5,
+                    )
+
+        native.assert_not_called()

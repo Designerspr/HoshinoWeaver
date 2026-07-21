@@ -4,6 +4,9 @@ from unittest import mock
 import cv2
 import numpy as np
 
+from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
+from hoshicore._custom_op.backend_registry import BackendCandidate
+from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import registered_backend_candidates
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op.ops import wavelet as wavelet_ops
@@ -20,6 +23,15 @@ def _is_compiled_backend_unavailable(exc: RuntimeError) -> bool:
 
 
 class TestWaveletDecRecCustomOp(unittest.TestCase):
+    @staticmethod
+    def _admission(granted: bool) -> mock.MagicMock:
+        admission = mock.MagicMock()
+        admission.__enter__.return_value = mock.Mock(
+            granted=granted,
+            estimated_peak_bytes=123456,
+        )
+        return admission
+
     def tearDown(self) -> None:
         wavelet_ops._load_compiled_module_result.cache_clear()
         wavelet_ops._select_wavelet_dec_rec_backend.cache_clear()
@@ -68,6 +80,77 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
                 self.assertEqual(got.shape, expected.shape)
                 np.testing.assert_allclose(
                     got, expected, rtol=1e-10, atol=1e-12)
+
+    def test_wavelet_dec_rec_cuda_admission_denial_stops_before_kernel(
+        self,
+    ) -> None:
+        image = np.ones((24, 25), dtype=np.float64)
+        native = mock.Mock()
+        module = mock.Mock(wavelet_dec_rec_cuda_core=native)
+
+        with mock.patch.object(
+            wavelet_ops,
+            "_load_compiled_module_result",
+            return_value=(module, None),
+        ):
+            with mock.patch.object(
+                wavelet_ops,
+                "cuda_memory_admission",
+                return_value=self._admission(False),
+            ):
+                with self.assertRaisesRegex(
+                    CustomOpResourceExhaustedError,
+                    "estimated peak",
+                ):
+                    wavelet_ops.wavelet_dec_rec_core_cuda(image, 2)
+
+        native.assert_not_called()
+
+    def test_wavelet_cuda_backend_uses_selected_logical_op_memory_model(
+        self,
+    ) -> None:
+        image = np.ones((24, 25), dtype=np.float64)
+        expected = np.full_like(image, 2.0)
+        native = mock.Mock(return_value=expected)
+        module = mock.Mock(wavelet_dec_rec_cuda_core=native)
+        selection = BackendSelection(
+            BackendCandidate(
+                "wavelet_dec_rec",
+                "cuda_host_io",
+                "wavelet_dec_rec_cuda_core",
+            ),
+            module,
+        )
+
+        with mock.patch.object(
+            wavelet_ops,
+            "_load_compiled_module_result",
+            return_value=(module, None),
+        ):
+            with mock.patch.object(
+                wavelet_ops,
+                "cuda_memory_estimate",
+                return_value=mock.Mock(logical_op="wavelet_dec_rec"),
+            ) as estimate:
+                with mock.patch.object(
+                    wavelet_ops,
+                    "cuda_memory_admission",
+                    return_value=self._admission(True),
+                ):
+                    backend_name, backend = wavelet_ops._wavelet_dec_rec_backend(
+                        selection
+                    )
+                    got = backend(image, 2)
+
+        self.assertEqual(backend_name, "cuda")
+        estimate.assert_called_once_with(
+            "wavelet_dec_rec",
+            height=image.shape[0],
+            width=image.shape[1],
+            level=2,
+        )
+        native.assert_called_once()
+        self.assertIs(got, expected)
 
     def test_wavelet_dec_rec_wrapper_matches_pywavelets(self) -> None:
         rng = np.random.default_rng(1)
@@ -174,13 +257,22 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
                 "wavelet_dec_rec_cuda_core cudaMalloc input: "
                 "no CUDA-capable device is detected")
 
+        cpu_selection = BackendSelection(
+            BackendCandidate(
+                "wavelet_dec_rec",
+                "openmp_cpu",
+                "wavelet_dec_rec_cpu",
+            ),
+            object(),
+        )
+
         with mock.patch.object(
                 wavelet_ops, "_select_wavelet_dec_rec_backend",
                 return_value=("cuda", raise_no_cuda)):
             with mock.patch.object(
                     wavelet_ops,
-                    "_wavelet_dec_rec_cpu_fallback_available",
-                    return_value=True):
+                    "resolve_after_runtime_unavailable",
+                    return_value=cpu_selection):
                 with mock.patch.object(
                         wavelet_ops,
                         "wavelet_dec_rec_core_compiled",
@@ -199,13 +291,22 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
                 "wavelet_dec_rec_cuda_core cudaMalloc input: "
                 "no CUDA-capable device is detected")
 
+        cpu_selection = BackendSelection(
+            BackendCandidate(
+                "wavelet_dec_rec",
+                "openmp_cpu",
+                "wavelet_dec_rec_cpu",
+            ),
+            object(),
+        )
+
         with mock.patch.object(
                 wavelet_ops, "_select_wavelet_dec_rec_backend",
                 return_value=("cuda", raise_no_cuda)):
             with mock.patch.object(
                     wavelet_ops,
-                    "_wavelet_dec_rec_cpu_fallback_available",
-                    return_value=True):
+                    "resolve_after_runtime_unavailable",
+                    return_value=cpu_selection):
                 with mock.patch.object(
                         wavelet_ops,
                         "wavelet_dec_rec_core_compiled",
@@ -216,6 +317,80 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
                             side_effect=AssertionError("numpy backend should not be called")):
                         with self.assertRaisesRegex(RuntimeError, "native CPU wavelet bug"):
                             wavelet_ops.wavelet_dec_rec_core(image, 6)
+
+    def test_wavelet_dec_rec_cuda_resource_exhaustion_falls_back_to_cpu(
+        self,
+    ) -> None:
+        image = np.ones((24, 26), dtype=np.float64)
+        expected = np.full_like(image, 5.0)
+
+        def raise_resource(_image: np.ndarray, _level: int) -> np.ndarray:
+            raise CustomOpResourceExhaustedError("admission denied")
+
+        cpu_selection = BackendSelection(
+            BackendCandidate(
+                "wavelet_dec_rec",
+                "openmp_cpu",
+                "wavelet_dec_rec_cpu",
+            ),
+            object(),
+        )
+        with mock.patch.object(
+            wavelet_ops,
+            "_select_wavelet_dec_rec_backend",
+            return_value=("cuda", raise_resource),
+        ):
+            with mock.patch.object(
+                wavelet_ops,
+                "resolve_after_resource_exhausted",
+                return_value=cpu_selection,
+            ) as resolve:
+                with mock.patch.object(
+                    wavelet_ops,
+                    "wavelet_dec_rec_core_compiled",
+                    return_value=expected,
+                ) as cpu_backend:
+                    got = wavelet_ops.wavelet_dec_rec_core(image, 2)
+
+        resolve.assert_called_once()
+        cpu_backend.assert_called_once()
+        self.assertIs(got, expected)
+
+    def test_wavelet_cuda_core_resource_exhaustion_falls_back_to_numpy(
+        self,
+    ) -> None:
+        image = np.ones((24, 26), dtype=np.float64)
+        expected = np.full_like(image, 4.0)
+
+        def raise_resource(_image: np.ndarray, _level: int) -> np.ndarray:
+            raise CustomOpResourceExhaustedError("admission denied")
+
+        numpy_selection = BackendSelection(
+            None,
+            None,
+            "CUDA resource exhausted",
+            "cuda_resource_exhausted",
+        )
+        with mock.patch.object(
+            wavelet_ops,
+            "_select_wavelet_dec_rec_cuda_core_backend",
+            return_value=("compiled", raise_resource),
+        ):
+            with mock.patch.object(
+                wavelet_ops,
+                "resolve_after_resource_exhausted",
+                return_value=numpy_selection,
+            ) as resolve:
+                with mock.patch.object(
+                    wavelet_ops,
+                    "wavelet_dec_rec_core_numpy",
+                    return_value=expected,
+                ) as numpy_backend:
+                    got = wavelet_ops.wavelet_dec_rec_core_cuda_or_numpy(image, 2)
+
+        resolve.assert_called_once()
+        numpy_backend.assert_called_once()
+        self.assertIs(got, expected)
 
     def test_wavelet_dec_rec_backend_registered(self) -> None:
         candidates = registered_backend_candidates("wavelet_dec_rec")

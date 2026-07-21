@@ -13,8 +13,7 @@ namespace {
 
 constexpr int THREADS_PER_BLOCK = 256;
 
-template <typename T>
-__device__ inline float dtype_max_value() {
+template <typename T> __device__ inline float dtype_max_value() {
     if constexpr (std::is_same_v<T, uint8_t>) {
         return 255.0f;
     } else if constexpr (std::is_same_v<T, uint16_t>) {
@@ -24,8 +23,7 @@ __device__ inline float dtype_max_value() {
     }
 }
 
-template <typename T>
-__device__ inline float normalized_sample(const T* ptr, const int64_t idx) {
+template <typename T> __device__ inline float normalized_sample(const T* ptr, const int64_t idx) {
     if constexpr (std::is_same_v<T, float>) {
         return fminf(fmaxf(ptr[idx], 0.0f), 1.0f);
     } else {
@@ -33,8 +31,7 @@ __device__ inline float normalized_sample(const T* ptr, const int64_t idx) {
     }
 }
 
-template <typename T>
-__device__ inline T cast_output(const float value) {
+template <typename T> __device__ inline T cast_output(const float value) {
     const float clamped = fminf(fmaxf(value, 0.0f), 1.0f);
     if constexpr (std::is_same_v<T, float>) {
         return clamped;
@@ -78,12 +75,8 @@ __device__ inline float lab_f_inv(const float t) {
 }
 
 template <typename T>
-__global__ void bgr_to_lab_kernel(const T* image,
-                                  float* luma,
-                                  float* lab_a,
-                                  float* lab_b,
-                                  const int64_t plane_size,
-                                  const int channels) {
+__global__ void bgr_to_lab_kernel(const T* image, float* luma, float* lab_a, float* lab_b,
+                                  const int64_t plane_size, const int channels) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= plane_size) {
         return;
@@ -110,10 +103,7 @@ __global__ void bgr_to_lab_kernel(const T* image,
     lab_b[idx] = 200.0f * (fy - fz);
 }
 
-__device__ inline bool kernel_active(const int shape,
-                                     const int ksize,
-                                     const int ky,
-                                     const int kx) {
+__device__ inline bool kernel_active(const int shape, const int ksize, const int ky, const int kx) {
     const int radius = ksize / 2;
     const int dy = ky - radius;
     const int dx = kx - radius;
@@ -126,12 +116,8 @@ __device__ inline bool kernel_active(const int shape,
     return dx * dx + dy * dy <= radius * radius;
 }
 
-__global__ void erode_luma_kernel(const float* current,
-                                  float* next,
-                                  const int height,
-                                  const int width,
-                                  const int shrink_ksize,
-                                  const int shrink_shape,
+__global__ void erode_luma_kernel(const float* current, float* next, const int height,
+                                  const int width, const int shrink_ksize, const int shrink_shape,
                                   const float shrink_ratio) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t plane_size = static_cast<int64_t>(height) * width;
@@ -161,12 +147,8 @@ __global__ void erode_luma_kernel(const float* current,
     next[idx] = minimum * shrink_ratio + current[idx] * (1.0f - shrink_ratio);
 }
 
-__global__ void lab_to_bgr_kernel(const float* luma,
-                                  const float* lab_a,
-                                  const float* lab_b,
-                                  float* shrunk,
-                                  const int64_t plane_size,
-                                  const int channels) {
+__global__ void lab_to_bgr_kernel(const float* luma, const float* lab_a, const float* lab_b,
+                                  float* shrunk, const int64_t plane_size, const int channels) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= plane_size) {
         return;
@@ -209,12 +191,8 @@ __device__ inline int reflect101(int idx, const int length) {
 }
 
 template <typename T>
-__global__ void horizontal_blur_kernel(const T* image,
-                                       float* tmp,
-                                       const int height,
-                                       const int width,
-                                       const int channels,
-                                       const int ksize) {
+__global__ void horizontal_blur_kernel(const T* image, float* tmp, const int height,
+                                       const int width, const int channels, const int ksize) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = static_cast<int64_t>(height) * width * channels;
     if (idx >= total) {
@@ -233,12 +211,8 @@ __global__ void horizontal_blur_kernel(const T* image,
     tmp[idx] = sum / static_cast<float>(ksize);
 }
 
-__global__ void vertical_blur_kernel(const float* tmp,
-                                     float* blurred,
-                                     const int height,
-                                     const int width,
-                                     const int channels,
-                                     const int ksize) {
+__global__ void vertical_blur_kernel(const float* tmp, float* blurred, const int height,
+                                     const int width, const int channels, const int ksize) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = static_cast<int64_t>(height) * width * channels;
     if (idx >= total) {
@@ -258,12 +232,8 @@ __global__ void vertical_blur_kernel(const float* tmp,
 }
 
 template <typename T>
-__global__ void final_mask_kernel(const T* image,
-                                  const uint8_t* mask,
-                                  const float* shrunk,
-                                  const float* blurred,
-                                  T* output,
-                                  const int64_t plane_size,
+__global__ void final_mask_kernel(const T* image, const uint8_t* mask, const float* shrunk,
+                                  const float* blurred, T* output, const int64_t plane_size,
                                   const int channels) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = plane_size * channels;
@@ -279,19 +249,12 @@ __global__ void final_mask_kernel(const T* image,
 }
 
 template <typename T>
-void launch_star_shrink_process_cuda_impl(const T* image_host,
-                                          const uint8_t* mask_host,
-                                          T* out_host,
-                                          const int height,
-                                          const int width,
-                                          const int channels,
-                                          const int shrink_ksize,
-                                          const int shrink_shape,
-                                          const int shrink_times,
-                                          const float shrink_ratio,
-                                          const int deringing_ksize) {
-    auto workspace = hnw::cuda::acquire_host_io_workspace(
-        "star_shrink_process_cuda cudaGetDevice");
+void launch_star_shrink_process_cuda_impl(const T* image_host, const uint8_t* mask_host,
+                                          T* out_host, const int height, const int width,
+                                          const int channels, const int shrink_ksize,
+                                          const int shrink_shape, const int shrink_times,
+                                          const float shrink_ratio, const int deringing_ksize) {
+    auto workspace = hnw::cuda::acquire_host_io_workspace("star_shrink_process_cuda cudaGetDevice");
     try {
         const int64_t plane_size = static_cast<int64_t>(height) * width;
         const int64_t total = plane_size * channels;
@@ -300,40 +263,32 @@ void launch_star_shrink_process_cuda_impl(const T* image_host,
         const size_t plane_float_bytes = static_cast<size_t>(plane_size) * sizeof(float);
         const size_t total_float_bytes = static_cast<size_t>(total) * sizeof(float);
 
-        void* image_device = workspace.device_buffer(
-            image_bytes, "star_shrink cudaMalloc image");
-        void* output_device = workspace.device_buffer(
-            image_bytes, "star_shrink cudaMalloc output");
-        auto* mask_device = static_cast<uint8_t*>(workspace.device_buffer(
-            mask_bytes, "star_shrink cudaMalloc mask"));
-        auto* luma = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink cudaMalloc luma"));
-        auto* luma_tmp = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink cudaMalloc luma_tmp"));
-        auto* lab_a = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink cudaMalloc lab_a"));
-        auto* lab_b = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink cudaMalloc lab_b"));
-        auto* shrunk = static_cast<float*>(workspace.device_buffer(
-            total_float_bytes, "star_shrink cudaMalloc shrunk"));
-        auto* blur_tmp = static_cast<float*>(workspace.device_buffer(
-            total_float_bytes, "star_shrink cudaMalloc blur_tmp"));
-        auto* blurred = static_cast<float*>(workspace.device_buffer(
-            total_float_bytes, "star_shrink cudaMalloc blurred"));
+        void* image_device = workspace.device_buffer(image_bytes, "star_shrink cudaMalloc image");
+        void* output_device = workspace.device_buffer(image_bytes, "star_shrink cudaMalloc output");
+        auto* mask_device = static_cast<uint8_t*>(
+            workspace.device_buffer(mask_bytes, "star_shrink cudaMalloc mask"));
+        auto* luma = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink cudaMalloc luma"));
+        auto* luma_tmp = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink cudaMalloc luma_tmp"));
+        auto* lab_a = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink cudaMalloc lab_a"));
+        auto* lab_b = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink cudaMalloc lab_b"));
+        auto* shrunk = static_cast<float*>(
+            workspace.device_buffer(total_float_bytes, "star_shrink cudaMalloc shrunk"));
+        auto* blur_tmp = static_cast<float*>(
+            workspace.device_buffer(total_float_bytes, "star_shrink cudaMalloc blur_tmp"));
+        auto* blurred = static_cast<float*>(
+            workspace.device_buffer(total_float_bytes, "star_shrink cudaMalloc blurred"));
         cudaStream_t stream = workspace.stream();
 
-        hnw::cuda::throw_if_failed(cudaMemcpyAsync(image_device,
-                                             image_host,
-                                             image_bytes,
-                                             cudaMemcpyHostToDevice,
-                                             stream),
-                             "star_shrink_process_cuda copy image to device");
-        hnw::cuda::throw_if_failed(cudaMemcpyAsync(mask_device,
-                                             mask_host,
-                                             mask_bytes,
-                                             cudaMemcpyHostToDevice,
-                                             stream),
-                             "star_shrink_process_cuda copy mask to device");
+        hnw::cuda::throw_if_failed(
+            cudaMemcpyAsync(image_device, image_host, image_bytes, cudaMemcpyHostToDevice, stream),
+            "star_shrink_process_cuda copy image to device");
+        hnw::cuda::throw_if_failed(
+            cudaMemcpyAsync(mask_device, mask_host, mask_bytes, cudaMemcpyHostToDevice, stream),
+            "star_shrink_process_cuda copy mask to device");
 
         const int blocks_plane =
             static_cast<int>((plane_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
@@ -341,25 +296,14 @@ void launch_star_shrink_process_cuda_impl(const T* image_host,
             static_cast<int>((total + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
 
         bgr_to_lab_kernel<T><<<blocks_plane, THREADS_PER_BLOCK, 0, stream>>>(
-            static_cast<const T*>(image_device),
-            luma,
-            lab_a,
-            lab_b,
-            plane_size,
-            channels);
+            static_cast<const T*>(image_device), luma, lab_a, lab_b, plane_size, channels);
         hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda bgr_to_lab");
 
         float* current = luma;
         float* next = luma_tmp;
         for (int iter = 0; iter < shrink_times; ++iter) {
             erode_luma_kernel<<<blocks_plane, THREADS_PER_BLOCK, 0, stream>>>(
-                current,
-                next,
-                height,
-                width,
-                shrink_ksize,
-                shrink_shape,
-                shrink_ratio);
+                current, next, height, width, shrink_ksize, shrink_shape, shrink_ratio);
             hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda erode_luma");
             float* tmp = current;
             current = next;
@@ -367,101 +311,51 @@ void launch_star_shrink_process_cuda_impl(const T* image_host,
         }
 
         lab_to_bgr_kernel<<<blocks_plane, THREADS_PER_BLOCK, 0, stream>>>(
-            current,
-            lab_a,
-            lab_b,
-            shrunk,
-            plane_size,
-            channels);
+            current, lab_a, lab_b, shrunk, plane_size, channels);
         hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda lab_to_bgr");
 
         horizontal_blur_kernel<T><<<blocks_total, THREADS_PER_BLOCK, 0, stream>>>(
-            static_cast<const T*>(image_device),
-            blur_tmp,
-            height,
-            width,
-            channels,
+            static_cast<const T*>(image_device), blur_tmp, height, width, channels,
             deringing_ksize);
         hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda horizontal_blur");
         vertical_blur_kernel<<<blocks_total, THREADS_PER_BLOCK, 0, stream>>>(
-            blur_tmp,
-            blurred,
-            height,
-            width,
-            channels,
-            deringing_ksize);
+            blur_tmp, blurred, height, width, channels, deringing_ksize);
         hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda vertical_blur");
 
         final_mask_kernel<T><<<blocks_total, THREADS_PER_BLOCK, 0, stream>>>(
-            static_cast<const T*>(image_device),
-            mask_device,
-            shrunk,
-            blurred,
-            static_cast<T*>(output_device),
-            plane_size,
-            channels);
+            static_cast<const T*>(image_device), mask_device, shrunk, blurred,
+            static_cast<T*>(output_device), plane_size, channels);
         hnw::cuda::throw_if_failed(cudaGetLastError(), "star_shrink_process_cuda final_mask");
 
-        hnw::cuda::throw_if_failed(cudaMemcpyAsync(out_host,
-                                             output_device,
-                                             image_bytes,
-                                             cudaMemcpyDeviceToHost,
-                                             stream),
-                             "star_shrink_process_cuda copy output to host");
+        hnw::cuda::throw_if_failed(
+            cudaMemcpyAsync(out_host, output_device, image_bytes, cudaMemcpyDeviceToHost, stream),
+            "star_shrink_process_cuda copy output to host");
         hnw::cuda::throw_if_failed(cudaStreamSynchronize(stream),
-                             "star_shrink_process_cuda synchronize");
+                                   "star_shrink_process_cuda synchronize");
     } catch (...) {
         workspace.reset_after_error();
         throw;
     }
 }
 
-}  // namespace
+} // namespace
 
-void launch_star_shrink_process_cuda_u8(const uint8_t* image_host,
-                                        const uint8_t* mask_host,
-                                        uint8_t* out_host,
-                                        const int height,
-                                        const int width,
-                                        const int channels,
-                                        const int shrink_ksize,
-                                        const int shrink_shape,
-                                        const int shrink_times,
-                                        const float shrink_ratio,
-                                        const int deringing_ksize) {
-    launch_star_shrink_process_cuda_impl(image_host,
-                                         mask_host,
-                                         out_host,
-                                         height,
-                                         width,
-                                         channels,
-                                         shrink_ksize,
-                                         shrink_shape,
-                                         shrink_times,
-                                         shrink_ratio,
+void launch_star_shrink_process_cuda_u8(const uint8_t* image_host, const uint8_t* mask_host,
+                                        uint8_t* out_host, const int height, const int width,
+                                        const int channels, const int shrink_ksize,
+                                        const int shrink_shape, const int shrink_times,
+                                        const float shrink_ratio, const int deringing_ksize) {
+    launch_star_shrink_process_cuda_impl(image_host, mask_host, out_host, height, width, channels,
+                                         shrink_ksize, shrink_shape, shrink_times, shrink_ratio,
                                          deringing_ksize);
 }
 
-void launch_star_shrink_process_cuda_u16(const uint16_t* image_host,
-                                         const uint8_t* mask_host,
-                                         uint16_t* out_host,
-                                         const int height,
-                                         const int width,
-                                         const int channels,
-                                         const int shrink_ksize,
-                                         const int shrink_shape,
-                                         const int shrink_times,
-                                         const float shrink_ratio,
-                                         const int deringing_ksize) {
-    launch_star_shrink_process_cuda_impl(image_host,
-                                         mask_host,
-                                         out_host,
-                                         height,
-                                         width,
-                                         channels,
-                                         shrink_ksize,
-                                         shrink_shape,
-                                         shrink_times,
-                                         shrink_ratio,
+void launch_star_shrink_process_cuda_u16(const uint16_t* image_host, const uint8_t* mask_host,
+                                         uint16_t* out_host, const int height, const int width,
+                                         const int channels, const int shrink_ksize,
+                                         const int shrink_shape, const int shrink_times,
+                                         const float shrink_ratio, const int deringing_ksize) {
+    launch_star_shrink_process_cuda_impl(image_host, mask_host, out_host, height, width, channels,
+                                         shrink_ksize, shrink_shape, shrink_times, shrink_ratio,
                                          deringing_ksize);
 }

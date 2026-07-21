@@ -42,8 +42,7 @@ void throw_if_cuda_failed(const cudaError_t error, const char* context) {
     hnw::cuda::throw_if_failed(error, context);
 }
 
-template <typename T>
-__device__ inline float dtype_max_value() {
+template <typename T> __device__ inline float dtype_max_value() {
     if constexpr (std::is_same_v<T, uint8_t>) {
         return 255.0f;
     } else {
@@ -51,13 +50,11 @@ __device__ inline float dtype_max_value() {
     }
 }
 
-template <typename T>
-__device__ inline float normalized_sample(const T* ptr, const int64_t idx) {
+template <typename T> __device__ inline float normalized_sample(const T* ptr, const int64_t idx) {
     return static_cast<float>(ptr[idx]) / dtype_max_value<T>();
 }
 
-template <typename T>
-__device__ inline T cast_output(const float value) {
+template <typename T> __device__ inline T cast_output(const float value) {
     const float clamped = fminf(fmaxf(value, 0.0f), 1.0f);
     const float scaled = nearbyintf(clamped * dtype_max_value<T>());
     return static_cast<T>(fminf(fmaxf(scaled, 0.0f), dtype_max_value<T>()));
@@ -111,12 +108,8 @@ __device__ inline int reflect101(int idx, const int length) {
 }
 
 template <typename T>
-__global__ void bgr_to_lab_kernel(const T* image,
-                                  float* luma,
-                                  float* lab_a,
-                                  float* lab_b,
-                                  const int64_t plane_size,
-                                  const int channels) {
+__global__ void bgr_to_lab_kernel(const T* image, float* luma, float* lab_a, float* lab_b,
+                                  const int64_t plane_size, const int channels) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= plane_size) {
         return;
@@ -143,9 +136,7 @@ __global__ void bgr_to_lab_kernel(const T* image,
     lab_b[idx] = 200.0f * (fy - fz);
 }
 
-__device__ inline bool shrink_kernel_active(const int shape,
-                                            const int ksize,
-                                            const int ky,
+__device__ inline bool shrink_kernel_active(const int shape, const int ksize, const int ky,
                                             const int kx) {
     const int radius = ksize / 2;
     const int dy = ky - radius;
@@ -159,12 +150,8 @@ __device__ inline bool shrink_kernel_active(const int shape,
     return dx * dx + dy * dy <= radius * radius;
 }
 
-__global__ void erode_luma_kernel(const float* current,
-                                  float* next,
-                                  const int height,
-                                  const int width,
-                                  const int shrink_ksize,
-                                  const int shrink_shape,
+__global__ void erode_luma_kernel(const float* current, float* next, const int height,
+                                  const int width, const int shrink_ksize, const int shrink_shape,
                                   const float shrink_ratio) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t plane_size = static_cast<int64_t>(height) * width;
@@ -194,12 +181,8 @@ __global__ void erode_luma_kernel(const float* current,
     next[idx] = minimum * shrink_ratio + current[idx] * (1.0f - shrink_ratio);
 }
 
-__global__ void lab_to_bgr_kernel(const float* luma,
-                                  const float* lab_a,
-                                  const float* lab_b,
-                                  float* shrunk,
-                                  const int64_t plane_size,
-                                  const int channels) {
+__global__ void lab_to_bgr_kernel(const float* luma, const float* lab_a, const float* lab_b,
+                                  float* shrunk, const int64_t plane_size, const int channels) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= plane_size) {
         return;
@@ -227,12 +210,8 @@ __global__ void lab_to_bgr_kernel(const float* luma,
 }
 
 template <typename T>
-__global__ void box_horizontal_blur_kernel(const T* image,
-                                           float* tmp,
-                                           const int height,
-                                           const int width,
-                                           const int channels,
-                                           const int ksize) {
+__global__ void box_horizontal_blur_kernel(const T* image, float* tmp, const int height,
+                                           const int width, const int channels, const int ksize) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = static_cast<int64_t>(height) * width * channels;
     if (idx >= total) {
@@ -251,12 +230,8 @@ __global__ void box_horizontal_blur_kernel(const T* image,
     tmp[idx] = sum / static_cast<float>(ksize);
 }
 
-__global__ void box_vertical_blur_kernel(const float* tmp,
-                                         float* blurred,
-                                         const int height,
-                                         const int width,
-                                         const int channels,
-                                         const int ksize) {
+__global__ void box_vertical_blur_kernel(const float* tmp, float* blurred, const int height,
+                                         const int width, const int channels, const int ksize) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = static_cast<int64_t>(height) * width * channels;
     if (idx >= total) {
@@ -276,12 +251,8 @@ __global__ void box_vertical_blur_kernel(const float* tmp,
 }
 
 template <typename T>
-__global__ void final_mask_kernel(const T* image,
-                                  const uint8_t* mask,
-                                  const float* shrunk,
-                                  const float* blurred,
-                                  T* output,
-                                  const int64_t plane_size,
+__global__ void final_mask_kernel(const T* image, const uint8_t* mask, const float* shrunk,
+                                  const float* blurred, T* output, const int64_t plane_size,
                                   const int channels) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = plane_size * channels;
@@ -297,9 +268,7 @@ __global__ void final_mask_kernel(const T* image,
 }
 
 template <typename T>
-__global__ void gray_kernel(const T* image,
-                            float* gray,
-                            const int64_t plane_size,
+__global__ void gray_kernel(const T* image, float* gray, const int64_t plane_size,
                             const int channels) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= plane_size) {
@@ -316,12 +285,8 @@ __global__ void gray_kernel(const T* image,
     gray[idx] = 0.114f * b + 0.587f * g + 0.299f * r;
 }
 
-__global__ void gaussian_horizontal_kernel(const float* input,
-                                           float* tmp,
-                                           const float* kernel,
-                                           const int radius,
-                                           const int height,
-                                           const int width) {
+__global__ void gaussian_horizontal_kernel(const float* input, float* tmp, const float* kernel,
+                                           const int radius, const int height, const int width) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t plane_size = static_cast<int64_t>(height) * width;
     if (idx >= plane_size) {
@@ -337,12 +302,8 @@ __global__ void gaussian_horizontal_kernel(const float* input,
     tmp[idx] = sum;
 }
 
-__global__ void gaussian_vertical_kernel(const float* tmp,
-                                         float* output,
-                                         const float* kernel,
-                                         const int radius,
-                                         const int height,
-                                         const int width) {
+__global__ void gaussian_vertical_kernel(const float* tmp, float* output, const float* kernel,
+                                         const int radius, const int height, const int width) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t plane_size = static_cast<int64_t>(height) * width;
     if (idx >= plane_size) {
@@ -358,12 +319,8 @@ __global__ void gaussian_vertical_kernel(const float* tmp,
     output[idx] = sum;
 }
 
-__global__ void dog_reduce_kernel(const float* blur_small,
-                                  const float* blur_large,
-                                  float* dog,
-                                  double* block_sum,
-                                  double* block_sq,
-                                  const int64_t plane_size) {
+__global__ void dog_reduce_kernel(const float* blur_small, const float* blur_large, float* dog,
+                                  double* block_sum, double* block_sq, const int64_t plane_size) {
     __shared__ double shared_sum[THREADS_PER_BLOCK];
     __shared__ double shared_sq[THREADS_PER_BLOCK];
     const int tid = threadIdx.x;
@@ -390,9 +347,7 @@ __global__ void dog_reduce_kernel(const float* blur_small,
     }
 }
 
-__global__ void threshold_mask_kernel(const float* dog,
-                                      uint8_t* mask,
-                                      const int64_t plane_size,
+__global__ void threshold_mask_kernel(const float* dog, uint8_t* mask, const int64_t plane_size,
                                       const float threshold) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= plane_size) {
@@ -406,11 +361,8 @@ __device__ inline bool cross_active(const int ksize, const int ky, const int kx)
     return (ky - radius) == 0 || (kx - radius) == 0;
 }
 
-__global__ void erode_cross_kernel(const uint8_t* input,
-                                   uint8_t* output,
-                                   const int height,
-                                   const int width,
-                                   const int ksize) {
+__global__ void erode_cross_kernel(const uint8_t* input, uint8_t* output, const int height,
+                                   const int width, const int ksize) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t plane_size = static_cast<int64_t>(height) * width;
     if (idx >= plane_size) {
@@ -442,11 +394,8 @@ __global__ void erode_cross_kernel(const uint8_t* input,
     output[idx] = keep ? 1 : 0;
 }
 
-__global__ void dilate_cross_kernel(const uint8_t* input,
-                                    uint8_t* output,
-                                    const int height,
-                                    const int width,
-                                    const int ksize) {
+__global__ void dilate_cross_kernel(const uint8_t* input, uint8_t* output, const int height,
+                                    const int width, const int ksize) {
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t plane_size = static_cast<int64_t>(height) * width;
     if (idx >= plane_size) {
@@ -478,12 +427,8 @@ __global__ void dilate_cross_kernel(const uint8_t* input,
     output[idx] = keep ? 1 : 0;
 }
 
-void launch_morphology(StarMaskDogBuffers* cache,
-                       const int height,
-                       const int width,
-                       const int blocks,
-                       const int open_ksize,
-                       const int dilate_ksize) {
+void launch_morphology(StarMaskDogBuffers* cache, const int height, const int width,
+                       const int blocks, const int open_ksize, const int dilate_ksize) {
     if (open_ksize > 0) {
         erode_cross_kernel<<<blocks, THREADS_PER_BLOCK, 0, cache->stream>>>(
             cache->mask, cache->scratch, height, width, open_ksize);
@@ -496,37 +441,29 @@ void launch_morphology(StarMaskDogBuffers* cache,
         dilate_cross_kernel<<<blocks, THREADS_PER_BLOCK, 0, cache->stream>>>(
             cache->mask, cache->scratch, height, width, dilate_ksize);
         throw_if_cuda_failed(cudaGetLastError(), "star_mask_dog_cuda dilate");
-        throw_if_cuda_failed(cudaMemcpyAsync(cache->mask,
-                                             cache->scratch,
+        throw_if_cuda_failed(cudaMemcpyAsync(cache->mask, cache->scratch,
                                              static_cast<size_t>(height) * width,
-                                             cudaMemcpyDeviceToDevice,
-                                             cache->stream),
+                                             cudaMemcpyDeviceToDevice, cache->stream),
                              "star_mask_dog_cuda copy dilated mask");
     }
 }
 
 template <typename T>
-void launch_star_mask_dog_cuda_impl(const T* image_host,
-                                    uint8_t* mask_host,
-                                    const int height,
-                                    const int width,
-                                    const int channels,
-                                    const float* small_kernel_host,
-                                    const int small_radius,
-                                    const float* large_kernel_host,
-                                    const int large_radius,
-                                    const float threshold_ratio,
-                                    const int open_ksize,
+void launch_star_mask_dog_cuda_impl(const T* image_host, uint8_t* mask_host, const int height,
+                                    const int width, const int channels,
+                                    const float* small_kernel_host, const int small_radius,
+                                    const float* large_kernel_host, const int large_radius,
+                                    const float threshold_ratio, const int open_ksize,
                                     const int dilate_ksize) {
-    auto workspace = hnw::cuda::acquire_host_io_workspace(
-        "star_mask_dog_cuda cudaGetDevice");
+    auto workspace = hnw::cuda::acquire_host_io_workspace("star_mask_dog_cuda cudaGetDevice");
     StarMaskDogBuffers buffers;
     auto* cache = &buffers;
     try {
         cache->stream = workspace.stream();
         const int64_t plane_size = static_cast<int64_t>(height) * width;
         const int64_t total = plane_size * channels;
-        const int blocks = static_cast<int>((plane_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
+        const int blocks =
+            static_cast<int>((plane_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
         const size_t image_bytes = static_cast<size_t>(total) * sizeof(T);
         const size_t plane_float_bytes = static_cast<size_t>(plane_size) * sizeof(float);
         const size_t mask_bytes = static_cast<size_t>(plane_size) * sizeof(uint8_t);
@@ -534,36 +471,40 @@ void launch_star_mask_dog_cuda_impl(const T* image_host,
         const size_t small_kernel_bytes = static_cast<size_t>(2 * small_radius + 1) * sizeof(float);
         const size_t large_kernel_bytes = static_cast<size_t>(2 * large_radius + 1) * sizeof(float);
 
-        cache->image = workspace.device_buffer(
-            image_bytes, "star_mask_dog cudaMalloc image");
-        cache->gray = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_mask_dog cudaMalloc gray"));
-        cache->tmp = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_mask_dog cudaMalloc tmp"));
-        cache->blur_small = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_mask_dog cudaMalloc blur_small"));
-        cache->blur_large = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_mask_dog cudaMalloc blur_large"));
-        cache->dog = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_mask_dog cudaMalloc dog"));
-        cache->kernel_small = static_cast<float*>(workspace.device_buffer(
-            small_kernel_bytes, "star_mask_dog cudaMalloc small_kernel"));
-        cache->kernel_large = static_cast<float*>(workspace.device_buffer(
-            large_kernel_bytes, "star_mask_dog cudaMalloc large_kernel"));
-        cache->mask = static_cast<uint8_t*>(workspace.device_buffer(
-            mask_bytes, "star_mask_dog cudaMalloc mask"));
-        cache->scratch = static_cast<uint8_t*>(workspace.device_buffer(
-            mask_bytes, "star_mask_dog cudaMalloc scratch"));
-        cache->block_sum = static_cast<double*>(workspace.device_buffer(
-            reduction_bytes, "star_mask_dog cudaMalloc block_sum"));
-        cache->block_sq = static_cast<double*>(workspace.device_buffer(
-            reduction_bytes, "star_mask_dog cudaMalloc block_sq"));
+        cache->image = workspace.device_buffer(image_bytes, "star_mask_dog cudaMalloc image");
+        cache->gray = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_mask_dog cudaMalloc gray"));
+        cache->tmp = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_mask_dog cudaMalloc tmp"));
+        cache->blur_small = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_mask_dog cudaMalloc blur_small"));
+        cache->blur_large = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_mask_dog cudaMalloc blur_large"));
+        cache->dog = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_mask_dog cudaMalloc dog"));
+        cache->kernel_small = static_cast<float*>(
+            workspace.device_buffer(small_kernel_bytes, "star_mask_dog cudaMalloc small_kernel"));
+        cache->kernel_large = static_cast<float*>(
+            workspace.device_buffer(large_kernel_bytes, "star_mask_dog cudaMalloc large_kernel"));
+        cache->mask = static_cast<uint8_t*>(
+            workspace.device_buffer(mask_bytes, "star_mask_dog cudaMalloc mask"));
+        cache->scratch = static_cast<uint8_t*>(
+            workspace.device_buffer(mask_bytes, "star_mask_dog cudaMalloc scratch"));
+        cache->block_sum = static_cast<double*>(
+            workspace.device_buffer(reduction_bytes, "star_mask_dog cudaMalloc block_sum"));
+        cache->block_sq = static_cast<double*>(
+            workspace.device_buffer(reduction_bytes, "star_mask_dog cudaMalloc block_sq"));
 
-        throw_if_cuda_failed(cudaMemcpyAsync(cache->image, image_host, image_bytes, cudaMemcpyHostToDevice, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(cache->image, image_host, image_bytes,
+                                             cudaMemcpyHostToDevice, cache->stream),
                              "star_mask_dog_cuda copy image");
-        throw_if_cuda_failed(cudaMemcpyAsync(cache->kernel_small, small_kernel_host, small_kernel_bytes, cudaMemcpyHostToDevice, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(cache->kernel_small, small_kernel_host,
+                                             small_kernel_bytes, cudaMemcpyHostToDevice,
+                                             cache->stream),
                              "star_mask_dog_cuda copy small kernel");
-        throw_if_cuda_failed(cudaMemcpyAsync(cache->kernel_large, large_kernel_host, large_kernel_bytes, cudaMemcpyHostToDevice, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(cache->kernel_large, large_kernel_host,
+                                             large_kernel_bytes, cudaMemcpyHostToDevice,
+                                             cache->stream),
                              "star_mask_dog_cuda copy large kernel");
 
         gray_kernel<T><<<blocks, THREADS_PER_BLOCK, 0, cache->stream>>>(
@@ -585,16 +526,20 @@ void launch_star_mask_dog_cuda_impl(const T* image_host,
         throw_if_cuda_failed(cudaGetLastError(), "star_mask_dog_cuda large vertical");
 
         dog_reduce_kernel<<<blocks, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            cache->blur_small, cache->blur_large, cache->dog, cache->block_sum, cache->block_sq, plane_size);
+            cache->blur_small, cache->blur_large, cache->dog, cache->block_sum, cache->block_sq,
+            plane_size);
         throw_if_cuda_failed(cudaGetLastError(), "star_mask_dog_cuda dog_reduce");
 
         std::vector<double> block_sum(static_cast<size_t>(blocks));
         std::vector<double> block_sq(static_cast<size_t>(blocks));
-        throw_if_cuda_failed(cudaMemcpyAsync(block_sum.data(), cache->block_sum, reduction_bytes, cudaMemcpyDeviceToHost, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(block_sum.data(), cache->block_sum, reduction_bytes,
+                                             cudaMemcpyDeviceToHost, cache->stream),
                              "star_mask_dog_cuda copy block_sum");
-        throw_if_cuda_failed(cudaMemcpyAsync(block_sq.data(), cache->block_sq, reduction_bytes, cudaMemcpyDeviceToHost, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(block_sq.data(), cache->block_sq, reduction_bytes,
+                                             cudaMemcpyDeviceToHost, cache->stream),
                              "star_mask_dog_cuda copy block_sq");
-        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream), "star_mask_dog_cuda sync reduce");
+        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream),
+                             "star_mask_dog_cuda sync reduce");
 
         double sum = 0.0;
         double sum_sq = 0.0;
@@ -611,9 +556,11 @@ void launch_star_mask_dog_cuda_impl(const T* image_host,
         throw_if_cuda_failed(cudaGetLastError(), "star_mask_dog_cuda threshold");
         launch_morphology(cache, height, width, blocks, open_ksize, dilate_ksize);
 
-        throw_if_cuda_failed(cudaMemcpyAsync(mask_host, cache->mask, mask_bytes, cudaMemcpyDeviceToHost, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(mask_host, cache->mask, mask_bytes,
+                                             cudaMemcpyDeviceToHost, cache->stream),
                              "star_mask_dog_cuda copy mask");
-        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream), "star_mask_dog_cuda synchronize");
+        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream),
+                             "star_mask_dog_cuda synchronize");
     } catch (...) {
         workspace.reset_after_error();
         throw;
@@ -621,25 +568,13 @@ void launch_star_mask_dog_cuda_impl(const T* image_host,
 }
 
 template <typename T>
-void launch_star_shrink_dog_process_cuda_impl(const T* image_host,
-                                              T* out_host,
-                                              const int height,
-                                              const int width,
-                                              const int channels,
-                                              const float* small_kernel_host,
-                                              const int small_radius,
-                                              const float* large_kernel_host,
-                                              const int large_radius,
-                                              const float threshold_ratio,
-                                              const int open_ksize,
-                                              const int dilate_ksize,
-                                              const int shrink_ksize,
-                                              const int shrink_shape,
-                                              const int shrink_times,
-                                              const float shrink_ratio,
-                                              const int deringing_ksize) {
-    auto workspace = hnw::cuda::acquire_host_io_workspace(
-        "star_shrink_dog_cuda cudaGetDevice");
+void launch_star_shrink_dog_process_cuda_impl(
+    const T* image_host, T* out_host, const int height, const int width, const int channels,
+    const float* small_kernel_host, const int small_radius, const float* large_kernel_host,
+    const int large_radius, const float threshold_ratio, const int open_ksize,
+    const int dilate_ksize, const int shrink_ksize, const int shrink_shape, const int shrink_times,
+    const float shrink_ratio, const int deringing_ksize) {
+    auto workspace = hnw::cuda::acquire_host_io_workspace("star_shrink_dog_cuda cudaGetDevice");
     StarMaskDogBuffers buffers;
     auto* cache = &buffers;
     try {
@@ -658,52 +593,55 @@ void launch_star_shrink_dog_process_cuda_impl(const T* image_host,
         const size_t small_kernel_bytes = static_cast<size_t>(2 * small_radius + 1) * sizeof(float);
         const size_t large_kernel_bytes = static_cast<size_t>(2 * large_radius + 1) * sizeof(float);
 
-        cache->image = workspace.device_buffer(
-            image_bytes, "star_shrink_dog cudaMalloc image");
-        cache->output = workspace.device_buffer(
-            image_bytes, "star_shrink_dog cudaMalloc output");
-        cache->gray = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink_dog cudaMalloc gray"));
-        cache->tmp = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink_dog cudaMalloc tmp"));
-        cache->blur_small = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink_dog cudaMalloc blur_small"));
-        cache->blur_large = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink_dog cudaMalloc blur_large"));
-        cache->dog = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink_dog cudaMalloc dog"));
-        cache->kernel_small = static_cast<float*>(workspace.device_buffer(
-            small_kernel_bytes, "star_shrink_dog cudaMalloc small_kernel"));
-        cache->kernel_large = static_cast<float*>(workspace.device_buffer(
-            large_kernel_bytes, "star_shrink_dog cudaMalloc large_kernel"));
-        cache->mask = static_cast<uint8_t*>(workspace.device_buffer(
-            mask_bytes, "star_shrink_dog cudaMalloc mask"));
-        cache->scratch = static_cast<uint8_t*>(workspace.device_buffer(
-            mask_bytes, "star_shrink_dog cudaMalloc scratch"));
-        cache->block_sum = static_cast<double*>(workspace.device_buffer(
-            reduction_bytes, "star_shrink_dog cudaMalloc block_sum"));
-        cache->block_sq = static_cast<double*>(workspace.device_buffer(
-            reduction_bytes, "star_shrink_dog cudaMalloc block_sq"));
-        cache->luma = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink_dog cudaMalloc luma"));
-        cache->luma_tmp = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink_dog cudaMalloc luma_tmp"));
-        cache->lab_a = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink_dog cudaMalloc lab_a"));
-        cache->lab_b = static_cast<float*>(workspace.device_buffer(
-            plane_float_bytes, "star_shrink_dog cudaMalloc lab_b"));
-        cache->shrunk = static_cast<float*>(workspace.device_buffer(
-            total_float_bytes, "star_shrink_dog cudaMalloc shrunk"));
-        cache->box_tmp = static_cast<float*>(workspace.device_buffer(
-            total_float_bytes, "star_shrink_dog cudaMalloc box_tmp"));
-        cache->box_blurred = static_cast<float*>(workspace.device_buffer(
-            total_float_bytes, "star_shrink_dog cudaMalloc box_blurred"));
+        cache->image = workspace.device_buffer(image_bytes, "star_shrink_dog cudaMalloc image");
+        cache->output = workspace.device_buffer(image_bytes, "star_shrink_dog cudaMalloc output");
+        cache->gray = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink_dog cudaMalloc gray"));
+        cache->tmp = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink_dog cudaMalloc tmp"));
+        cache->blur_small = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink_dog cudaMalloc blur_small"));
+        cache->blur_large = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink_dog cudaMalloc blur_large"));
+        cache->dog = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink_dog cudaMalloc dog"));
+        cache->kernel_small = static_cast<float*>(
+            workspace.device_buffer(small_kernel_bytes, "star_shrink_dog cudaMalloc small_kernel"));
+        cache->kernel_large = static_cast<float*>(
+            workspace.device_buffer(large_kernel_bytes, "star_shrink_dog cudaMalloc large_kernel"));
+        cache->mask = static_cast<uint8_t*>(
+            workspace.device_buffer(mask_bytes, "star_shrink_dog cudaMalloc mask"));
+        cache->scratch = static_cast<uint8_t*>(
+            workspace.device_buffer(mask_bytes, "star_shrink_dog cudaMalloc scratch"));
+        cache->block_sum = static_cast<double*>(
+            workspace.device_buffer(reduction_bytes, "star_shrink_dog cudaMalloc block_sum"));
+        cache->block_sq = static_cast<double*>(
+            workspace.device_buffer(reduction_bytes, "star_shrink_dog cudaMalloc block_sq"));
+        cache->luma = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink_dog cudaMalloc luma"));
+        cache->luma_tmp = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink_dog cudaMalloc luma_tmp"));
+        cache->lab_a = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink_dog cudaMalloc lab_a"));
+        cache->lab_b = static_cast<float*>(
+            workspace.device_buffer(plane_float_bytes, "star_shrink_dog cudaMalloc lab_b"));
+        cache->shrunk = static_cast<float*>(
+            workspace.device_buffer(total_float_bytes, "star_shrink_dog cudaMalloc shrunk"));
+        cache->box_tmp = static_cast<float*>(
+            workspace.device_buffer(total_float_bytes, "star_shrink_dog cudaMalloc box_tmp"));
+        cache->box_blurred = static_cast<float*>(
+            workspace.device_buffer(total_float_bytes, "star_shrink_dog cudaMalloc box_blurred"));
 
-        throw_if_cuda_failed(cudaMemcpyAsync(cache->image, image_host, image_bytes, cudaMemcpyHostToDevice, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(cache->image, image_host, image_bytes,
+                                             cudaMemcpyHostToDevice, cache->stream),
                              "star_shrink_dog_cuda copy image");
-        throw_if_cuda_failed(cudaMemcpyAsync(cache->kernel_small, small_kernel_host, small_kernel_bytes, cudaMemcpyHostToDevice, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(cache->kernel_small, small_kernel_host,
+                                             small_kernel_bytes, cudaMemcpyHostToDevice,
+                                             cache->stream),
                              "star_shrink_dog_cuda copy small kernel");
-        throw_if_cuda_failed(cudaMemcpyAsync(cache->kernel_large, large_kernel_host, large_kernel_bytes, cudaMemcpyHostToDevice, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(cache->kernel_large, large_kernel_host,
+                                             large_kernel_bytes, cudaMemcpyHostToDevice,
+                                             cache->stream),
                              "star_shrink_dog_cuda copy large kernel");
 
         gray_kernel<T><<<blocks_plane, THREADS_PER_BLOCK, 0, cache->stream>>>(
@@ -725,21 +663,20 @@ void launch_star_shrink_dog_process_cuda_impl(const T* image_host,
         throw_if_cuda_failed(cudaGetLastError(), "star_shrink_dog_cuda large vertical");
 
         dog_reduce_kernel<<<blocks_plane, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            cache->blur_small,
-            cache->blur_large,
-            cache->dog,
-            cache->block_sum,
-            cache->block_sq,
+            cache->blur_small, cache->blur_large, cache->dog, cache->block_sum, cache->block_sq,
             plane_size);
         throw_if_cuda_failed(cudaGetLastError(), "star_shrink_dog_cuda dog_reduce");
 
         std::vector<double> block_sum(static_cast<size_t>(blocks_plane));
         std::vector<double> block_sq(static_cast<size_t>(blocks_plane));
-        throw_if_cuda_failed(cudaMemcpyAsync(block_sum.data(), cache->block_sum, reduction_bytes, cudaMemcpyDeviceToHost, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(block_sum.data(), cache->block_sum, reduction_bytes,
+                                             cudaMemcpyDeviceToHost, cache->stream),
                              "star_shrink_dog_cuda copy block_sum");
-        throw_if_cuda_failed(cudaMemcpyAsync(block_sq.data(), cache->block_sq, reduction_bytes, cudaMemcpyDeviceToHost, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(block_sq.data(), cache->block_sq, reduction_bytes,
+                                             cudaMemcpyDeviceToHost, cache->stream),
                              "star_shrink_dog_cuda copy block_sq");
-        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream), "star_shrink_dog_cuda sync reduce");
+        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream),
+                             "star_shrink_dog_cuda sync reduce");
 
         double sum = 0.0;
         double sum_sq = 0.0;
@@ -757,25 +694,15 @@ void launch_star_shrink_dog_process_cuda_impl(const T* image_host,
         launch_morphology(cache, height, width, blocks_plane, open_ksize, dilate_ksize);
 
         bgr_to_lab_kernel<T><<<blocks_plane, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            static_cast<const T*>(cache->image),
-            cache->luma,
-            cache->lab_a,
-            cache->lab_b,
-            plane_size,
-            channels);
+            static_cast<const T*>(cache->image), cache->luma, cache->lab_a, cache->lab_b,
+            plane_size, channels);
         throw_if_cuda_failed(cudaGetLastError(), "star_shrink_dog_cuda bgr_to_lab");
 
         float* current = cache->luma;
         float* next = cache->luma_tmp;
         for (int iter = 0; iter < shrink_times; ++iter) {
             erode_luma_kernel<<<blocks_plane, THREADS_PER_BLOCK, 0, cache->stream>>>(
-                current,
-                next,
-                height,
-                width,
-                shrink_ksize,
-                shrink_shape,
-                shrink_ratio);
+                current, next, height, width, shrink_ksize, shrink_shape, shrink_ratio);
             throw_if_cuda_failed(cudaGetLastError(), "star_shrink_dog_cuda erode_luma");
             float* tmp_luma = current;
             current = next;
@@ -783,172 +710,81 @@ void launch_star_shrink_dog_process_cuda_impl(const T* image_host,
         }
 
         lab_to_bgr_kernel<<<blocks_plane, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            current,
-            cache->lab_a,
-            cache->lab_b,
-            cache->shrunk,
-            plane_size,
-            channels);
+            current, cache->lab_a, cache->lab_b, cache->shrunk, plane_size, channels);
         throw_if_cuda_failed(cudaGetLastError(), "star_shrink_dog_cuda lab_to_bgr");
 
         box_horizontal_blur_kernel<T><<<blocks_total, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            static_cast<const T*>(cache->image),
-            cache->box_tmp,
-            height,
-            width,
-            channels,
+            static_cast<const T*>(cache->image), cache->box_tmp, height, width, channels,
             deringing_ksize);
         throw_if_cuda_failed(cudaGetLastError(), "star_shrink_dog_cuda box_horizontal");
         box_vertical_blur_kernel<<<blocks_total, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            cache->box_tmp,
-            cache->box_blurred,
-            height,
-            width,
-            channels,
-            deringing_ksize);
+            cache->box_tmp, cache->box_blurred, height, width, channels, deringing_ksize);
         throw_if_cuda_failed(cudaGetLastError(), "star_shrink_dog_cuda box_vertical");
 
         final_mask_kernel<T><<<blocks_total, THREADS_PER_BLOCK, 0, cache->stream>>>(
-            static_cast<const T*>(cache->image),
-            cache->mask,
-            cache->shrunk,
-            cache->box_blurred,
-            static_cast<T*>(cache->output),
-            plane_size,
-            channels);
+            static_cast<const T*>(cache->image), cache->mask, cache->shrunk, cache->box_blurred,
+            static_cast<T*>(cache->output), plane_size, channels);
         throw_if_cuda_failed(cudaGetLastError(), "star_shrink_dog_cuda final_mask");
 
-        throw_if_cuda_failed(cudaMemcpyAsync(out_host, cache->output, image_bytes, cudaMemcpyDeviceToHost, cache->stream),
+        throw_if_cuda_failed(cudaMemcpyAsync(out_host, cache->output, image_bytes,
+                                             cudaMemcpyDeviceToHost, cache->stream),
                              "star_shrink_dog_cuda copy output");
-        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream), "star_shrink_dog_cuda synchronize");
+        throw_if_cuda_failed(cudaStreamSynchronize(cache->stream),
+                             "star_shrink_dog_cuda synchronize");
     } catch (...) {
         workspace.reset_after_error();
         throw;
     }
 }
 
-}  // namespace
+} // namespace
 
-void launch_star_mask_dog_cuda_u8(const uint8_t* image_host,
-                                  uint8_t* mask_host,
-                                  const int height,
-                                  const int width,
-                                  const int channels,
-                                  const float* small_kernel_host,
-                                  const int small_radius,
-                                  const float* large_kernel_host,
-                                  const int large_radius,
-                                  const float threshold_ratio,
-                                  const int open_ksize,
+void launch_star_mask_dog_cuda_u8(const uint8_t* image_host, uint8_t* mask_host, const int height,
+                                  const int width, const int channels,
+                                  const float* small_kernel_host, const int small_radius,
+                                  const float* large_kernel_host, const int large_radius,
+                                  const float threshold_ratio, const int open_ksize,
                                   const int dilate_ksize) {
-    launch_star_mask_dog_cuda_impl(image_host,
-                                   mask_host,
-                                   height,
-                                   width,
-                                   channels,
-                                   small_kernel_host,
-                                   small_radius,
-                                   large_kernel_host,
-                                   large_radius,
-                                   threshold_ratio,
-                                   open_ksize,
-                                   dilate_ksize);
+    launch_star_mask_dog_cuda_impl(image_host, mask_host, height, width, channels,
+                                   small_kernel_host, small_radius, large_kernel_host, large_radius,
+                                   threshold_ratio, open_ksize, dilate_ksize);
 }
 
-void launch_star_mask_dog_cuda_u16(const uint16_t* image_host,
-                                   uint8_t* mask_host,
-                                   const int height,
-                                   const int width,
-                                   const int channels,
-                                   const float* small_kernel_host,
-                                   const int small_radius,
-                                   const float* large_kernel_host,
-                                   const int large_radius,
-                                   const float threshold_ratio,
-                                   const int open_ksize,
+void launch_star_mask_dog_cuda_u16(const uint16_t* image_host, uint8_t* mask_host, const int height,
+                                   const int width, const int channels,
+                                   const float* small_kernel_host, const int small_radius,
+                                   const float* large_kernel_host, const int large_radius,
+                                   const float threshold_ratio, const int open_ksize,
                                    const int dilate_ksize) {
-    launch_star_mask_dog_cuda_impl(image_host,
-                                   mask_host,
-                                   height,
-                                   width,
-                                   channels,
-                                   small_kernel_host,
-                                   small_radius,
-                                   large_kernel_host,
-                                   large_radius,
-                                   threshold_ratio,
-                                   open_ksize,
-                                   dilate_ksize);
+    launch_star_mask_dog_cuda_impl(image_host, mask_host, height, width, channels,
+                                   small_kernel_host, small_radius, large_kernel_host, large_radius,
+                                   threshold_ratio, open_ksize, dilate_ksize);
 }
 
-void launch_star_shrink_dog_process_cuda_u8(const uint8_t* image_host,
-                                            uint8_t* out_host,
-                                            const int height,
-                                            const int width,
-                                            const int channels,
-                                            const float* small_kernel_host,
-                                            const int small_radius,
-                                            const float* large_kernel_host,
-                                            const int large_radius,
-                                            const float threshold_ratio,
-                                            const int open_ksize,
-                                            const int dilate_ksize,
-                                            const int shrink_ksize,
-                                            const int shrink_shape,
-                                            const int shrink_times,
-                                            const float shrink_ratio,
-                                            const int deringing_ksize) {
-    launch_star_shrink_dog_process_cuda_impl(image_host,
-                                             out_host,
-                                             height,
-                                             width,
-                                             channels,
-                                             small_kernel_host,
-                                             small_radius,
-                                             large_kernel_host,
-                                             large_radius,
-                                             threshold_ratio,
-                                             open_ksize,
-                                             dilate_ksize,
-                                             shrink_ksize,
-                                             shrink_shape,
-                                             shrink_times,
-                                             shrink_ratio,
-                                             deringing_ksize);
+void launch_star_shrink_dog_process_cuda_u8(const uint8_t* image_host, uint8_t* out_host,
+                                            const int height, const int width, const int channels,
+                                            const float* small_kernel_host, const int small_radius,
+                                            const float* large_kernel_host, const int large_radius,
+                                            const float threshold_ratio, const int open_ksize,
+                                            const int dilate_ksize, const int shrink_ksize,
+                                            const int shrink_shape, const int shrink_times,
+                                            const float shrink_ratio, const int deringing_ksize) {
+    launch_star_shrink_dog_process_cuda_impl(
+        image_host, out_host, height, width, channels, small_kernel_host, small_radius,
+        large_kernel_host, large_radius, threshold_ratio, open_ksize, dilate_ksize, shrink_ksize,
+        shrink_shape, shrink_times, shrink_ratio, deringing_ksize);
 }
 
-void launch_star_shrink_dog_process_cuda_u16(const uint16_t* image_host,
-                                             uint16_t* out_host,
-                                             const int height,
-                                             const int width,
-                                             const int channels,
-                                             const float* small_kernel_host,
-                                             const int small_radius,
-                                             const float* large_kernel_host,
-                                             const int large_radius,
-                                             const float threshold_ratio,
-                                             const int open_ksize,
-                                             const int dilate_ksize,
-                                             const int shrink_ksize,
-                                             const int shrink_shape,
-                                             const int shrink_times,
-                                             const float shrink_ratio,
-                                             const int deringing_ksize) {
-    launch_star_shrink_dog_process_cuda_impl(image_host,
-                                             out_host,
-                                             height,
-                                             width,
-                                             channels,
-                                             small_kernel_host,
-                                             small_radius,
-                                             large_kernel_host,
-                                             large_radius,
-                                             threshold_ratio,
-                                             open_ksize,
-                                             dilate_ksize,
-                                             shrink_ksize,
-                                             shrink_shape,
-                                             shrink_times,
-                                             shrink_ratio,
-                                             deringing_ksize);
+void launch_star_shrink_dog_process_cuda_u16(const uint16_t* image_host, uint16_t* out_host,
+                                             const int height, const int width, const int channels,
+                                             const float* small_kernel_host, const int small_radius,
+                                             const float* large_kernel_host, const int large_radius,
+                                             const float threshold_ratio, const int open_ksize,
+                                             const int dilate_ksize, const int shrink_ksize,
+                                             const int shrink_shape, const int shrink_times,
+                                             const float shrink_ratio, const int deringing_ksize) {
+    launch_star_shrink_dog_process_cuda_impl(
+        image_host, out_host, height, width, channels, small_kernel_host, small_radius,
+        large_kernel_host, large_radius, threshold_ratio, open_ksize, dilate_ksize, shrink_ksize,
+        shrink_shape, shrink_times, shrink_ratio, deringing_ksize);
 }

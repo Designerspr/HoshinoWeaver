@@ -6,7 +6,8 @@
 
 - 只覆盖 custom-op 原生层
 - Python 公共入口保持为 `hoshicore._custom_op`
-- 运行时按 `compiled -> numpy` fallback
+- 运行时通过 backend registry 选择 CUDA/OpenMP/NumPy；只有明确的 runtime
+  unavailable 或类型化 resource exhausted 才按各 wrapper 契约 fallback
 - 构建统一走 `CMake + Ninja`
 
 ## 目录
@@ -104,6 +105,20 @@ python csrc/build_ops.py --cuda --cc /usr/bin/gcc --cxx /usr/bin/g++
 python csrc/build_ops.py --dry-run
 ```
 
+## C++ / CUDA 格式检查
+
+仓库固定使用 `clang-format 20.1.8`，规则位于根目录 `.clang-format`：
+
+```bash
+# 只检查
+python csrc/check_format.py
+
+# 应用格式化
+python csrc/check_format.py --fix
+```
+
+检查覆盖 `csrc/` 下的 C++/CUDA 源码并排除生成的 build tree；CI 使用同一入口。
+
 ## 常用参数
 
 - `--preset`
@@ -131,7 +146,14 @@ python csrc/build_ops.py --dry-run
 
 - 扩展模块输出到 `hoshicore/_custom_op/_C*.so|.pyd`
 - `cmake` 中间产物默认在 `csrc/build/<preset>/`
-- CUDA custom-op 当前为 fused `camera_model_remap`
+- CUDA custom-op 包含 fused `camera_model_remap`，支持 perspective/fisheye
+  的四种源目标投影组合，并与 OpenMP backend 共用双精度投影数学
+- CUDA custom-op 还包含 alignment descriptor cosine 双向最近邻、standalone
+  wavelet、star-shrink、sigma-clip/Huber chunk 与 Norma fused pixel/component
+  detection；生产候选均声明并消费显存模型
+- OpenMP custom-op 为 Norma fused pixel/component detection 与 star-shrink DoG
+  mask 提供无 GPU 的原生路径；detection 仍在 host 侧复用同一套 OpenCV contour
+  几何和候选过滤语义
 
 ## 打包约定
 
@@ -157,6 +179,9 @@ ldd hoshicore/_custom_op/_C*.so | grep -E "cudart|gomp"
 # Windows (Developer Command Prompt)
 dumpbin /dependents hoshicore/_custom_op/_C*.pyd
 # 预期：出现 VCOMP140.DLL（正常），不应出现 cudart64_*.dll
+
+# 跨平台最小 frozen-package smoke；会清理 Python/编译器/CUDA 环境路径后启动
+python csrc/verify_packaged_custom_ops.py
 ```
 
 ### PyInstaller 收集
@@ -176,7 +201,14 @@ hiddenimports=['hoshicore._custom_op._C']
 ### CUDA
 
 构建 CUDA 算子需要安装 CUDA Toolkit，版本选择支持本机 GPU 的即可。
-最终发布建议 12.8+，可覆盖所有架构的 NVIDIA GPU。
+最终发布建议 12.8+，覆盖本项目支持的 NVIDIA GPU 架构。
+
+发布构建与运行时支持的最低 compute capability 为 6.0（Pascal）。消费级产品可
+近似理解为 GTX 10 系及更新型号；Maxwell（GTX 900 系）及更早设备会在 runtime
+probe 阶段被明确排除并使用 CPU fallback，不会启动不兼容的 CUDA kernel。发布
+架构列表显式包含 `sm_60` 与消费级 GTX 10 系使用的 `sm_61`；使用 CUDA Toolkit
+12.8+ 的 Windows 发布构建还会生成 `sm_100`、`sm_101`、`sm_120`，覆盖数据中心
+与 GeForce RTX 50 系 Blackwell。较旧 toolkit 不会尝试编译这些目标。
 
 构建路径：
 
@@ -200,10 +232,38 @@ Preset 参考：
 
 所有 GPU 后端保持 CPU fallback 语义不变。
 
+运行时可通过 `HNW_CUSTOM_OPS_FALLBACK=cpu` 禁用 CUDA 并保留 OpenMP，或在
+pipeline 启动前调用 `hoshicore._custom_op.set_backend_preference("cpu")`。传入
+`"auto"` 恢复自动选择，传入 `None` 则恢复由环境变量控制。该接口为进程级设置，
+暂不包含 GUI wiring。
+
+### CUDA host-I/O workspace 与显存治理
+
+生产 CUDA host-I/O kernel 统一通过 `common/cuda_host_io_workspace.cuh` 获取
+current-device stream 与可复用 device/pinned buffer。workspace 的 high-water 是
+一次 logical operation 内仍然存活的 lease 总量，不等同于 thread-local cache 的
+retained bytes；`cuda_host_io_cache_info()` 分别报告两者。
+
+Python compiled 边界在调用 kernel 前消费 `cuda_memory.py` 中同一 logical op 的
+estimator，并通过 admission 检查当前 free VRAM、headroom 和进程内 reservation。
+admission 拒绝与实际 `cudaMalloc` OOM 都使用类型化
+`CudaResourceExhaustedError`；无设备/驱动不可用使用独立的
+`CudaRuntimeUnavailableError`。普通 OOM 字符串、invalid pointer、launch failure
+等非类型化错误不会被静默 fallback。
+
+新增 `cuda_host_io` candidate 时必须提供由 wrapper/planner 实际消费的
+`memory_model`。registry 会把声明的类别解析到 `cuda_memory.py` 的 logical-op
+model；non-chunk wrapper 统一经 `cuda_memory_estimate()` 获取 estimator，chunk
+wrapper/planner 统一经 `cuda_chunk_memory_model()` 获取模型。第三方扩展可显式写
+deferral reason 保持兼容，但仓库内建候选的 registry 校验不接受长期豁免。
+
 ---
 
 普通用户只需安装 NVIDIA 驱动（>= 570.65，对应发布构建的 CUDA 12.8），不需要 CUDA Toolkit。
-驱动版本要求与 GPU 型号无关，只要驱动足够新即可；驱动过旧或无 NVIDIA GPU 时自动回退 CPU。
+驱动版本要求与 GPU 型号无关，只要驱动足够新且设备 compute capability >= 6.0
+即可；驱动过旧、无 NVIDIA GPU 或设备架构过旧时自动回退 CPU。受支持设备上的
+`NoKernelImageForDevice` / PTX JIT 错误仍作为构建或运行时错误传播，避免掩盖损坏的
+发布包。
 
 ## 新增算子
 
@@ -228,6 +288,7 @@ CUDA 算子沿用同样流程，但额外需要：
 2. 保持 CPU fallback 语义不变
 3. `.cpp` 绑定文件需 `#include "common/compat.h"`（MSVC `ssize_t` 兼容）
 4. 在 `BackendCandidate` 中标注对应 backend（如 `cuda_host_io`）和 build flag（如 `cuda`）
+5. 为生产 CUDA candidate 增加 estimator/admission、workspace high-water 测试和类型化资源回退测试
 
 ## 参考
 

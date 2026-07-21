@@ -25,12 +25,13 @@ add_library(hnw_ops_cpu_calibration STATIC
     ops/cpu/calibration/calibration_ops.cpp
 )
 
-add_library(hnw_ops_cpu_alignment STATIC
-    ops/cpu/alignment/alignment_ops.cpp
+add_library(hnw_ops_cpu_detection STATIC
+    ops/cpu/detection/star_detect_fused_pixel_components_ops.cpp
 )
 
-add_library(hnw_ops_cpu_detection STATIC
-    ops/cpu/detection/detection_ops.cpp
+add_library(hnw_ops_cpu_alignment STATIC
+    ops/cpu/alignment/alignment_ops.cpp
+    ops/cpu/alignment/matching_bidirectional_nearest_ops.cpp
 )
 
 add_library(hnw_ops_cpu_fgp STATIC
@@ -66,6 +67,7 @@ add_library(hnw_ops_cpu_sigma_clip STATIC
 )
 
 add_library(hnw_ops_cpu_star_shrink STATIC
+    ops/cpu/star_shrink/star_mask_dog_ops.cpp
     ops/cpu/star_shrink/star_shrink_ops.cpp
 )
 
@@ -76,8 +78,8 @@ add_library(hnw_ops_cpu_wavelet STATIC
 set(hnw_cpu_targets
     hnw_ops_common
     hnw_ops_cpu_calibration
-    hnw_ops_cpu_alignment
     hnw_ops_cpu_detection
+    hnw_ops_cpu_alignment
     hnw_ops_cpu_fgp
     hnw_ops_cpu_filter
     hnw_ops_cpu_max
@@ -102,6 +104,8 @@ foreach(target IN LISTS hnw_cpu_targets)
     hnw_enable_lto("${target}")
 endforeach()
 
+target_link_libraries(hnw_ops_cpu_detection PRIVATE hnw_ops_cpu_wavelet)
+
 pybind11_add_module(_C MODULE
     NO_EXTRAS
     module.cpp
@@ -110,14 +114,17 @@ pybind11_add_module(_C MODULE
 if(HNW_ENABLE_CUDA)
     target_sources(_C PRIVATE
         common/backend_cuda_info.cu
+        # Alignment matching distance and bidirectional nearest-neighbor reduction.
+        ops/cuda/alignment/matching_bidirectional_nearest_ops.cpp
+        ops/cuda/alignment/matching_bidirectional_nearest_ops.cu
         # Fused camera-model remap.
         ops/cuda/remap/camera_model_remap_fused_ops.cpp
         ops/cuda/remap/camera_model_remap_fused_ops.cu
-        # Wavelet CUDA backend and shared full-GPU star detection path.
+        # Wavelet CUDA backend and fused star-detection pixel/component stage.
         ops/cuda/wavelet/wavelet_cuda_ops.cpp
         ops/cuda/wavelet/wavelet_cuda_ops.cu
-        ops/cuda/detection/star_detect_full_ops.cpp
-        ops/cuda/detection/star_detect_full_ops.cu
+        ops/cuda/detection/star_detect_fused_pixel_components_ops.cpp
+        ops/cuda/detection/star_detect_fused_pixel_components_ops.cu
         # Chunk stack kernels.
         ops/cuda/fgp/huber_weighted_chunk_ops.cpp
         ops/cuda/fgp/huber_weighted_chunk_ops.cu
@@ -140,8 +147,8 @@ target_include_directories(
 target_link_libraries(_C PRIVATE
     hnw_ops_common
     hnw_ops_cpu_calibration
-    hnw_ops_cpu_alignment
     hnw_ops_cpu_detection
+    hnw_ops_cpu_alignment
     hnw_ops_cpu_fgp
     hnw_ops_cpu_filter
     hnw_ops_cpu_max

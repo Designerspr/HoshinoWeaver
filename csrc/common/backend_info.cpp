@@ -44,7 +44,7 @@ const char* detect_compiler() {
 #endif
 }
 
-}  // namespace
+} // namespace
 
 py::dict build_info_dict() {
     py::dict info;

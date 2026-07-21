@@ -4,13 +4,13 @@ import numpy as np
 
 from hoshicore._custom_op import (
     build_info,
-    fgp_add,
     fgp_accumulate,
     fgp_masked_mean_merge,
     huber_weighted_chunk,
     huber_weighted_accumulate,
 )
 import hoshicore._custom_op.backend_registry as backend_registry
+from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 import hoshicore._custom_op.ops.fgp as fgp_ops
 from hoshicore.component.data_container import FastGaussianParam, HuberMeanParam
@@ -87,60 +87,6 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
             source_dtype=np.dtype("uint16"),
         )
         expected = expected + FastGaussianParam(fresh, source_dtype=fresh.dtype)
-
-        self.assertIs(got, base)
-        np.testing.assert_array_equal(base.sum_mu, expected.sum_mu)
-        np.testing.assert_array_equal(base.square_sum, expected.square_sum)
-        np.testing.assert_array_equal(base.n, expected.n)
-
-    def test_fgp_add_matches_python(self) -> None:
-        base = FastGaussianParam(
-            np.array([[1, 5], [3, 4]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        other = FastGaussianParam(
-            np.array([[2, 4], [7, 1]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        expected = FastGaussianParam(
-            np.array([[1, 5], [3, 4]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        expected = expected + other
-
-        got = fgp_add(base, other)
-
-        self.assertIs(got, base)
-        np.testing.assert_array_equal(base.sum_mu, expected.sum_mu)
-        np.testing.assert_array_equal(base.square_sum, expected.square_sum)
-        np.testing.assert_array_equal(base.n, expected.n)
-
-    def test_fgp_add_can_force_numpy_fallback(self) -> None:
-        base = FastGaussianParam(
-            np.array([[1, 5], [3, 4]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        other = FastGaussianParam(
-            np.array([[2, 4], [7, 1]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-
-        with mock.patch.dict(
-            "os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False
-        ):
-            with mock.patch.object(
-                fgp_ops,
-                "_load_compiled_module_result",
-                return_value=(None, "mock error"),
-            ):
-                fgp_ops._select_fgp_add_backend.cache_clear()
-                got = fgp_add(base, other)
-
-        expected = FastGaussianParam(
-            np.array([[1, 5], [3, 4]], dtype=np.uint16),
-            source_dtype=np.dtype("uint16"),
-        )
-        expected = expected + other
 
         self.assertIs(got, base)
         np.testing.assert_array_equal(base.sum_mu, expected.sum_mu)
@@ -373,7 +319,7 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
 
         self.assertIsNone(result)
 
-    def test_huber_weighted_chunk_resource_error_propagates(self) -> None:
+    def test_huber_weighted_chunk_kernel_error_propagates(self) -> None:
         stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
         ref_mean = np.linspace(2, 8, 6, dtype=np.float64)
         ref_std = np.linspace(1, 3, 6, dtype=np.float64)
@@ -403,6 +349,92 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
                         fgp_ops.huber_weighted_chunk(
                             stack, ref_mean, ref_std, 1.345
                         )
+
+    def test_huber_weighted_chunk_typed_resource_error_falls_back_to_numpy(
+        self,
+    ) -> None:
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        ref_mean = np.linspace(2, 8, 6, dtype=np.float64)
+        ref_std = np.linspace(1, 3, 6, dtype=np.float64)
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                "huber_weighted_chunk_cuda",
+            ),
+            mock.Mock(),
+        )
+        expected = (
+            np.full(6, 10.0, dtype=np.float64),
+            np.full(6, 2.0, dtype=np.float64),
+        )
+
+        with mock.patch.object(
+            fgp_ops, "_resolve_backend", return_value=cuda_selection
+        ):
+            with mock.patch.object(
+                fgp_ops,
+                "huber_weighted_chunk_compiled_cuda",
+                side_effect=CustomOpResourceExhaustedError(
+                    "estimated VRAM is insufficient"
+                ),
+            ):
+                with mock.patch.object(
+                    fgp_ops,
+                    "resolve_after_resource_exhausted",
+                    return_value=backend_registry.BackendSelection(
+                        None, mock.Mock())
+                ) as resource_resolver:
+                    with mock.patch.object(
+                        fgp_ops,
+                        "huber_weighted_chunk_numpy",
+                        return_value=expected,
+                    ) as numpy_backend:
+                        result = fgp_ops.huber_weighted_chunk(
+                            stack, ref_mean, ref_std, 1.345
+                        )
+
+        self.assertIs(result, expected)
+        resource_resolver.assert_called_once()
+        numpy_backend.assert_called_once()
+
+    def test_huber_weighted_chunk_try_native_typed_resource_returns_none(
+        self,
+    ) -> None:
+        stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        ref_mean = np.linspace(2, 8, 6, dtype=np.float64)
+        ref_std = np.linspace(1, 3, 6, dtype=np.float64)
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                "huber_weighted_chunk_cuda",
+            ),
+            mock.Mock(),
+        )
+
+        with mock.patch.object(
+            fgp_ops, "_resolve_backend", return_value=cuda_selection
+        ):
+            with mock.patch.object(
+                fgp_ops,
+                "huber_weighted_chunk_compiled_cuda",
+                side_effect=CustomOpResourceExhaustedError(
+                    "estimated VRAM is insufficient"
+                ),
+            ):
+                with mock.patch.object(
+                    fgp_ops,
+                    "resolve_after_resource_exhausted",
+                    return_value=backend_registry.BackendSelection(
+                        None, mock.Mock())
+                ) as resource_resolver:
+                    result = fgp_ops.try_huber_weighted_chunk_native(
+                        stack, ref_mean, ref_std, 1.345
+                    )
+
+        self.assertIsNone(result)
+        resource_resolver.assert_called_once()
 
     def test_huber_weighted_chunk_does_not_cache_runtime_decision(self) -> None:
         stack = np.arange(24, dtype=np.uint16).reshape(4, 6)
@@ -528,6 +560,73 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
                 op._run_pass(state, frames)
 
         expected_merger = HuberWeightedMerger(ref_stats=fgp_total, huber_c=1.345)
+        for frame, weight in frames:
+            expected_merger.merge(frame, weight)
+        np.testing.assert_allclose(
+            op._finalize_chunk(state),
+            expected_merger.merged_image.data,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+    def test_huber_mean_iterator_typed_resource_error_uses_per_frame_path(
+        self,
+    ) -> None:
+        frames = [
+            (np.array([[4, 9], [6, 3]], dtype=np.uint16), 0.5),
+            (np.array([[5, 6], [7, 1]], dtype=np.uint16), 0.25),
+        ]
+        fgp_total = FastGaussianParam(
+            frames[0][0], source_dtype=np.dtype("uint16")
+        )
+        fgp_total = fgp_total + FastGaussianParam(
+            frames[1][0], source_dtype=np.dtype("uint16")
+        )
+        op = sigma_clip_ops.HuberMeanIteratorOp("huber")
+        state = op._init_chunk_state(
+            {"fgp_total": fgp_total, "huber_c": 1.345}, 0, 2, 2
+        )
+        op._configs = {"huber_c": 1.345}
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "huber_weighted_chunk",
+                "cuda_host_io",
+                "huber_weighted_chunk_cuda",
+            ),
+            mock.Mock(),
+        )
+
+        with mock.patch.object(
+            sigma_clip_ops,
+            "custom_huber_weighted_chunk_available",
+            return_value=True,
+        ):
+            with mock.patch.object(
+                fgp_ops,
+                "_resolve_backend",
+                return_value=cuda_selection,
+            ):
+                with mock.patch.object(
+                    fgp_ops,
+                    "huber_weighted_chunk_compiled_cuda",
+                    side_effect=CustomOpResourceExhaustedError(
+                        "estimated VRAM is insufficient"
+                    ),
+                ):
+                    with mock.patch.object(
+                        fgp_ops,
+                        "resolve_after_resource_exhausted",
+                        return_value=backend_registry.BackendSelection(
+                            None, mock.Mock()
+                        ),
+                    ) as resolver:
+                        op._run_pass(state, frames)
+
+        resolver.assert_called_once()
+        expected_merger = HuberWeightedMerger(
+            ref_stats=fgp_total,
+            huber_c=1.345,
+        )
         for frame, weight in frames:
             expected_merger.merge(frame, weight)
         np.testing.assert_allclose(

@@ -27,16 +27,24 @@ from bench.common import (
 from bench.cpu.alignment import prepare_alignment_frames
 from hoshicore._custom_op import build_info as custom_ops_build_info
 from hoshicore._custom_op._dispatch import fallback_preference
+from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op.backend_registry import select_backend
 from hoshicore._custom_op.ops.detection import (
-    star_detect_full_connected_components_compiled,
+    star_detect_fused_pixel_components_compiled,
 )
 from hoshicore._custom_op.ops.remap import camera_model_remap_compiled
 from hoshicore.component.norma.alignment import (match_star_pairs,
                                                   optimize_alignment)
 from hoshicore.component.norma.frame_align import AlignmentError, _check_star_count
 from hoshicore.component.norma.geometry_view import make_geometry
-from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
+from hoshicore.component.norma.types import (
+    BaseCameraModel,
+    CameraModel,
+    Distortion,
+    FisheyeCameraModel,
+    FisheyeDistortion,
+    Intrinsics,
+)
 
 
 SUITE_ID = "pipeline.alignment"
@@ -72,7 +80,7 @@ def _time_stage(
         _add_stage_time(stage_times, name, time.perf_counter() - t0)
 
 
-def _make_geometry_eager(frame: np.ndarray, camera: CameraModel):
+def _make_geometry_eager(frame: np.ndarray, camera: BaseCameraModel):
     geo = make_geometry(frame, camera=camera)
     _ = len(geo.positions)
     _ = len(geo.volumes)
@@ -86,8 +94,32 @@ def _make_camera(
     sensor_width_mm: float,
     sensor_height_mm: float,
     distortion_scale: float,
-) -> CameraModel:
+    projection: str = "perspective",
+) -> BaseCameraModel:
     height, width = frame.shape[:2]
+    intrinsics = Intrinsics(
+        focal_length_mm=focal_length_mm,
+        sensor_width_mm=sensor_width_mm,
+        sensor_height_mm=sensor_height_mm,
+        image_width_px=width,
+        image_height_px=height,
+    )
+    if projection == "fisheye":
+        distortion = FisheyeDistortion()
+        if distortion_scale != 0.0:
+            distortion = FisheyeDistortion(
+                k1=0.01 * distortion_scale,
+                k2=-0.0015 * distortion_scale,
+                k3=0.0002 * distortion_scale,
+                k4=-0.00002 * distortion_scale,
+            )
+        return FisheyeCameraModel(
+            intrinsics=intrinsics,
+            distortion=distortion,
+        )
+    if projection != "perspective":
+        raise ValueError(f"Unsupported camera projection: {projection!r}")
+
     distortion = Distortion()
     if distortion_scale != 0.0:
         distortion = Distortion.from_cv2(
@@ -102,16 +134,7 @@ def _make_camera(
                 dtype=np.float64,
             )
         )
-    return CameraModel(
-        intrinsics=Intrinsics(
-            focal_length_mm=focal_length_mm,
-            sensor_width_mm=sensor_width_mm,
-            sensor_height_mm=sensor_height_mm,
-            image_width_px=width,
-            image_height_px=height,
-        ),
-        distortion=distortion,
-    )
+    return CameraModel(intrinsics=intrinsics, distortion=distortion)
 
 
 def _run_alignment_pipeline_once(
@@ -123,6 +146,8 @@ def _run_alignment_pipeline_once(
     sensor_width_mm: float,
     sensor_height_mm: float,
     distortion_scale: float,
+    ref_projection: str,
+    src_projection: str,
 ) -> PipelineRunResult:
     if not frames:
         raise ValueError("alignment pipeline benchmark requires at least one frame")
@@ -136,6 +161,7 @@ def _run_alignment_pipeline_once(
         sensor_width_mm=sensor_width_mm,
         sensor_height_mm=sensor_height_mm,
         distortion_scale=distortion_scale if method == "camera_model" else 0.0,
+        projection=ref_projection,
     )
     ref_geo = _time_stage(
         stage_times,
@@ -159,6 +185,7 @@ def _run_alignment_pipeline_once(
                 sensor_height_mm=sensor_height_mm,
                 distortion_scale=(distortion_scale
                                   if method == "camera_model" else 0.0),
+                projection=src_projection,
             )
             src_geo = _time_stage(
                 stage_times,
@@ -184,7 +211,10 @@ def _run_alignment_pipeline_once(
                             match,
                             ref_camera,
                             src_camera,
-                            same_camera=same_camera,
+                            same_camera=(
+                                same_camera
+                                and ref_projection == src_projection
+                            ),
                         )
                     except Exception as exc:
                         raise AlignmentError(f"Optimization failed: {exc}") from exc
@@ -224,6 +254,9 @@ def _run_repeated(
     args: argparse.Namespace,
     frames: list[np.ndarray],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    # Keep the projection contract at the reusable runner boundary so callers
+    # such as pipeline.compute cannot accidentally request fisheye homography.
+    args = _args_for_method(args, args.method)
     samples_by_case: dict[str, list[float]] = {"alignment_pipeline": []}
     last_result: PipelineRunResult | None = None
 
@@ -236,6 +269,8 @@ def _run_repeated(
             sensor_width_mm=args.sensor_width_mm,
             sensor_height_mm=args.sensor_height_mm,
             distortion_scale=args.distortion_scale,
+            ref_projection=args.ref_projection,
+            src_projection=args.src_projection,
         )
 
     for _ in range(args.repeat):
@@ -248,6 +283,8 @@ def _run_repeated(
             sensor_width_mm=args.sensor_width_mm,
             sensor_height_mm=args.sensor_height_mm,
             distortion_scale=args.distortion_scale,
+            ref_projection=args.ref_projection,
+            src_projection=args.src_projection,
         )
         samples_by_case["alignment_pipeline"].append(time.perf_counter() - t0)
         for stage_name, elapsed in result.stage_times.items():
@@ -282,6 +319,12 @@ def _run_repeated(
         "failed_frames": last_result.failed_frames,
         "output_shape": last_result.output_shape,
         "output_dtype": last_result.output_dtype,
+        "ref_projection": args.ref_projection,
+        "src_projection": args.src_projection,
+        "effective_same_camera": (
+            args.same_camera
+            and args.ref_projection == args.src_projection
+        ),
     }
     return results, summary
 
@@ -297,7 +340,7 @@ def _backend_diagnostics() -> dict[str, Any]:
         ),
     }
     for logical_op in (
-        "star_detect_full_connected_components",
+        "star_detect_fused_pixel_components",
         "camera_model_remap",
     ):
         selection = select_backend(logical_op, preference)
@@ -322,14 +365,22 @@ def _probe_cuda_runtime() -> dict[str, Any]:
             func()
             probes[name] = {"status": "ok"}
         except Exception as exc:
+            unavailable = (
+                isinstance(exc, RuntimeError)
+                and (
+                    is_cuda_runtime_unavailable_error(exc)
+                    or "compiled cuda custom op backend is unavailable"
+                    in str(exc).lower()
+                )
+            )
             probes[name] = {
-                "status": "unavailable",
+                "status": "unavailable" if unavailable else "error",
                 "error": str(exc),
             }
 
     def probe_detection() -> None:
-        image = np.zeros((512, 512), dtype=np.float64)
-        star_detect_full_connected_components_compiled(
+        image = np.arange(512 * 512, dtype=np.float64).reshape(512, 512)
+        star_detect_fused_pixel_components_compiled(
             image,
             None,
             1.0,
@@ -356,7 +407,7 @@ def _probe_cuda_runtime() -> dict[str, Any]:
             dst_dist_coeffs=None,
         )
 
-    record("star_detect_full_connected_components_cuda", probe_detection)
+    record("star_detect_fused_pixel_components_cuda", probe_detection)
     record("camera_model_remap_cuda", probe_remap)
     return probes
 
@@ -388,6 +439,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sensor-width-mm", type=float, default=36.0)
     parser.add_argument("--sensor-height-mm", type=float, default=24.0)
     parser.add_argument("--distortion-scale", type=float, default=0.0)
+    parser.add_argument(
+        "--ref-projection",
+        choices=["perspective", "fisheye"],
+        default="perspective",
+        help="Reference projection for the camera-model branch.",
+    )
+    parser.add_argument(
+        "--src-projection",
+        choices=["perspective", "fisheye"],
+        default="perspective",
+        help="Source projection for the camera-model branch.",
+    )
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--log-level", type=str, default="WARNING")
@@ -413,6 +476,21 @@ def _case_order_for_results(results: dict[str, dict[str, Any]]) -> list[str]:
     ]
 
 
+def _args_for_method(
+    args: argparse.Namespace,
+    method: str,
+) -> argparse.Namespace:
+    method_args = argparse.Namespace(**vars(args))
+    method_args.method = method
+    if method == "homography":
+        # Projection models are meaningful only for the camera-model branch.
+        # Keeping homography perspective avoids reporting an unsupported
+        # fisheye-derived homography as a pipeline failure under --method all.
+        method_args.ref_projection = "perspective"
+        method_args.src_projection = "perspective"
+    return method_args
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     logger.remove()
     logger.add(sys.stderr, level=args.log_level.upper())
@@ -436,8 +514,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         pipeline_summaries: dict[str, Any] = {}
         terminal_cases = []
         for method in PIPELINE_METHODS:
-            method_args = argparse.Namespace(**vars(args))
-            method_args.method = method
+            method_args = _args_for_method(args, method)
             method_results, method_summary = _run_repeated(method_args, frames)
             results.update(_prefix_results(method_results, method))
             pipeline_summaries[method] = method_summary
@@ -453,7 +530,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             })
         ]
     else:
-        results, single_summary = _run_repeated(args, frames)
+        effective_args = _args_for_method(args, args.method)
+        results, single_summary = _run_repeated(effective_args, frames)
         pipeline_summary = single_summary
         pipeline_summaries = {}
         terminal_cases = None
@@ -482,10 +560,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "input_mode": args.input_mode,
             "method": args.method,
             "same_camera": args.same_camera,
+            "effective_same_camera": (
+                args.same_camera
+                and args.ref_projection == args.src_projection
+            ),
             "focal_length_mm": args.focal_length_mm,
             "sensor_width_mm": args.sensor_width_mm,
             "sensor_height_mm": args.sensor_height_mm,
             "distortion_scale": args.distortion_scale,
+            "ref_projection": args.ref_projection,
+            "src_projection": args.src_projection,
+            "projection_scope": "camera_model_only",
             "warmup": args.warmup,
             "repeat": args.repeat,
             "log_level": args.log_level,

@@ -9,6 +9,11 @@ from numpy.typing import NDArray
 from scipy.spatial import cKDTree
 from scipy.spatial import distance as spd
 
+from hoshicore._custom_op import (
+    extract_point_features as custom_extract_point_features,
+)
+from hoshicore._custom_op import matching_cosine_bidirectional_nearest
+
 
 @dataclasses.dataclass
 class MatchResult:
@@ -100,9 +105,6 @@ MIN_FILTER_KEEP_RATIO = 0.5
 
 DEFAULT_COVERAGE_REPAIR = CoverageRepairContext()
 
-
-def make_cross_matrix(v: NDArray[np.float64]) -> NDArray[np.float64]:
-    return np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
 
 def _convex_hull_area(pts: NDArray[np.float64]) -> float:
     """Convex hull area for a point cloud."""
@@ -646,64 +648,8 @@ def adaptive_k(star_count: int) -> int:
 def extract_point_features(vec: NDArray[np.float64],
                            vol: NDArray[np.float64],
                            k: int = 15) -> NDArray[np.float64]:
-    """Extract geometric features for each star point based on neighbor relationships.
-
-    Args:
-        vec: (n, 3) unit vectors of star points.
-        vol: (n,) volume (area * intensity) of each star point.
-        k: number of neighbors to use.
-
-    Returns:
-        (n, 120) feature matrix.
-    """
-    pts_num = len(vec)
-    neighbor_count = min(2 * k, pts_num)
-    if neighbor_count < k:
-        raise ValueError(
-            f"extract_point_features requires at least k={k} points, got {pts_num}")
-
-    # Unit-vector chord distance is monotonic with angular distance, so the
-    # tree returns the same nearest-neighbor set without building an N x N
-    # cosine-distance matrix.
-    _, vec_dist_ind = cKDTree(vec).query(vec, k=neighbor_count)
-    if neighbor_count == 1:
-        vec_dist_ind = vec_dist_ind[:, np.newaxis]
-
-    neighbor_vec = vec[vec_dist_ind]
-    cos_dist = np.sum(vec[:, np.newaxis, :] * neighbor_vec, axis=2)
-    dist_mat = np.arccos(np.clip(cos_dist, -1, 1))
-    neighbor_vol = vol[vec_dist_ind]
-    vol_ind = np.argsort(-neighbor_vol * dist_mat)
-
-    theta_feature = np.zeros((pts_num, k))
-    rho_feature = np.zeros((pts_num, k))
-    vol_feature = np.zeros((pts_num, k))
-
-    for i in range(pts_num):
-        v0 = vec[i]
-        vs = vec[vec_dist_ind[i, vol_ind[i, :k]]]
-        angles = np.inner(vs, make_cross_matrix(v0))
-        angles = angles / la.norm(angles, axis=1)[:, np.newaxis]
-        cr = np.inner(angles, make_cross_matrix(angles[0]))
-        s = la.norm(cr, axis=1) * np.sign(np.inner(cr, v0))
-        c = np.inner(angles, angles[0])
-        theta_feature[i] = np.arctan2(s, c)
-        rho_feature[i] = dist_mat[i, vol_ind[i, :k]]
-        vol_feature[i] = neighbor_vol[i, vol_ind[i, :k]]
-
-    fx = np.arange(-np.pi, np.pi, 3 * np.pi / 180)
-    features = np.zeros((pts_num, len(fx)))
-    for i in range(k):
-        sigma = 2.5 * np.exp(-rho_feature[:, i] * 100) + .04
-        tmp = np.exp(-np.subtract.outer(theta_feature[:, i], fx)**2 / 2 /
-                     sigma[:, np.newaxis]**2)
-        tmp = tmp * (vol_feature[:, i] * rho_feature[:, i]**2 /
-                     sigma)[:, np.newaxis]
-        features += tmp
-
-    features = features / np.sqrt(np.sum(features**2, axis=1)).reshape(
-        (pts_num, 1))
-    return features
+    """Extract geometric star descriptors through the custom-op dispatch."""
+    return custom_extract_point_features(vec, vol, k=k)
 
 
 def extract_asterism_tokens(
@@ -952,8 +898,8 @@ def find_initial_match(features1: NDArray[np.float64],
     Returns:
         (m, 2) array of matched index pairs.
     """
-    measure_dist_mat = spd.cdist(features1, features2, "cosine")
     if alpha > 0:
+        measure_dist_mat = spd.cdist(features1, features2, "cosine")
         pts_stack = np.vstack((pts1, pts2))
         pts_mean = np.mean(pts_stack, axis=0)
         pts_min = np.min(pts_stack, axis=0)
@@ -962,29 +908,34 @@ def find_initial_match(features1: NDArray[np.float64],
                                  (pts2 - pts_mean) / (pts_max - pts_min),
                                  "euclidean")
         dist_mat = measure_dist_mat * (1 - alpha) + pts_dist_mat * alpha
+        row_order = np.argsort(dist_mat, axis=1)
+        col_order = np.argsort(dist_mat, axis=0)
+        row_indices = row_order[:, 0]
+        col_indices = col_order[0, :]
+        row_distances = dist_mat[range(len(features1)), row_indices]
+        col_distances = dist_mat[col_indices, range(len(features2))]
     else:
-        dist_mat = measure_dist_mat
+        (
+            row_indices,
+            row_distances,
+            col_indices,
+            col_distances,
+        ) = matching_cosine_bidirectional_nearest(features1, features2)
 
-    num1, num2 = dist_mat.shape
+    num1 = len(features1)
 
-    idx12 = np.argmin(dist_mat, axis=1)
-    idx21 = np.argmin(dist_mat, axis=0)
-    row_idx = np.arange(num1)
-    col_idx = np.arange(num2)
-    ind = idx21[idx12] == row_idx
+    ind = col_indices[row_indices] == range(num1)
     mutual_pair_count = int(np.count_nonzero(ind))
-    mutual_pair_idx = np.stack((np.where(ind)[0], idx12[ind]), axis=-1)
+    mutual_pair_idx = np.stack((np.where(ind)[0], row_indices[ind]), axis=-1)
 
-    nearest12_dist = dist_mat[row_idx, idx12]
-    nearest21_dist = dist_mat[idx21, col_idx]
-    d_th = min(np.percentile(nearest12_dist, 30),
-               np.percentile(nearest21_dist, 30))
-    ind = np.logical_and(ind, nearest12_dist <= d_th)
+    d_th = min(np.percentile(row_distances, 30),
+               np.percentile(col_distances, 30))
+    ind = np.logical_and(ind, row_distances < d_th)
 
-    pair_idx = np.stack((np.where(ind)[0], idx12[ind]), axis=-1)
+    pair_idx = np.stack((np.where(ind)[0], row_indices[ind]), axis=-1)
     percentile_pair_count = len(pair_idx)
 
-    mutual_pair_dist = dist_mat[mutual_pair_idx[:, 0], mutual_pair_idx[:, 1]]
+    mutual_pair_dist = row_distances[mutual_pair_idx[:, 0]]
     pair_idx = _repair_pair_coverage(
         pts1,
         mutual_pair_idx,

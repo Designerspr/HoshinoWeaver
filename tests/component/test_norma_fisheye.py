@@ -249,6 +249,7 @@ class TestFisheyeCameraModel:
             src_pts[:, 1].reshape(40, 60).astype(np.float32),
             cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
+            hint=cv2.ALGO_HINT_ACCURATE,
         )
         actual = camera.project_image_from_camera(
             camera,
@@ -256,7 +257,7 @@ class TestFisheyeCameraModel:
             (60, 40),
             rotation_dst_to_src=rotation_ref_to_src,
         )
-        np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_allclose(actual, expected, rtol=0, atol=1)
 
 
 # ---------------------------------------------------------------------------

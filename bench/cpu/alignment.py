@@ -22,14 +22,10 @@ from bench.data_tools.starfield import generate_starfield_frames
 from hoshicore._custom_op.ops.detection import star_detect_threshold_morph_numpy
 from hoshicore.component.norma.alignment import match_star_pairs, optimize_alignment
 from hoshicore.component.norma.detection import (
-    _detect_star_points_full_gpu,
+    _detect_star_points_native_hybrid,
     _detect_star_points_opencv,
     _wavelet_dec_rec,
     detect_star_points,
-)
-from hoshicore.component.norma.fast_detection import (
-    detect_star_points_connected_components,
-    detect_stars_connected_components,
 )
 from hoshicore.component.norma.frame_align import (
     AlignmentCameraCandidate,
@@ -45,13 +41,11 @@ from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
 
 DEFAULT_CASE_NAMES = [
     "detect_stream",
-    "detect_cc_stream",
     "detect_prepare_stream",
     "detect_wavelet_stream",
     "detect_extract_stream",
     "detect_bandpass_stream",
     "detect_threshold_morph_stream",
-    "detect_cc_postprocess_stream",
     "detect_contour_stream",
     "detect_ellipse_intensity_stream",
     "features_stream",
@@ -63,16 +57,16 @@ DEFAULT_CASE_NAMES = [
     "remap_stream",
     "camera_model_pipeline",
 ]
-GPU_CASE_NAMES = [
-    "detect_full_gpu_stream",
+NATIVE_CASE_NAMES = [
+    "detect_native_hybrid_stream",
 ]
 BASELINE_CASE_NAMES = [
     "detect_opencv_stream",
 ]
-QUALITY_CASE_NAME = "detect_full_gpu_vs_contour_quality"
+QUALITY_CASE_NAME = "detect_native_hybrid_vs_contour_quality"
 CASE_NAMES = [
     *DEFAULT_CASE_NAMES,
-    *GPU_CASE_NAMES,
+    *NATIVE_CASE_NAMES,
     *BASELINE_CASE_NAMES,
     QUALITY_CASE_NAME,
 ]
@@ -80,18 +74,16 @@ DEFAULT_CASES = DEFAULT_CASE_NAMES
 SUITE_ID = "cpu.alignment"
 ALL_FRAME_CASE_NAMES = {
     "detect_stream",
-    "detect_cc_stream",
     "detect_prepare_stream",
     "detect_wavelet_stream",
     "detect_extract_stream",
     "detect_bandpass_stream",
     "detect_threshold_morph_stream",
-    "detect_cc_postprocess_stream",
     "detect_contour_stream",
     "detect_ellipse_intensity_stream",
     "features_stream",
     "geometry_stream",
-    "detect_full_gpu_stream",
+    "detect_native_hybrid_stream",
     "detect_opencv_stream",
 }
 ALIGNED_FRAME_CASE_NAMES = {
@@ -102,10 +94,10 @@ ALIGNED_FRAME_CASE_NAMES = {
     "remap_stream",
     "camera_model_pipeline",
 }
-FULL_GPU_QUALITY_THRESHOLDS = {
+NATIVE_HYBRID_QUALITY_THRESHOLDS = {
     "max_count_diff_ratio": 0.15,
-    "min_contour_to_full_gpu_recall_1px": 0.95,
-    "max_contour_to_full_gpu_p95_px": 0.1,
+    "min_contour_to_native_hybrid_recall_1px": 0.95,
+    "max_contour_to_native_hybrid_p95_px": 0.1,
     "max_pair_diff_ratio": 0.20,
     "max_homography_p95_px": 0.30,
 }
@@ -172,20 +164,7 @@ def _prepare_detect_payload(frame: np.ndarray,
     while max(img_shape) * resize_factor > resize_length:
         resize_factor /= 2.0
 
-    tmp_mask = cv2.resize(img_gray, None, fx=resize_factor, fy=resize_factor)
-    tmp_mask_10percent = np.percentile(tmp_mask, 10)
-    tmp_mask = (tmp_mask < min(tmp_mask_10percent, 0.15)).astype(
-        np.uint8) * 255
-
-    dilate_size = max(1, int(max(img_shape) * 0.003 * resize_factor))
-    tmp_mask = 255 - cv2.dilate(
-        tmp_mask,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                  (dilate_size, dilate_size)))
-    tmp_mask = cv2.resize(tmp_mask, (img_shape[1], img_shape[0]))
-    mask = tmp_mask > 127
-    if np.sum(mask) * 100.0 / np.prod(mask.shape) < 50:
-        mask = np.ones(tmp_mask.shape, dtype=bool)
+    mask = np.ones(img_shape, dtype=bool)
 
     return DetectPayload(
         img_gray=img_gray,
@@ -338,16 +317,10 @@ def bench_detect_opencv_stream(frames: list[np.ndarray]) -> None:
         _ = _detect_star_points_opencv(gray)
 
 
-def bench_detect_full_gpu_stream(frames: list[np.ndarray]) -> None:
+def bench_detect_native_hybrid_stream(frames: list[np.ndarray]) -> None:
     for frame in frames:
         gray = to_gray_f64(frame)
-        _ = _detect_star_points_full_gpu(gray)
-
-
-def bench_detect_cc_stream(frames: list[np.ndarray]) -> None:
-    for frame in frames:
-        gray = to_gray_f64(frame)
-        _ = detect_star_points_connected_components(gray)
+        _ = _detect_star_points_native_hybrid(gray)
 
 
 def bench_detect_prepare_stream(frames: list[np.ndarray]) -> None:
@@ -375,12 +348,6 @@ def bench_detect_threshold_morph_stream(
         payloads: list[DetectBandpassPayload]) -> None:
     for payload in payloads:
         _ = _threshold_morph_detect_image(payload)
-
-
-def bench_detect_cc_postprocess_stream(
-        payloads: list[DetectThresholdPayload]) -> None:
-    for payload in payloads:
-        _ = detect_stars_connected_components(payload.img_rec, payload.bw)
 
 
 def bench_detect_contour_stream(payloads: list[DetectThresholdPayload]) -> None:
@@ -459,29 +426,29 @@ def _match_detected_stars(ref, src, shape: tuple[int, int]):
 
 def compare_detect_quality(frames: list[np.ndarray]) -> dict[str, Any]:
     contour_results = []
-    full_gpu_results = []
+    native_hybrid_results = []
     per_frame = []
     for frame in frames:
         gray = to_gray_f64(frame)
         contour = _detect_star_points_opencv(gray)
-        full_gpu = _detect_star_points_full_gpu(gray)
+        native_hybrid = _detect_star_points_native_hybrid(gray)
         contour_results.append(contour)
-        full_gpu_results.append(full_gpu)
-        contour_to_full_gpu = _nearest_stats(contour.positions,
-                                             full_gpu.positions)
-        full_gpu_to_contour = _nearest_stats(full_gpu.positions,
-                                             contour.positions)
+        native_hybrid_results.append(native_hybrid)
+        contour_to_native_hybrid = _nearest_stats(
+            contour.positions, native_hybrid.positions)
+        native_hybrid_to_contour = _nearest_stats(
+            native_hybrid.positions, contour.positions)
         count_diff_ratio = 0.0
         if len(contour.positions) > 0:
             count_diff_ratio = (
-                len(full_gpu.positions) -
+                len(native_hybrid.positions) -
                 len(contour.positions)) / len(contour.positions)
         per_frame.append({
             "contour_count": len(contour.positions),
-            "full_gpu_count": len(full_gpu.positions),
+            "native_hybrid_count": len(native_hybrid.positions),
             "count_diff_ratio": float(count_diff_ratio),
-            "contour_to_full_gpu": contour_to_full_gpu,
-            "full_gpu_to_contour": full_gpu_to_contour,
+            "contour_to_native_hybrid": contour_to_native_hybrid,
+            "native_hybrid_to_contour": native_hybrid_to_contour,
         })
 
     shape = frames[0].shape[:2]
@@ -490,24 +457,24 @@ def compare_detect_quality(frames: list[np.ndarray]) -> dict[str, Any]:
         try:
             contour_match = _match_detected_stars(
                 contour_results[0], contour_results[idx], shape)
-            full_gpu_match = _match_detected_stars(
-                full_gpu_results[0], full_gpu_results[idx], shape)
+            native_hybrid_match = _match_detected_stars(
+                native_hybrid_results[0], native_hybrid_results[idx], shape)
         except Exception as exc:
             pair_reports.append({"index": idx, "error": f"{type(exc).__name__}: {exc}"})
             continue
         pair_diff_ratio = 0.0
         if len(contour_match.pair_idx) > 0:
             pair_diff_ratio = (
-                len(full_gpu_match.pair_idx) -
+                len(native_hybrid_match.pair_idx) -
                 len(contour_match.pair_idx)) / len(contour_match.pair_idx)
         pair_reports.append({
             "index": idx,
             "contour_pairs": len(contour_match.pair_idx),
-            "full_gpu_pairs": len(full_gpu_match.pair_idx),
+            "native_hybrid_pairs": len(native_hybrid_match.pair_idx),
             "pair_diff_ratio": float(pair_diff_ratio),
             "homography_delta": _homography_delta(
                 contour_match.homography,
-                full_gpu_match.homography,
+                native_hybrid_match.homography,
                 shape,
             ),
         })
@@ -525,22 +492,22 @@ def summarize_detect_quality(quality: dict[str, Any]) -> dict[str, Any]:
     successful_pairs = [pair for pair in pairs if "error" not in pair]
 
     max_count_diff_ratio = 0.0
-    min_contour_to_full_gpu_recall_1px = 1.0
-    max_contour_to_full_gpu_p95_px = 0.0
+    min_contour_to_native_hybrid_recall_1px = 1.0
+    max_contour_to_native_hybrid_p95_px = 0.0
     for frame in per_frame:
         max_count_diff_ratio = max(
             max_count_diff_ratio,
             abs(float(frame.get("count_diff_ratio", 0.0))),
         )
-        contour_to_full_gpu = frame.get("contour_to_full_gpu", {})
-        min_contour_to_full_gpu_recall_1px = min(
-            min_contour_to_full_gpu_recall_1px,
-            float(contour_to_full_gpu.get("recall_1px", 0.0)),
+        contour_to_native_hybrid = frame.get("contour_to_native_hybrid", {})
+        min_contour_to_native_hybrid_recall_1px = min(
+            min_contour_to_native_hybrid_recall_1px,
+            float(contour_to_native_hybrid.get("recall_1px", 0.0)),
         )
-        p95_px = contour_to_full_gpu.get("p95_px")
+        p95_px = contour_to_native_hybrid.get("p95_px")
         if p95_px is not None:
-            max_contour_to_full_gpu_p95_px = max(
-                max_contour_to_full_gpu_p95_px,
+            max_contour_to_native_hybrid_p95_px = max(
+                max_contour_to_native_hybrid_p95_px,
                 float(p95_px),
             )
 
@@ -559,29 +526,32 @@ def summarize_detect_quality(quality: dict[str, Any]) -> dict[str, Any]:
 
     metrics = {
         "max_count_diff_ratio": max_count_diff_ratio,
-        "min_contour_to_full_gpu_recall_1px":
-            min_contour_to_full_gpu_recall_1px,
-        "max_contour_to_full_gpu_p95_px": max_contour_to_full_gpu_p95_px,
+        "min_contour_to_native_hybrid_recall_1px":
+            min_contour_to_native_hybrid_recall_1px,
+        "max_contour_to_native_hybrid_p95_px":
+            max_contour_to_native_hybrid_p95_px,
         "max_pair_diff_ratio": max_pair_diff_ratio,
         "max_homography_p95_px": max_homography_p95_px,
         "failed_pair_count": len(failed_pairs),
     }
     passed = (
         len(failed_pairs) == 0
-        and max_count_diff_ratio <= FULL_GPU_QUALITY_THRESHOLDS[
+        and max_count_diff_ratio <= NATIVE_HYBRID_QUALITY_THRESHOLDS[
             "max_count_diff_ratio"]
-        and min_contour_to_full_gpu_recall_1px >= FULL_GPU_QUALITY_THRESHOLDS[
-            "min_contour_to_full_gpu_recall_1px"]
-        and max_contour_to_full_gpu_p95_px <= FULL_GPU_QUALITY_THRESHOLDS[
-            "max_contour_to_full_gpu_p95_px"]
-        and max_pair_diff_ratio <= FULL_GPU_QUALITY_THRESHOLDS[
+        and min_contour_to_native_hybrid_recall_1px >=
+        NATIVE_HYBRID_QUALITY_THRESHOLDS[
+            "min_contour_to_native_hybrid_recall_1px"]
+        and max_contour_to_native_hybrid_p95_px <=
+        NATIVE_HYBRID_QUALITY_THRESHOLDS[
+            "max_contour_to_native_hybrid_p95_px"]
+        and max_pair_diff_ratio <= NATIVE_HYBRID_QUALITY_THRESHOLDS[
             "max_pair_diff_ratio"]
-        and max_homography_p95_px <= FULL_GPU_QUALITY_THRESHOLDS[
+        and max_homography_p95_px <= NATIVE_HYBRID_QUALITY_THRESHOLDS[
             "max_homography_p95_px"]
     )
     return {
         "passed": passed,
-        "thresholds": FULL_GPU_QUALITY_THRESHOLDS,
+        "thresholds": NATIVE_HYBRID_QUALITY_THRESHOLDS,
         "metrics": metrics,
     }
 
@@ -772,7 +742,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "detect_extract_stream",
         "detect_bandpass_stream",
         "detect_threshold_morph_stream",
-        "detect_cc_postprocess_stream",
         "detect_contour_stream",
         "detect_ellipse_intensity_stream",
     }
@@ -783,7 +752,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     bandpass_payloads = None
     if any(case in benchmark_case_names for case in (
             "detect_threshold_morph_stream",
-            "detect_cc_postprocess_stream",
             "detect_contour_stream",
             "detect_ellipse_intensity_stream",
     )):
@@ -794,7 +762,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     threshold_payloads = None
     if any(case in benchmark_case_names for case in (
-            "detect_cc_postprocess_stream",
             "detect_contour_stream",
             "detect_ellipse_intensity_stream",
     )):
@@ -825,8 +792,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     runners: dict[str, Any] = {
         "detect_stream": lambda: bench_detect_stream(frames),
         "detect_opencv_stream": lambda: bench_detect_opencv_stream(frames),
-        "detect_full_gpu_stream": lambda: bench_detect_full_gpu_stream(frames),
-        "detect_cc_stream": lambda: bench_detect_cc_stream(frames),
+        "detect_native_hybrid_stream": lambda: bench_detect_native_hybrid_stream(frames),
         "detect_prepare_stream": lambda: bench_detect_prepare_stream(frames),
         "detect_wavelet_stream": lambda: bench_detect_wavelet_stream(
             detect_payloads),
@@ -836,8 +802,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             detect_payloads),
         "detect_threshold_morph_stream": lambda: bench_detect_threshold_morph_stream(
             bandpass_payloads),
-        "detect_cc_postprocess_stream": lambda: bench_detect_cc_postprocess_stream(
-            threshold_payloads),
         "detect_contour_stream": lambda: bench_detect_contour_stream(
             threshold_payloads),
         "detect_ellipse_intensity_stream": lambda: bench_detect_ellipse_intensity_stream(

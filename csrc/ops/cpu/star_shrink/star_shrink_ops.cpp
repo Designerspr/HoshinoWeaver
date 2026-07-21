@@ -2,6 +2,8 @@
 
 #include "common/cpu_compat.h"
 
+#include <pybind11/numpy.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -10,8 +12,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#include <pybind11/numpy.h>
 
 namespace {
 
@@ -36,8 +36,7 @@ int64_t reflect101(int64_t idx, const int64_t length) {
     return idx;
 }
 
-template <typename T>
-float dtype_max_value() {
+template <typename T> float dtype_max_value() {
     if constexpr (std::is_same_v<T, uint8_t>) {
         return 255.0f;
     } else if constexpr (std::is_same_v<T, uint16_t>) {
@@ -99,12 +98,7 @@ LabPixel bgr_to_lab(const float b, const float g, const float r) {
     };
 }
 
-void lab_to_bgr(const float l,
-                const float a,
-                const float b_lab,
-                float* b,
-                float* g,
-                float* r) {
+void lab_to_bgr(const float l, const float a, const float b_lab, float* b, float* g, float* r) {
     const float fy = (l + 16.0f) / 116.0f;
     const float fx = fy + a / 500.0f;
     const float fz = fy - b_lab / 200.0f;
@@ -158,8 +152,7 @@ float normalized_sample(const T* ptr, const int64_t idx, const float max_value) 
     }
 }
 
-template <typename T>
-T cast_output(const float value, const float max_value) {
+template <typename T> T cast_output(const float value, const float max_value) {
     const float clamped = std::clamp(value, 0.0f, 1.0f);
     if constexpr (std::is_same_v<T, float>) {
         return clamped;
@@ -172,24 +165,16 @@ T cast_output(const float value, const float max_value) {
     }
 }
 
-template <typename T>
-struct MedianHistogram;
+template <typename T> struct MedianHistogram;
 
-template <>
-struct MedianHistogram<uint8_t> {
+template <> struct MedianHistogram<uint8_t> {
     std::array<uint32_t, 256> bins{};
 
-    void clear() {
-        bins.fill(0);
-    }
+    void clear() { bins.fill(0); }
 
-    void add(const uint8_t value) {
-        ++bins[value];
-    }
+    void add(const uint8_t value) { ++bins[value]; }
 
-    void remove(const uint8_t value) {
-        --bins[value];
-    }
+    void remove(const uint8_t value) { --bins[value]; }
 
     uint8_t median(const uint32_t target_rank) const {
         uint32_t count = 0;
@@ -203,8 +188,7 @@ struct MedianHistogram<uint8_t> {
     }
 };
 
-template <>
-struct MedianHistogram<uint16_t> {
+template <> struct MedianHistogram<uint16_t> {
     std::array<uint32_t, 256> coarse{};
     std::vector<uint32_t> fine;
 
@@ -252,9 +236,7 @@ int64_t clamp_index(const int64_t value, const int64_t low, const int64_t high) 
 }
 
 template <typename T>
-T gray_integer_sample(const T* image,
-                      const int64_t pixel_idx,
-                      const int64_t channels,
+T gray_integer_sample(const T* image, const int64_t pixel_idx, const int64_t channels,
                       const float max_value) {
     if (channels == 1) {
         return image[pixel_idx];
@@ -267,10 +249,7 @@ T gray_integer_sample(const T* image,
 }
 
 template <typename T>
-T gray_at(const std::vector<T>& gray,
-          const int64_t height,
-          const int64_t width,
-          const int64_t y,
+T gray_at(const std::vector<T>& gray, const int64_t height, const int64_t width, const int64_t y,
           const int64_t x) {
     const int64_t yy = clamp_index(y, 0, height - 1);
     const int64_t xx = clamp_index(x, 0, width - 1);
@@ -278,11 +257,8 @@ T gray_at(const std::vector<T>& gray,
 }
 
 template <typename T>
-void build_gray_histogram_for_row(MedianHistogram<T>& hist,
-                                  const std::vector<T>& gray,
-                                  const int64_t height,
-                                  const int64_t width,
-                                  const int64_t y,
+void build_gray_histogram_for_row(MedianHistogram<T>& hist, const std::vector<T>& gray,
+                                  const int64_t height, const int64_t width, const int64_t y,
                                   const int64_t radius) {
     hist.clear();
     for (int64_t dy = -radius; dy <= radius; ++dy) {
@@ -293,13 +269,9 @@ void build_gray_histogram_for_row(MedianHistogram<T>& hist,
 }
 
 template <typename T>
-void slide_gray_histogram_right(MedianHistogram<T>& hist,
-                                const std::vector<T>& gray,
-                                const int64_t height,
-                                const int64_t width,
-                                const int64_t y,
-                                const int64_t x,
-                                const int64_t radius) {
+void slide_gray_histogram_right(MedianHistogram<T>& hist, const std::vector<T>& gray,
+                                const int64_t height, const int64_t width, const int64_t y,
+                                const int64_t x, const int64_t radius) {
     const int64_t remove_x = x - radius;
     const int64_t add_x = x + radius + 1;
     for (int64_t dy = -radius; dy <= radius; ++dy) {
@@ -309,14 +281,10 @@ void slide_gray_histogram_right(MedianHistogram<T>& hist,
 }
 
 template <typename T>
-void median_filter_gray(const std::vector<T>& gray,
-                        std::vector<T>& background,
-                        const int64_t height,
-                        const int64_t width,
-                        const int ksize) {
+void median_filter_gray(const std::vector<T>& gray, std::vector<T>& background,
+                        const int64_t height, const int64_t width, const int ksize) {
     const int64_t radius = ksize / 2;
-    const uint64_t window_area =
-        static_cast<uint64_t>(ksize) * static_cast<uint64_t>(ksize);
+    const uint64_t window_area = static_cast<uint64_t>(ksize) * static_cast<uint64_t>(ksize);
     const uint32_t target_rank = static_cast<uint32_t>(window_area / 2 + 1);
 #if defined(_OPENMP)
 #pragma omp parallel
@@ -352,11 +320,8 @@ bool cross_active(const int ksize, const int ky, const int kx) {
     return (ky - radius) == 0 || (kx - radius) == 0;
 }
 
-void erode_cross_mask(const uint8_t* input,
-                      uint8_t* output,
-                      const int64_t height,
-                      const int64_t width,
-                      const int ksize) {
+void erode_cross_mask(const uint8_t* input, uint8_t* output, const int64_t height,
+                      const int64_t width, const int ksize) {
     const int radius = ksize / 2;
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
@@ -388,11 +353,8 @@ void erode_cross_mask(const uint8_t* input,
     }
 }
 
-void dilate_cross_mask(const uint8_t* input,
-                       uint8_t* output,
-                       const int64_t height,
-                       const int64_t width,
-                       const int ksize) {
+void dilate_cross_mask(const uint8_t* input, uint8_t* output, const int64_t height,
+                       const int64_t width, const int ksize) {
     const int radius = ksize / 2;
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
@@ -424,11 +386,8 @@ void dilate_cross_mask(const uint8_t* input,
     }
 }
 
-void apply_cross_morphology(std::vector<uint8_t>& mask,
-                            std::vector<uint8_t>& scratch,
-                            const int64_t height,
-                            const int64_t width,
-                            const int open_ksize,
+void apply_cross_morphology(std::vector<uint8_t>& mask, std::vector<uint8_t>& scratch,
+                            const int64_t height, const int64_t width, const int open_ksize,
                             const int dilate_ksize) {
     if (open_ksize > 0) {
         erode_cross_mask(mask.data(), scratch.data(), height, width, open_ksize);
@@ -441,12 +400,10 @@ void apply_cross_morphology(std::vector<uint8_t>& mask,
 }
 
 template <typename T>
-py::array_t<uint8_t> star_shrink_detect_mask_impl(
-    const py::array_t<T, py::array::c_style | py::array::forcecast>& image,
-    const int ksize,
-    const double threshold_ratio,
-    const int open_ksize,
-    const int dilate_ksize) {
+py::array_t<uint8_t>
+star_shrink_detect_mask_impl(const py::array_t<T, py::array::c_style | py::array::forcecast>& image,
+                             const int ksize, const double threshold_ratio, const int open_ksize,
+                             const int dilate_ksize) {
     if (image.ndim() != 2 && image.ndim() != 3) {
         throw std::invalid_argument(
             "star_shrink_detect_mask: image must have shape (H, W) or (H, W, C)");
@@ -460,11 +417,10 @@ py::array_t<uint8_t> star_shrink_detect_mask_impl(
             "star_shrink_detect_mask: image height and width must be positive");
     }
     if (ksize <= 0 || ksize % 2 == 0) {
-        throw std::invalid_argument(
-            "star_shrink_detect_mask: ksize must be a positive odd value");
+        throw std::invalid_argument("star_shrink_detect_mask: ksize must be a positive odd value");
     }
-    if ((open_ksize < 0) || (open_ksize > 0 && open_ksize % 2 == 0) ||
-        (dilate_ksize < 0) || (dilate_ksize > 0 && dilate_ksize % 2 == 0)) {
+    if ((open_ksize < 0) || (open_ksize > 0 && open_ksize % 2 == 0) || (dilate_ksize < 0) ||
+        (dilate_ksize > 0 && dilate_ksize % 2 == 0)) {
         throw std::invalid_argument(
             "star_shrink_detect_mask: morphology kernel sizes must be zero or positive odd values");
     }
@@ -500,10 +456,9 @@ py::array_t<uint8_t> star_shrink_detect_mask_impl(
 #pragma omp parallel for reduction(+ : sum, sum_sq) schedule(static)
 #endif
         for (int64_t idx = 0; idx < plane_size; ++idx) {
-            const float value =
-                (static_cast<float>(gray[static_cast<size_t>(idx)]) -
-                 static_cast<float>(background[static_cast<size_t>(idx)])) /
-                max_value;
+            const float value = (static_cast<float>(gray[static_cast<size_t>(idx)]) -
+                                 static_cast<float>(background[static_cast<size_t>(idx)])) /
+                                max_value;
             diff[static_cast<size_t>(idx)] = value;
             sum += static_cast<double>(value);
             sum_sq += static_cast<double>(value) * static_cast<double>(value);
@@ -527,14 +482,9 @@ py::array_t<uint8_t> star_shrink_detect_mask_impl(
     return output;
 }
 
-void erode_luma(std::vector<float>& current,
-                std::vector<float>& scratch,
-                const int64_t height,
-                const int64_t width,
-                const std::vector<int>& kernel,
-                const int ksize,
-                const int times,
-                const float ratio) {
+void erode_luma(std::vector<float>& current, std::vector<float>& scratch, const int64_t height,
+                const int64_t width, const std::vector<int>& kernel, const int ksize,
+                const int times, const float ratio) {
     const int radius = ksize / 2;
     const int64_t plane_size = height * width;
     for (int iter = 0; iter < times; ++iter) {
@@ -573,14 +523,9 @@ void erode_luma(std::vector<float>& current,
 }
 
 template <typename T>
-void build_channel_integral(const T* image,
-                            std::vector<double>& integral,
-                            const int64_t height,
-                            const int64_t width,
-                            const int64_t channels,
-                            const int64_t channel,
-                            const int64_t kernel_size,
-                            const float max_value) {
+void build_channel_integral(const T* image, std::vector<double>& integral, const int64_t height,
+                            const int64_t width, const int64_t channels, const int64_t channel,
+                            const int64_t kernel_size, const float max_value) {
     const int64_t radius = kernel_size / 2;
     const int64_t ext_height = height + 2 * radius;
     const int64_t ext_width = width + 2 * radius;
@@ -601,12 +546,8 @@ void build_channel_integral(const T* image,
     }
 }
 
-double rect_sum(const std::vector<double>& integral,
-                const int64_t integral_width,
-                const int64_t y0,
-                const int64_t x0,
-                const int64_t y1,
-                const int64_t x1) {
+double rect_sum(const std::vector<double>& integral, const int64_t integral_width, const int64_t y0,
+                const int64_t x0, const int64_t y1, const int64_t x1) {
     const int64_t a = y0 * integral_width + x0;
     const int64_t b = y0 * integral_width + x1;
     const int64_t c = y1 * integral_width + x0;
@@ -619,27 +560,20 @@ template <typename T>
 py::array_t<T> star_shrink_process_impl(
     const py::array_t<T, py::array::c_style | py::array::forcecast>& image,
     const py::array_t<uint8_t, py::array::c_style | py::array::forcecast>& mask,
-    const int shrink_ksize,
-    const std::string& shrink_shape,
-    const int shrink_times,
-    const float shrink_ratio,
-    const int deringing_ksize) {
+    const int shrink_ksize, const std::string& shrink_shape, const int shrink_times,
+    const float shrink_ratio, const int deringing_ksize) {
     if (image.ndim() != 2 && image.ndim() != 3) {
         throw std::invalid_argument(
             "star_shrink_process: image must have shape (H, W) or (H, W, C)");
     }
     if (image.shape(0) <= 0 || image.shape(1) <= 0) {
-        throw std::invalid_argument(
-            "star_shrink_process: image height and width must be positive");
+        throw std::invalid_argument("star_shrink_process: image height and width must be positive");
     }
     if (image.ndim() == 3 && image.shape(2) != 3) {
-        throw std::invalid_argument(
-            "star_shrink_process: 3D image must have exactly 3 channels");
+        throw std::invalid_argument("star_shrink_process: 3D image must have exactly 3 channels");
     }
-    if (mask.ndim() != 2 || mask.shape(0) != image.shape(0) ||
-        mask.shape(1) != image.shape(1)) {
-        throw std::invalid_argument(
-            "star_shrink_process: star_mask must have shape (H, W)");
+    if (mask.ndim() != 2 || mask.shape(0) != image.shape(0) || mask.shape(1) != image.shape(1)) {
+        throw std::invalid_argument("star_shrink_process: star_mask must have shape (H, W)");
     }
     if (shrink_times <= 0) {
         throw std::invalid_argument("star_shrink_process: shrink_times must be positive");
@@ -682,27 +616,19 @@ py::array_t<T> star_shrink_process_impl(
 #endif
         for (int64_t idx = 0; idx < plane_size; ++idx) {
             if (channels == 1) {
-                luma[static_cast<size_t>(idx)] =
-                    normalized_sample(image_ptr, idx, max_value);
+                luma[static_cast<size_t>(idx)] = normalized_sample(image_ptr, idx, max_value);
             } else {
                 const int64_t base = idx * 3;
-                const LabPixel lab = bgr_to_lab(
-                    normalized_sample(image_ptr, base, max_value),
-                    normalized_sample(image_ptr, base + 1, max_value),
-                    normalized_sample(image_ptr, base + 2, max_value));
+                const LabPixel lab = bgr_to_lab(normalized_sample(image_ptr, base, max_value),
+                                                normalized_sample(image_ptr, base + 1, max_value),
+                                                normalized_sample(image_ptr, base + 2, max_value));
                 luma[static_cast<size_t>(idx)] = lab.l;
                 lab_a[static_cast<size_t>(idx)] = lab.a;
                 lab_b[static_cast<size_t>(idx)] = lab.b;
             }
         }
 
-        erode_luma(luma,
-                   luma_scratch,
-                   height,
-                   width,
-                   kernel,
-                   shrink_ksize,
-                   shrink_times,
+        erode_luma(luma, luma_scratch, height, width, kernel, shrink_ksize, shrink_times,
                    shrink_ratio);
 
 #if defined(_OPENMP)
@@ -715,12 +641,8 @@ py::array_t<T> star_shrink_process_impl(
                 float b = 0.0f;
                 float g = 0.0f;
                 float r = 0.0f;
-                lab_to_bgr(luma[static_cast<size_t>(idx)],
-                           lab_a[static_cast<size_t>(idx)],
-                           lab_b[static_cast<size_t>(idx)],
-                           &b,
-                           &g,
-                           &r);
+                lab_to_bgr(luma[static_cast<size_t>(idx)], lab_a[static_cast<size_t>(idx)],
+                           lab_b[static_cast<size_t>(idx)], &b, &g, &r);
                 const int64_t base = idx * 3;
                 shrunk[static_cast<size_t>(base)] = b;
                 shrunk[static_cast<size_t>(base + 1)] = g;
@@ -735,13 +657,7 @@ py::array_t<T> star_shrink_process_impl(
             static_cast<double>(deringing_ksize) * static_cast<double>(deringing_ksize);
         std::vector<double> integral;
         for (int64_t c = 0; c < channels; ++c) {
-            build_channel_integral(image_ptr,
-                                   integral,
-                                   height,
-                                   width,
-                                   channels,
-                                   c,
-                                   deringing_ksize,
+            build_channel_integral(image_ptr, integral, height, width, channels, c, deringing_ksize,
                                    max_value);
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
@@ -754,16 +670,11 @@ py::array_t<T> star_shrink_process_impl(
                         out_ptr[out_idx] = image_ptr[out_idx];
                         continue;
                     }
-                    const double blur = rect_sum(integral,
-                                                 integral_width,
-                                                 y,
-                                                 x,
-                                                 y + deringing_ksize,
-                                                 x + deringing_ksize) /
+                    const double blur = rect_sum(integral, integral_width, y, x,
+                                                 y + deringing_ksize, x + deringing_ksize) /
                                         denom;
-                    const float value = std::max(
-                        shrunk[static_cast<size_t>(out_idx)],
-                        static_cast<float>(blur));
+                    const float value =
+                        std::max(shrunk[static_cast<size_t>(out_idx)], static_cast<float>(blur));
                     out_ptr[out_idx] = cast_output<T>(value, max_value);
                 }
             }
@@ -773,83 +684,50 @@ py::array_t<T> star_shrink_process_impl(
     return output;
 }
 
-py::array star_shrink_process_dispatch(const py::array& image,
-                                       const py::array& star_mask,
-                                       const int shrink_ksize,
-                                       const std::string& shrink_shape,
-                                       const int shrink_times,
-                                       const float shrink_ratio,
+py::array star_shrink_process_dispatch(const py::array& image, const py::array& star_mask,
+                                       const int shrink_ksize, const std::string& shrink_shape,
+                                       const int shrink_times, const float shrink_ratio,
                                        const int deringing_ksize) {
     auto mask_arr =
         star_mask.cast<py::array_t<uint8_t, py::array::c_style | py::array::forcecast>>();
     if (py::isinstance<py::array_t<uint8_t>>(image)) {
         return star_shrink_process_impl(
-            image.cast<py::array_t<uint8_t, py::array::c_style | py::array::forcecast>>(),
-            mask_arr,
-            shrink_ksize,
-            shrink_shape,
-            shrink_times,
-            shrink_ratio,
-            deringing_ksize);
+            image.cast<py::array_t<uint8_t, py::array::c_style | py::array::forcecast>>(), mask_arr,
+            shrink_ksize, shrink_shape, shrink_times, shrink_ratio, deringing_ksize);
     }
     if (py::isinstance<py::array_t<uint16_t>>(image)) {
         return star_shrink_process_impl(
             image.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>(),
-            mask_arr,
-            shrink_ksize,
-            shrink_shape,
-            shrink_times,
-            shrink_ratio,
-            deringing_ksize);
+            mask_arr, shrink_ksize, shrink_shape, shrink_times, shrink_ratio, deringing_ksize);
     }
-    throw std::invalid_argument(
-        "star_shrink_process: unsupported dtype; expected uint8 or uint16");
+    throw std::invalid_argument("star_shrink_process: unsupported dtype; expected uint8 or uint16");
 }
 
-py::array star_shrink_detect_mask_dispatch(const py::array& image,
-                                           const int ksize,
-                                           const double threshold_ratio,
-                                           const int open_ksize,
+py::array star_shrink_detect_mask_dispatch(const py::array& image, const int ksize,
+                                           const double threshold_ratio, const int open_ksize,
                                            const int dilate_ksize) {
     if (py::isinstance<py::array_t<uint8_t>>(image)) {
         return star_shrink_detect_mask_impl(
-            image.cast<py::array_t<uint8_t, py::array::c_style | py::array::forcecast>>(),
-            ksize,
-            threshold_ratio,
-            open_ksize,
-            dilate_ksize);
+            image.cast<py::array_t<uint8_t, py::array::c_style | py::array::forcecast>>(), ksize,
+            threshold_ratio, open_ksize, dilate_ksize);
     }
     if (py::isinstance<py::array_t<uint16_t>>(image)) {
         return star_shrink_detect_mask_impl(
-            image.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>(),
-            ksize,
-            threshold_ratio,
-            open_ksize,
-            dilate_ksize);
+            image.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>(), ksize,
+            threshold_ratio, open_ksize, dilate_ksize);
     }
     throw std::invalid_argument(
         "star_shrink_detect_mask: unsupported dtype; expected uint8 or uint16");
 }
 
-}  // namespace
+} // namespace
 
 void bind_star_shrink_ops(py::module_& m) {
-    m.def("star_shrink_process",
-          &star_shrink_process_dispatch,
-          py::arg("image"),
-          py::arg("star_mask"),
-          py::arg("shrink_ksize"),
-          py::arg("shrink_shape"),
-          py::arg("shrink_times"),
-          py::arg("shrink_ratio"),
-          py::arg("deringing_ksize"),
+    m.def("star_shrink_process", &star_shrink_process_dispatch, py::arg("image"),
+          py::arg("star_mask"), py::arg("shrink_ksize"), py::arg("shrink_shape"),
+          py::arg("shrink_times"), py::arg("shrink_ratio"), py::arg("deringing_ksize"),
           "Fused CPU star shrink luma erosion, deringing, and mask apply.");
-    m.def("star_shrink_detect_mask",
-          &star_shrink_detect_mask_dispatch,
-          py::arg("image"),
-          py::arg("ksize"),
-          py::arg("threshold_ratio"),
-          py::arg("open_ksize"),
-          py::arg("dilate_ksize"),
-          "CPU star shrink threshold detector mask.");
+    m.def("star_shrink_detect_mask", &star_shrink_detect_mask_dispatch, py::arg("image"),
+          py::arg("ksize"), py::arg("threshold_ratio"), py::arg("open_ksize"),
+          py::arg("dilate_ksize"), "CPU star shrink threshold detector mask.");
 }

@@ -17,7 +17,6 @@ class CustomOpsTestCase(unittest.TestCase):
         filter_ops._select_median_filter_backend.cache_clear()
         fgp_ops._load_compiled_module_result.cache_clear()
         fgp_ops._select_fgp_backend.cache_clear()
-        fgp_ops._select_fgp_add_backend.cache_clear()
         fgp_ops._select_huber_backend.cache_clear()
         max_ops._load_compiled_module_result.cache_clear()
         max_ops._compiled_build_info.cache_clear()
@@ -39,4 +38,3 @@ class CustomOpsTestCase(unittest.TestCase):
         sigma_clip_chunk_ops._load_compiled_module_result.cache_clear()
         alignment_ops._load_compiled_module_result.cache_clear()
         alignment_ops._select_extract_point_features_backend.cache_clear()
-        alignment_ops._select_find_initial_match_backend.cache_clear()

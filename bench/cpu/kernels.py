@@ -48,7 +48,6 @@ from hoshicore._custom_op import build_info as custom_ops_build_info
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 import hoshicore._custom_op.ops.alignment as alignment_ops
 import hoshicore._custom_op.ops.calibration as calibration_ops
-import hoshicore._custom_op.ops.detection as detection_ops
 import hoshicore._custom_op.ops.fgp as fgp_ops
 import hoshicore._custom_op.ops.filter as filter_ops
 import hoshicore._custom_op.ops.max as max_ops
@@ -80,12 +79,12 @@ FRAME_STREAM_CASE_NAMES = {
     "noise_fill_local_mean_stream_compiled",
     "star_shrink_detect_mask_stream_numpy",
     "star_shrink_detect_mask_stream_compiled",
+    "star_mask_dog_stream_numpy",
+    "star_mask_dog_stream_compiled",
     "star_shrink_process_stream_numpy",
     "star_shrink_process_stream_compiled",
     "fgp_accumulate_stream_numpy",
     "fgp_accumulate_stream_compiled",
-    "fgp_add_partial_reduce_numpy",
-    "fgp_add_partial_reduce_compiled",
     "huber_weighted_accumulate_stream_numpy",
     "huber_weighted_accumulate_stream_compiled",
     "fgp_masked_mean_merge_stream_numpy",
@@ -140,12 +139,12 @@ CASE_NAMES = [
     "noise_fill_local_mean_stream_compiled",
     "star_shrink_detect_mask_stream_numpy",
     "star_shrink_detect_mask_stream_compiled",
+    "star_mask_dog_stream_numpy",
+    "star_mask_dog_stream_compiled",
     "star_shrink_process_stream_numpy",
     "star_shrink_process_stream_compiled",
     "fgp_accumulate_stream_numpy",
     "fgp_accumulate_stream_compiled",
-    "fgp_add_partial_reduce_numpy",
-    "fgp_add_partial_reduce_compiled",
     "huber_weighted_accumulate_stream_numpy",
     "huber_weighted_accumulate_stream_compiled",
     "fgp_masked_mean_merge_stream_numpy",
@@ -162,14 +161,15 @@ CASE_NAMES = [
     "median_filter_2d_compiled",
     "extract_point_features_numpy",
     "extract_point_features_compiled",
-    "find_initial_match_numpy",
-    "find_initial_match_compiled",
+    "matching_cosine_bidirectional_nearest_numpy",
+    "matching_cosine_bidirectional_nearest_openmp",
+    "matching_cosine_bidirectional_nearest_cuda",
+    "matching_cosine_bidirectional_nearest_auto",
     "wavelet_dec_rec_core_numpy",
     "wavelet_dec_rec_core_compiled",
     "wavelet_dec_rec_core_cuda",
     "wavelet_dec_rec_numpy",
     "wavelet_dec_rec_auto",
-    "star_detect_connected_components_compiled",
     "sigma_clip_chunk_numpy",
     "sigma_clip_chunk_compiled",
     "sigma_clip_iterative_chunk_numpy",
@@ -474,6 +474,26 @@ def bench_star_shrink_detect_mask_stream_backend(
         detect(frame, ksize=13, threshold_ratio=1.0, open_ksize=3, dilate_ksize=0)
 
 
+def bench_star_mask_dog_stream_backend(
+    frames: list[np.ndarray],
+    *,
+    backend: str,
+) -> None:
+    detect = {
+        "numpy": star_shrink_ops.star_mask_dog_numpy,
+        "compiled": star_shrink_ops.star_mask_dog_compiled_cpu,
+    }[backend]
+    for frame in frames:
+        detect(
+            frame,
+            sigma_small=1.5,
+            sigma_large=12.0,
+            threshold_ratio=3.0,
+            open_ksize=3,
+            dilate_ksize=0,
+        )
+
+
 def bench_fgp_accumulate_stream_backend(
     frames: list[np.ndarray],
     *,
@@ -488,44 +508,6 @@ def bench_fgp_accumulate_stream_backend(
     }[backend]
     for frame in frames[1:]:
         accumulate(total, frame)
-    _ = total.mu
-    _ = total.var
-
-
-def clone_fgp(param):
-    from hoshicore.component.data_container import FastGaussianParam
-
-    return FastGaussianParam(
-        sum_mu=np.array(param.sum_mu, copy=True),
-        square_sum=np.array(param.square_sum, copy=True),
-        n=np.array(param.n, copy=True),
-        ddof=param.ddof,
-        source_dtype=param.source_dtype,
-        inplace_calc=True,
-    )
-
-
-def build_fgp_partials(frames: list[np.ndarray]):
-    from hoshicore.component.data_container import FastGaussianParam
-
-    return [
-        FastGaussianParam(np.array(frame, copy=True), source_dtype=frame.dtype)
-        for frame in frames
-    ]
-
-
-def bench_fgp_add_partial_reduce_backend(
-    partials,
-    *,
-    backend: str,
-) -> None:
-    add = {
-        "numpy": fgp_ops.fgp_add_numpy,
-        "compiled": fgp_ops.fgp_add_compiled,
-    }[backend]
-    total = clone_fgp(partials[0])
-    for partial in partials[1:]:
-        add(total, partial)
     _ = total.mu
     _ = total.var
 
@@ -793,37 +775,6 @@ def bench_median_filter_2d_backend(
     _ = median_filter(image, ksize)
 
 
-def build_cc_candidate_input(
-    height: int,
-    width: int,
-    *,
-    seed: int,
-    components: int = 1200,
-) -> tuple[np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(seed)
-    image = rng.normal(scale=0.01, size=(height, width)).astype(np.float64)
-    bw = np.zeros((height, width), dtype=np.uint8)
-    margin = 8
-    max_y = max(margin + 1, height - margin)
-    max_x = max(margin + 1, width - margin)
-    for _ in range(components):
-        cy = int(rng.integers(margin, max_y))
-        cx = int(rng.integers(margin, max_x))
-        radius = int(rng.integers(2, 5))
-        value = float(rng.uniform(1.0, 10.0))
-        cv2.circle(bw, (cx, cy), radius, 255, -1)
-        cv2.circle(image, (cx, cy), radius, value, -1)
-    return image, bw
-
-
-def bench_star_detect_connected_components_backend(
-    image: np.ndarray,
-    bw: np.ndarray,
-) -> None:
-    _ = detection_ops.star_detect_connected_components_candidates_compiled(
-        image, bw)
-
-
 def build_alignment_match_inputs(
     n_points: int,
     *,
@@ -856,21 +807,38 @@ def bench_extract_point_features_backend(
     _ = extract(vec, vol, k)
 
 
-def bench_find_initial_match_backend(
+def build_matching_nearest_inputs(
+    n_points: int,
+    *,
+    seed: int,
+    feature_dim: int = 120,
+) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    features1 = rng.normal(size=(n_points, feature_dim))
+    features1 /= np.linalg.norm(features1, axis=1, keepdims=True)
+    n_points2 = n_points + max(1, n_points // 50)
+    features2 = rng.normal(size=(n_points2, feature_dim))
+    features2 /= np.linalg.norm(features2, axis=1, keepdims=True)
+    return features1, features2
+
+
+def bench_matching_nearest_backend(
     features1: np.ndarray,
     features2: np.ndarray,
-    pts1: np.ndarray,
-    pts2: np.ndarray,
-    vectors1: np.ndarray,
-    vectors2: np.ndarray,
     *,
     backend: str,
 ) -> None:
-    find_match = {
-        "numpy": alignment_ops.find_initial_match_numpy,
-        "compiled": alignment_ops.find_initial_match_compiled,
+    nearest = {
+        "numpy": alignment_ops.matching_cosine_bidirectional_nearest_numpy,
+        "openmp": (
+            alignment_ops.matching_cosine_bidirectional_nearest_cpu_compiled
+        ),
+        "cuda": alignment_ops.matching_cosine_bidirectional_nearest_cuda,
+        "auto": alignment_ops.matching_cosine_bidirectional_nearest,
     }[backend]
-    _ = find_match(features1, features2, pts1, pts2, vectors1, vectors2)
+    result = nearest(features1, features2)
+    if result is None:
+        raise RuntimeError("matching nearest benchmark encountered ambiguous input")
 
 
 def build_wavelet_input(frame: np.ndarray) -> np.ndarray:
@@ -1090,13 +1058,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     weights = make_weights(frame_count)
     spatial_mask = None
-    fgp_partials = None
     threshold_stats = None
     median_chunk_stacks = None
     alignment_inputs = None
-    alignment_features = None
+    matching_nearest_inputs = None
     wavelet_input = None
-    cc_candidate_input = None
     sc_chunk_stack = None
     calibration_subtract_ref = None
     calibration_divide_ref = None
@@ -1113,12 +1079,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if spatial_mask is None:
             spatial_mask = build_spatial_mask(frames[0], args.mask_density)
         return spatial_mask
-
-    def get_fgp_partials():
-        nonlocal fgp_partials
-        if fgp_partials is None:
-            fgp_partials = build_fgp_partials(frames)
-        return fgp_partials
 
     def get_threshold_stats():
         nonlocal threshold_stats
@@ -1137,16 +1097,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if wavelet_input is None:
             wavelet_input = build_wavelet_input(frames[0])
         return wavelet_input
-
-    def get_cc_candidate_input():
-        nonlocal cc_candidate_input
-        if cc_candidate_input is None:
-            cc_candidate_input = build_cc_candidate_input(
-                args.height,
-                args.width,
-                seed=args.seed,
-            )
-        return cc_candidate_input
 
     def get_sc_chunk_stack():
         nonlocal sc_chunk_stack
@@ -1228,32 +1178,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
         return alignment_inputs
 
-    def get_alignment_features():
-        nonlocal alignment_features
-        if alignment_features is None:
-            vec, vec2, vol, vol2, _, _, k = get_alignment_inputs()
-            alignment_features = (
-                alignment_ops.extract_point_features_numpy(vec, vol, k),
-                alignment_ops.extract_point_features_numpy(vec2, vol2, k),
+    def get_matching_nearest_inputs():
+        nonlocal matching_nearest_inputs
+        if matching_nearest_inputs is None:
+            matching_nearest_inputs = build_matching_nearest_inputs(
+                args.alignment_points,
+                seed=args.seed,
             )
-        return alignment_features
+        return matching_nearest_inputs
 
     def bench_alignment_extract(backend: str) -> None:
         vec, _, vol, _, _, _, k = get_alignment_inputs()
         bench_extract_point_features_backend(vec, vol, k, backend=backend)
-
-    def bench_alignment_match(backend: str) -> None:
-        vec, vec2, _, _, pts, pts2, _ = get_alignment_inputs()
-        features1, features2 = get_alignment_features()
-        bench_find_initial_match_backend(
-            features1,
-            features2,
-            pts,
-            pts2,
-            vec,
-            vec2,
-            backend=backend,
-        )
 
     registry: dict[str, Any] = {
         "max_combine_int_weight": lambda: bench_max_combine(frames, weights, True),
@@ -1327,6 +1263,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             frames,
             backend="compiled",
         ),
+        "star_mask_dog_stream_numpy": lambda: bench_star_mask_dog_stream_backend(
+            frames,
+            backend="numpy",
+        ),
+        "star_mask_dog_stream_compiled": lambda: bench_star_mask_dog_stream_backend(
+            frames,
+            backend="compiled",
+        ),
         "star_shrink_process_stream_numpy": lambda: bench_star_shrink_process_stream_backend(
             get_star_shrink_payloads(),
             backend="numpy",
@@ -1337,14 +1281,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "fgp_accumulate_stream_numpy": lambda: bench_fgp_accumulate_stream_backend(frames, backend="numpy"),
         "fgp_accumulate_stream_compiled": lambda: bench_fgp_accumulate_stream_backend(frames, backend="compiled"),
-        "fgp_add_partial_reduce_numpy": lambda: bench_fgp_add_partial_reduce_backend(
-            get_fgp_partials(),
-            backend="numpy",
-        ),
-        "fgp_add_partial_reduce_compiled": lambda: bench_fgp_add_partial_reduce_backend(
-            get_fgp_partials(),
-            backend="compiled",
-        ),
         "huber_weighted_accumulate_stream_numpy": lambda: bench_huber_weighted_accumulate_stream_backend(
             frames,
             get_huber_refs()[0],
@@ -1415,8 +1351,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "extract_point_features_numpy": lambda: bench_alignment_extract("numpy"),
         "extract_point_features_compiled": lambda: bench_alignment_extract("compiled"),
-        "find_initial_match_numpy": lambda: bench_alignment_match("numpy"),
-        "find_initial_match_compiled": lambda: bench_alignment_match("compiled"),
+        "matching_cosine_bidirectional_nearest_numpy": lambda: bench_matching_nearest_backend(
+            *get_matching_nearest_inputs(), backend="numpy"
+        ),
+        "matching_cosine_bidirectional_nearest_openmp": lambda: bench_matching_nearest_backend(
+            *get_matching_nearest_inputs(), backend="openmp"
+        ),
+        "matching_cosine_bidirectional_nearest_cuda": lambda: bench_matching_nearest_backend(
+            *get_matching_nearest_inputs(), backend="cuda"
+        ),
+        "matching_cosine_bidirectional_nearest_auto": lambda: bench_matching_nearest_backend(
+            *get_matching_nearest_inputs(), backend="auto"
+        ),
         "wavelet_dec_rec_core_numpy": lambda: bench_wavelet_dec_rec_core_backend(
             get_wavelet_input(),
             args.wavelet_level,
@@ -1441,10 +1387,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             get_wavelet_input(),
             args.wavelet_resize_factor,
             backend="auto",
-        ),
-        "star_detect_connected_components_compiled": lambda: bench_star_detect_connected_components_backend(
-            get_cc_candidate_input()[0],
-            get_cc_candidate_input()[1],
         ),
         "sigma_clip_chunk_numpy": lambda: bench_sigma_clip_chunk_backend(
             get_sc_chunk_stack()[0],

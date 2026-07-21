@@ -6,4 +6,4 @@
 
 namespace py = pybind11;
 
-void bind_star_detect_full_ops(py::module_& m);
+void bind_star_mask_dog_cpu_ops(py::module_& m);

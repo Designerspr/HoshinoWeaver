@@ -1,3 +1,4 @@
+clang-format==20.1.8
 pybind11>=3.0.0
 pytest>=8.0
 pytest-asyncio>=0.23

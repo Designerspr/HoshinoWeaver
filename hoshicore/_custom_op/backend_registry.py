@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Collection, Mapping
 
 from hoshicore._custom_op._dispatch import (
     cuda_memory_info,
+    is_cuda_resource_exhausted_error,
     is_cuda_runtime_unavailable_error,
     load_compiled_module,
 )
+from hoshicore._custom_op.cuda_memory import cuda_memory_model_kind
 
 ModuleLoader = Callable[[], tuple[Any | None, str | None]]
 CudaProbe = Callable[[], dict[str, Any]]
+CUDA_MEMORY_MODELS = frozenset({"cuda_chunk", "phase_estimator", "static_estimator"})
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,8 @@ class BackendCandidate:
     dtypes: tuple[str, ...] = ()
     fallback: str = "numpy"
     build_flag: str | None = None
+    memory_model: str | None = None
+    memory_model_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,11 +99,23 @@ class BackendSelection:
 
 _CANDIDATES: tuple[BackendCandidate, ...] = (
     BackendCandidate("extract_point_features", "openmp_cpu", "extract_point_features"),
-    BackendCandidate("find_initial_match", "openmp_cpu", "find_initial_match"),
+    BackendCandidate(
+        "matching_cosine_bidirectional_nearest",
+        "cuda_host_io",
+        "matching_cosine_bidirectional_nearest_cuda",
+        priority=10,
+        fallback="openmp_cpu",
+        build_flag="cuda",
+        memory_model="static_estimator",
+    ),
+    BackendCandidate(
+        "matching_cosine_bidirectional_nearest",
+        "openmp_cpu",
+        "matching_cosine_bidirectional_nearest_cpu",
+    ),
     BackendCandidate("calibration_subtract", "openmp_cpu", "calibration_subtract"),
     BackendCandidate("calibration_divide", "openmp_cpu", "calibration_divide"),
     BackendCandidate("fgp_accumulate", "openmp_cpu", "fgp_accumulate"),
-    BackendCandidate("fgp_add", "openmp_cpu", "fgp_add"),
     BackendCandidate("fgp_masked_mean_merge", "openmp_cpu", "fgp_masked_mean_merge"),
     BackendCandidate("median_filter_2d", "openmp_cpu", "median_filter_2d"),
     BackendCandidate("huber_weighted_accumulate", "openmp_cpu", "huber_weighted_accumulate"),
@@ -121,6 +138,7 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         priority=10,
         fallback="openmp_cpu",
         build_flag="cuda",
+        memory_model="static_estimator",
     ),
     BackendCandidate("star_shrink_process", "openmp_cpu", "star_shrink_process"),
     BackendCandidate("star_shrink_detect_mask", "openmp_cpu", "star_shrink_detect_mask"),
@@ -129,14 +147,18 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "cuda_host_io",
         "star_mask_dog_cuda",
         priority=10,
+        fallback="openmp_cpu",
         build_flag="cuda",
+        memory_model="static_estimator",
     ),
+    BackendCandidate("star_mask_dog", "openmp_cpu", "star_mask_dog_cpu"),
     BackendCandidate(
         "star_shrink_dog_process",
         "cuda_host_io",
         "star_shrink_dog_process_cuda",
         priority=10,
         build_flag="cuda",
+        memory_model="static_estimator",
     ),
     BackendCandidate("sigma_clip_iterative_chunk", "openmp_cpu", "sigma_clip_iterative_chunk"),
     BackendCandidate(
@@ -145,6 +167,7 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "huber_weighted_chunk_cuda",
         priority=10,
         build_flag="cuda",
+        memory_model="cuda_chunk",
     ),
     BackendCandidate(
         "sigma_clip_fused_chunk",
@@ -153,14 +176,9 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         priority=10,
         fallback="openmp_cpu",
         build_flag="cuda",
+        memory_model="cuda_chunk",
     ),
     BackendCandidate("sigma_clip_fused_chunk", "openmp_cpu", "sigma_clip_fused_chunk"),
-    # Experimental norma detector path; production fallback remains OpenCV contour.
-    BackendCandidate(
-        "star_detect_connected_components_candidates",
-        "openmp_cpu",
-        "star_detect_connected_components_candidates",
-    ),
     BackendCandidate(
         "wavelet_dec_rec",
         "cuda_host_io",
@@ -168,6 +186,7 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         priority=10,
         fallback="openmp_cpu",
         build_flag="cuda",
+        memory_model="static_estimator",
     ),
     BackendCandidate("wavelet_dec_rec", "openmp_cpu", "wavelet_dec_rec_cpu"),
     BackendCandidate(
@@ -175,12 +194,21 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "cuda_host_io",
         "wavelet_dec_rec_cuda_core",
         build_flag="cuda",
+        memory_model="static_estimator",
     ),
     BackendCandidate(
-        "star_detect_full_connected_components",
+        "star_detect_fused_pixel_components",
         "cuda_host_io",
-        "star_detect_full_connected_components_core",
+        "star_detect_fused_pixel_components_cuda",
+        priority=10,
+        fallback="openmp_cpu",
         build_flag="cuda",
+        memory_model="phase_estimator",
+    ),
+    BackendCandidate(
+        "star_detect_fused_pixel_components",
+        "openmp_cpu",
+        "star_detect_fused_pixel_components_cpu",
     ),
     BackendCandidate(
         "camera_model_remap",
@@ -189,6 +217,7 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         priority=10,
         fallback="openmp_cpu",
         build_flag="cuda",
+        memory_model="static_estimator",
     ),
     BackendCandidate("camera_model_remap", "openmp_cpu", "camera_model_remap_cpu"),
 )
@@ -197,6 +226,53 @@ _CANDIDATES_BY_OP: dict[str, tuple[BackendCandidate, ...]] = {}
 for _candidate in _CANDIDATES:
     _CANDIDATES_BY_OP.setdefault(_candidate.logical_op, ())
     _CANDIDATES_BY_OP[_candidate.logical_op] += (_candidate,)
+
+
+def validate_cuda_memory_policy_declarations(
+    candidates: tuple[BackendCandidate, ...] = _CANDIDATES,
+    *,
+    require_memory_models: bool = False,
+) -> None:
+    for candidate in candidates:
+        if candidate.backend != "cuda_host_io":
+            continue
+        if (
+            candidate.memory_model is not None
+            and candidate.memory_model not in CUDA_MEMORY_MODELS
+        ):
+            raise RuntimeError(
+                "CUDA backend candidate declares an unknown memory model: "
+                f"{candidate.logical_op}/{candidate.memory_model}"
+            )
+        if candidate.memory_model is not None:
+            try:
+                registered_kind = cuda_memory_model_kind(candidate.logical_op)
+            except KeyError as exc:
+                raise RuntimeError(
+                    "CUDA backend candidate declares a memory model without a "
+                    f"registered estimator: {candidate.logical_op}/"
+                    f"{candidate.memory_model}"
+                ) from exc
+            if registered_kind != candidate.memory_model:
+                raise RuntimeError(
+                    "CUDA backend candidate memory model does not match its "
+                    f"registered estimator: {candidate.logical_op}/"
+                    f"{candidate.memory_model} != {registered_kind}"
+                )
+        if candidate.memory_model is None and require_memory_models:
+            raise RuntimeError(
+                "built-in CUDA backend candidate must declare a consumed "
+                f"memory model: {candidate.logical_op}/{candidate.kernel_name}"
+            )
+        if candidate.memory_model is None and not candidate.memory_model_reason:
+            raise RuntimeError(
+                "CUDA backend candidate must declare a memory model or an "
+                f"explicit deferral reason: {candidate.logical_op}/"
+                f"{candidate.kernel_name}"
+            )
+
+
+validate_cuda_memory_policy_declarations(require_memory_models=True)
 
 
 def registered_backend_candidates(logical_op: str | None = None) -> tuple[BackendCandidate, ...]:
@@ -230,6 +306,18 @@ def select_backend(
             "logical_op_unregistered",
         )
 
+    cpu_only = preference == "cpu"
+    if cpu_only and all(
+        candidate.backend == "cuda_host_io" for candidate in candidates
+    ):
+        return BackendSelection(
+            None,
+            None,
+            "CPU backend preference excludes CUDA and no native CPU backend "
+            f"is registered for {logical_op}",
+            "forced_cpu",
+        )
+
     module, module_error = load_module()
     if module is None:
         return BackendSelection(
@@ -241,7 +329,10 @@ def select_backend(
 
     missing_kernel: str | None = None
     missing_build_flag: str | None = None
-    excluded = frozenset(exclude_backends)
+    excluded = set(exclude_backends)
+    if cpu_only:
+        excluded.add("cuda_host_io")
+    excluded = frozenset(excluded)
     for candidate in sorted(candidates, key=lambda item: item.priority, reverse=True):
         if candidate.backend in excluded:
             continue
@@ -253,7 +344,8 @@ def select_backend(
             if info and not info.get(candidate.build_flag):
                 missing_build_flag = candidate.build_flag
                 continue
-        return BackendSelection(candidate, module, None, "selected_native")
+        reason_code = "forced_cpu" if cpu_only else "selected_native"
+        return BackendSelection(candidate, module, None, reason_code)
 
     if missing_kernel is not None:
         return BackendSelection(
@@ -339,21 +431,46 @@ def resolve_backend(
         exclude_backends=excluded,
     )
     fallback_decision = fallback_selection.to_decision(logical_op)
-    fallback_decision = BackendDecision(
-        logical_op=fallback_decision.logical_op,
-        backend=fallback_decision.backend,
-        kernel_name=fallback_decision.kernel_name,
-        placement=fallback_decision.placement,
-        fallback=fallback_decision.fallback,
-        native=fallback_decision.native,
-        reason_code="cuda_runtime_unavailable",
+    unavailable_reason_code = str(
+        probe.get("reason_code") or "cuda_runtime_unavailable"
+    )
+    fallback_decision = replace(
+        fallback_decision,
+        reason_code=unavailable_reason_code,
     )
     return BackendSelection(
         fallback_selection.candidate,
         fallback_selection.module,
         probe.get("reason") or fallback_selection.reason,
-        "cuda_runtime_unavailable",
+        unavailable_reason_code,
         fallback_decision,
+    )
+
+
+def _resolve_after_cuda_backend_failure(
+    logical_op: str,
+    failed_backend: str,
+    exc: RuntimeError,
+    reason_code: str,
+    *,
+    load_module: ModuleLoader = load_compiled_module,
+    build_info: Mapping[str, Any] | None = None,
+) -> BackendSelection:
+    selection = resolve_backend(
+        logical_op,
+        "auto",
+        load_module=load_module,
+        build_info=build_info,
+        exclude_backends={failed_backend},
+    )
+    decision = selection.to_decision(logical_op)
+    decision = replace(decision, reason_code=reason_code)
+    return BackendSelection(
+        selection.candidate,
+        selection.module,
+        str(exc),
+        reason_code,
+        decision,
     )
 
 
@@ -367,29 +484,33 @@ def resolve_after_runtime_unavailable(
 ) -> BackendSelection:
     if failed_backend != "cuda_host_io" or not is_cuda_runtime_unavailable_error(exc):
         raise exc
-    selection = resolve_backend(
+    return _resolve_after_cuda_backend_failure(
         logical_op,
-        "auto",
+        failed_backend,
+        exc,
+        "cuda_runtime_unavailable",
         load_module=load_module,
         build_info=build_info,
-        exclude_backends={failed_backend},
     )
-    decision = selection.to_decision(logical_op)
-    decision = BackendDecision(
-        logical_op=decision.logical_op,
-        backend=decision.backend,
-        kernel_name=decision.kernel_name,
-        placement=decision.placement,
-        fallback=decision.fallback,
-        native=decision.native,
-        reason_code="cuda_runtime_unavailable",
-    )
-    return BackendSelection(
-        selection.candidate,
-        selection.module,
-        str(exc),
-        "cuda_runtime_unavailable",
-        decision,
+
+
+def resolve_after_resource_exhausted(
+    logical_op: str,
+    failed_backend: str,
+    exc: RuntimeError,
+    *,
+    load_module: ModuleLoader = load_compiled_module,
+    build_info: Mapping[str, Any] | None = None,
+) -> BackendSelection:
+    if failed_backend != "cuda_host_io" or not is_cuda_resource_exhausted_error(exc):
+        raise exc
+    return _resolve_after_cuda_backend_failure(
+        logical_op,
+        failed_backend,
+        exc,
+        "cuda_resource_exhausted",
+        load_module=load_module,
+        build_info=build_info,
     )
 
 

@@ -3,6 +3,8 @@
 #include "common/cpu_compat.h"
 #include "common/py_array_utils.h"
 
+#include <pybind11/numpy.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -10,12 +12,9 @@
 #include <string>
 #include <type_traits>
 
-#include <pybind11/numpy.h>
-
 namespace {
 
-template <typename T>
-constexpr double max_value_for() {
+template <typename T> constexpr double max_value_for() {
     if constexpr (std::is_floating_point_v<T>) {
         return 0.0;
     } else {
@@ -23,8 +22,7 @@ constexpr double max_value_for() {
     }
 }
 
-template <typename T>
-T cast_divide_output(const double value) {
+template <typename T> T cast_divide_output(const double value) {
     if constexpr (std::is_floating_point_v<T>) {
         return static_cast<T>(value);
     } else {
@@ -35,8 +33,7 @@ T cast_divide_output(const double value) {
 }
 
 template <typename T>
-void calibration_subtract_kernel(py::buffer_info& out_info,
-                                 const py::buffer_info& frame_info,
+void calibration_subtract_kernel(py::buffer_info& out_info, const py::buffer_info& frame_info,
                                  const py::buffer_info& ref_info) {
     auto* HNW_RESTRICT out_ptr = static_cast<T*>(out_info.ptr);
     const auto* HNW_RESTRICT frame_ptr = static_cast<const T*>(frame_info.ptr);
@@ -62,8 +59,7 @@ void calibration_subtract_kernel(py::buffer_info& out_info,
     }
 }
 
-template <typename T>
-double mean_as_float64(const py::buffer_info& ref_info) {
+template <typename T> double mean_as_float64(const py::buffer_info& ref_info) {
     const auto* HNW_RESTRICT ref_ptr = static_cast<const T*>(ref_info.ptr);
     const ssize_t total = ref_info.size;
     double sum = 0.0;
@@ -79,10 +75,8 @@ double mean_as_float64(const py::buffer_info& ref_info) {
 }
 
 template <typename T>
-void calibration_divide_kernel(py::buffer_info& out_info,
-                               const py::buffer_info& frame_info,
-                               const py::buffer_info& ref_info,
-                               const double ref_mean) {
+void calibration_divide_kernel(py::buffer_info& out_info, const py::buffer_info& frame_info,
+                               const py::buffer_info& ref_info, const double ref_mean) {
     auto* HNW_RESTRICT out_ptr = static_cast<T*>(out_info.ptr);
     const auto* HNW_RESTRICT frame_ptr = static_cast<const T*>(frame_info.ptr);
     const auto* HNW_RESTRICT ref_ptr = static_cast<const T*>(ref_info.ptr);
@@ -133,15 +127,13 @@ py::array_t<T> calibration_divide_impl(
     return out;
 }
 
-py::array calibration_subtract_dispatch(const py::array& frame,
-                                        const py::array& reference) {
+py::array calibration_subtract_dispatch(const py::array& frame, const py::array& reference) {
     hnw::require_same_dtype(frame, reference, "calibration_subtract");
     const std::string frame_dtype = py::str(frame.dtype()).cast<std::string>();
 
     if (py::isinstance<py::array_t<unsigned char>>(frame)) {
         return calibration_subtract_impl<unsigned char>(
-            frame.cast<py::array_t<unsigned char>>(),
-            reference.cast<py::array_t<unsigned char>>());
+            frame.cast<py::array_t<unsigned char>>(), reference.cast<py::array_t<unsigned char>>());
     }
     if (py::isinstance<py::array_t<unsigned short>>(frame)) {
         return calibration_subtract_impl<unsigned short>(
@@ -149,33 +141,28 @@ py::array calibration_subtract_dispatch(const py::array& frame,
             reference.cast<py::array_t<unsigned short>>());
     }
     if (py::isinstance<py::array_t<uint32_t>>(frame)) {
-        return calibration_subtract_impl<uint32_t>(
-            frame.cast<py::array_t<uint32_t>>(),
-            reference.cast<py::array_t<uint32_t>>());
+        return calibration_subtract_impl<uint32_t>(frame.cast<py::array_t<uint32_t>>(),
+                                                   reference.cast<py::array_t<uint32_t>>());
     }
     if (py::isinstance<py::array_t<float>>(frame)) {
-        return calibration_subtract_impl<float>(
-            frame.cast<py::array_t<float>>(),
-            reference.cast<py::array_t<float>>());
+        return calibration_subtract_impl<float>(frame.cast<py::array_t<float>>(),
+                                                reference.cast<py::array_t<float>>());
     }
     if (py::isinstance<py::array_t<double>>(frame)) {
-        return calibration_subtract_impl<double>(
-            frame.cast<py::array_t<double>>(),
-            reference.cast<py::array_t<double>>());
+        return calibration_subtract_impl<double>(frame.cast<py::array_t<double>>(),
+                                                 reference.cast<py::array_t<double>>());
     }
 
     throw std::invalid_argument("calibration_subtract: unsupported dtype");
 }
 
-py::array calibration_divide_dispatch(const py::array& frame,
-                                      const py::array& reference) {
+py::array calibration_divide_dispatch(const py::array& frame, const py::array& reference) {
     hnw::require_same_dtype(frame, reference, "calibration_divide");
     const std::string frame_dtype = py::str(frame.dtype()).cast<std::string>();
 
     if (py::isinstance<py::array_t<unsigned char>>(frame)) {
-        return calibration_divide_impl<unsigned char>(
-            frame.cast<py::array_t<unsigned char>>(),
-            reference.cast<py::array_t<unsigned char>>());
+        return calibration_divide_impl<unsigned char>(frame.cast<py::array_t<unsigned char>>(),
+                                                      reference.cast<py::array_t<unsigned char>>());
     }
     if (py::isinstance<py::array_t<unsigned short>>(frame)) {
         return calibration_divide_impl<unsigned short>(
@@ -183,35 +170,27 @@ py::array calibration_divide_dispatch(const py::array& frame,
             reference.cast<py::array_t<unsigned short>>());
     }
     if (py::isinstance<py::array_t<uint32_t>>(frame)) {
-        return calibration_divide_impl<uint32_t>(
-            frame.cast<py::array_t<uint32_t>>(),
-            reference.cast<py::array_t<uint32_t>>());
+        return calibration_divide_impl<uint32_t>(frame.cast<py::array_t<uint32_t>>(),
+                                                 reference.cast<py::array_t<uint32_t>>());
     }
     if (py::isinstance<py::array_t<float>>(frame)) {
-        return calibration_divide_impl<float>(
-            frame.cast<py::array_t<float>>(),
-            reference.cast<py::array_t<float>>());
+        return calibration_divide_impl<float>(frame.cast<py::array_t<float>>(),
+                                              reference.cast<py::array_t<float>>());
     }
     if (py::isinstance<py::array_t<double>>(frame)) {
-        return calibration_divide_impl<double>(
-            frame.cast<py::array_t<double>>(),
-            reference.cast<py::array_t<double>>());
+        return calibration_divide_impl<double>(frame.cast<py::array_t<double>>(),
+                                               reference.cast<py::array_t<double>>());
     }
 
     throw std::invalid_argument("calibration_divide: unsupported dtype");
 }
 
-}  // namespace
+} // namespace
 
 void bind_calibration_ops(py::module_& m) {
-    m.def("calibration_subtract",
-          &calibration_subtract_dispatch,
-          py::arg("frame"),
-          py::arg("reference"),
-          "Apply calibration subtraction with dtype-preserving clip.");
-    m.def("calibration_divide",
-          &calibration_divide_dispatch,
-          py::arg("frame"),
+    m.def("calibration_subtract", &calibration_subtract_dispatch, py::arg("frame"),
+          py::arg("reference"), "Apply calibration subtraction with dtype-preserving clip.");
+    m.def("calibration_divide", &calibration_divide_dispatch, py::arg("frame"),
           py::arg("reference"),
           "Apply flat-field calibration division with dtype-preserving clip.");
 }

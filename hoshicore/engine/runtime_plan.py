@@ -11,6 +11,7 @@ from loguru import logger
 from .._custom_op._dispatch import cuda_memory_info
 from .._custom_op._dispatch import fallback_preference
 from .._custom_op.backend_registry import BackendDecision, resolve_backend
+from .._custom_op.cuda_memory import cuda_chunk_memory_model
 from ..component.image_io import peek_shape
 from ..ops.base import BaseOp
 from .build import ValidatedDag
@@ -201,7 +202,7 @@ def _plan_chunk_rows(
     if height <= 0 or row_bytes <= 0:
         return None, None
 
-    cost_per_row = sum(
+    host_cost_per_row = sum(
         _chunk_cost_per_row(
             chunk_op,
             backend_hints,
@@ -211,18 +212,35 @@ def _plan_chunk_rows(
         )
         for chunk_op in chunk_ops
     )
-    if cost_per_row <= 0:
+    if host_cost_per_row <= 0:
         return None, None
 
     # preflight 负责估算非 chunk 常驻内存；planner 只拿剩余预算分配 chunk_rows。
     cpu_budget = _memory_budget_bytes() - int(preflight_report.non_chunk_mem)
     gpu_budget = _cuda_chunk_memory_budget_bytes(
         chunk_ops, backend_hints, cuda_probe)
-    chunk_budget = cpu_budget if gpu_budget is None else min(cpu_budget, gpu_budget)
-    if chunk_budget <= 0:
+    if cpu_budget <= 0:
         rows = DEFAULT_MIN_CHUNK_ROWS
     else:
-        rows = max(DEFAULT_MIN_CHUNK_ROWS, chunk_budget // cost_per_row)
+        rows = max(DEFAULT_MIN_CHUNK_ROWS, cpu_budget // host_cost_per_row)
+    gpu_cost = _cuda_chunk_device_cost(
+        chunk_ops,
+        backend_hints,
+        n_frames,
+        row_bytes,
+        dtype_bytes,
+    )
+    if gpu_budget is not None and gpu_cost is not None:
+        gpu_bytes_per_row, gpu_fixed_bytes = gpu_cost
+        usable_gpu_budget = gpu_budget - gpu_fixed_bytes
+        if usable_gpu_budget <= 0:
+            gpu_rows = DEFAULT_MIN_CHUNK_ROWS
+        else:
+            gpu_rows = max(
+                DEFAULT_MIN_CHUNK_ROWS,
+                usable_gpu_budget // gpu_bytes_per_row,
+            )
+        rows = min(rows, gpu_rows)
     rows = _round_down_to_multiple(int(rows), CHUNK_ROW_ALIGNMENT)
     min_rows = _positive_int(
         configs.get("runtime_planner_min_chunk_rows"), DEFAULT_MIN_CHUNK_ROWS)
@@ -282,6 +300,47 @@ def _chunk_cost_per_row(
     hint = backend_hints.get(chunk_op.node_name)
     backend = hint.backend if hint is not None and hint.native else "numpy"
     return int(cost_for_backend(backend, n_frames, row_bytes, dtype_bytes))
+
+
+def _cuda_chunk_device_cost(
+    chunk_ops: list[_ChunkPlannedNode],
+    backend_hints: dict[str, BackendDecision],
+    n_frames: int,
+    row_bytes: int,
+    dtype_bytes: int,
+) -> tuple[int, int] | None:
+    bytes_per_row = 0
+    fixed_bytes = 0
+    found_cuda = False
+    for chunk_op in chunk_ops:
+        hint = backend_hints.get(chunk_op.node_name)
+        if hint is None or not hint.native or hint.backend != "cuda_host_io":
+            continue
+        found_cuda = True
+        logical_op = getattr(chunk_op.op_cls, "BACKEND_LOGICAL_OP", None)
+        try:
+            model = cuda_chunk_memory_model(
+                logical_op,
+                n_frames=n_frames,
+                row_bytes=row_bytes,
+                dtype_bytes=dtype_bytes,
+            )
+        except KeyError:
+            # Compatibility for third-party chunk Ops until they declare a
+            # CUDA memory model. Built-in CUDA chunk Ops are registry-checked.
+            bytes_per_row += _chunk_cost_per_row(
+                chunk_op,
+                backend_hints,
+                n_frames,
+                row_bytes,
+                dtype_bytes,
+            )
+            continue
+        bytes_per_row += model.device_bytes_per_row
+        fixed_bytes += model.fixed_device_bytes
+    if not found_cuda:
+        return None
+    return max(1, bytes_per_row), fixed_bytes
 
 
 def _positive_int(value: Any, default: int) -> int:

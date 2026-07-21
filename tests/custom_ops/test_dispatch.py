@@ -1,14 +1,46 @@
+import os
 import unittest
 from unittest import mock
 
 import numpy as np
 
+import hoshicore._custom_op as custom_ops
 import hoshicore._custom_op._dispatch as custom_op_dispatch
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
+from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
 import hoshicore._custom_op.ops.sigma_clip as sigma_clip_chunk_ops
 
 
 class TestCustomOpDispatchHelpers(unittest.TestCase):
+    def tearDown(self) -> None:
+        custom_op_dispatch.set_backend_preference(None)
+
+    def test_backend_preference_accepts_cpu_from_environment(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"HNW_CUSTOM_OPS_FALLBACK": "cpu"}, clear=False
+        ):
+            self.assertEqual(
+                custom_op_dispatch.get_backend_preference(), "cpu")
+
+    def test_backend_preference_runtime_override_and_reset(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False
+        ):
+            custom_op_dispatch.set_backend_preference("cpu")
+            self.assertEqual(
+                custom_op_dispatch.get_backend_preference(), "cpu")
+            custom_op_dispatch.set_backend_preference(None)
+            self.assertEqual(
+                custom_op_dispatch.get_backend_preference(), "numpy")
+
+    def test_backend_preference_rejects_unknown_value(self) -> None:
+        with self.assertRaisesRegex(ValueError, "auto, cpu, numpy"):
+            custom_op_dispatch.set_backend_preference("gpu")
+
+    def test_backend_preference_is_exposed_by_public_facade(self) -> None:
+        custom_ops.set_backend_preference("cpu")
+        self.assertEqual(custom_ops.get_backend_preference(), "cpu")
+
     def test_compiled_threads_are_applied_on_every_native_call(self) -> None:
         module = mock.Mock()
         module.set_openmp_threads.return_value = True
@@ -94,6 +126,56 @@ class TestCustomOpDispatchHelpers(unittest.TestCase):
                 )
             )
 
+    def test_cuda_runtime_unavailable_classifier_accepts_probe_exception(self) -> None:
+        exc = custom_op_dispatch.CustomOpCudaRuntimeUnavailableError(
+            "CUDA compute capability 5.2 is unsupported",
+            reason_code="cuda_compute_capability_unsupported",
+        )
+
+        self.assertTrue(is_cuda_runtime_unavailable_error(exc))
+        self.assertEqual(
+            exc.reason_code,
+            "cuda_compute_capability_unsupported",
+        )
+
+    def test_cuda_resource_classifier_requires_structured_error(self) -> None:
+        class CudaResourceExhaustedError(RuntimeError):
+            pass
+
+        module = mock.Mock(
+            CudaResourceExhaustedError=CudaResourceExhaustedError)
+        with mock.patch.object(
+            custom_op_dispatch,
+            "load_compiled_module",
+            return_value=(module, None),
+        ):
+            self.assertTrue(
+                is_cuda_resource_exhausted_error(
+                    CudaResourceExhaustedError("out of memory")
+                )
+            )
+            self.assertFalse(
+                is_cuda_resource_exhausted_error(
+                    RuntimeError("cudaMalloc: out of memory")
+                )
+            )
+
+    def test_cuda_resource_classifier_accepts_actual_native_exception(self) -> None:
+        module, error = custom_op_dispatch.load_compiled_module()
+        if module is None:
+            self.skipTest(error or "compiled custom ops unavailable")
+        if not hasattr(module, "CudaResourceExhaustedError"):
+            self.skipTest("CUDA resource exception is not built")
+
+        exc = module.CudaResourceExhaustedError("typed native resource error")
+        self.assertTrue(is_cuda_resource_exhausted_error(exc))
+        self.assertFalse(is_cuda_runtime_unavailable_error(exc))
+        self.assertFalse(
+            is_cuda_resource_exhausted_error(
+                RuntimeError("cudaMalloc: out of memory")
+            )
+        )
+
     def test_cuda_memory_probe_propagates_runtime_errors(self) -> None:
         module = mock.Mock()
         module.cuda_memory_info.side_effect = RuntimeError(
@@ -106,6 +188,28 @@ class TestCustomOpDispatchHelpers(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "out of memory"):
                 custom_op_dispatch.cuda_memory_info()
+
+    def test_cuda_memory_probe_reports_supported_compute_capability(self) -> None:
+        module, error = custom_op_dispatch.load_compiled_module()
+        if module is None:
+            self.skipTest(error or "compiled custom ops unavailable")
+        if not module.build_info().get("cuda"):
+            self.skipTest("CUDA backend is not built")
+
+        payload = custom_op_dispatch.cuda_memory_info()
+        if not payload.get("available"):
+            self.skipTest(str(payload.get("reason") or "CUDA runtime unavailable"))
+
+        capability = (
+            payload["compute_capability_major"],
+            payload["compute_capability_minor"],
+        )
+        minimum = (
+            payload["minimum_compute_capability_major"],
+            payload["minimum_compute_capability_minor"],
+        )
+        self.assertGreaterEqual(capability, minimum)
+        self.assertEqual(minimum, (6, 0))
 
     def test_cuda_memory_probe_rejects_incomplete_available_payload(self) -> None:
         module = mock.Mock()
