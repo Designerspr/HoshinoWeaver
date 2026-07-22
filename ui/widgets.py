@@ -200,7 +200,7 @@ def create_config_row(
         spin.setMinimum(spec.min if spec.min is not None else -999999.0)
         spin.setMaximum(spec.max if spec.max is not None else 999999.0)
         spin.setSingleStep(spec.step if spec.step else 0.1)
-        spin.setDecimals(3)
+        spin.setDecimals(1)
         spin.setValue(float(spec.default) if spec.default is not None else 0.0)
         if on_change:
             spin.valueChanged.connect(lambda _: on_change())
