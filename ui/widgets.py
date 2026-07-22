@@ -78,18 +78,25 @@ def create_config_row(
     Returns (row_frame, get_value, set_value).
     """
     row = QFrame(parent)
-    row.setMinimumHeight(36)
-    row.setMaximumHeight(36)
+    # Adjust height for file/dir pickers (two-row layout)
+    if spec.widget in ("file_picker", "dir_picker"):
+        row.setMinimumHeight(60)
+        row.setMaximumHeight(60)
+    else:
+        row.setMinimumHeight(36)
+        row.setMaximumHeight(36)
     layout = QHBoxLayout(row)
     layout.setContentsMargins(5, 0, 5, 0)
     layout.setSpacing(6)
 
-    label = QLabel(spec.label or spec.key, row)
-    label.setMinimumWidth(60)
-    label.setMaximumWidth(80)
-    label.setStyleSheet(LABEL_STYLE)
-    label.setToolTip(spec.description)
-    layout.addWidget(label)
+    # For file/dir pickers, skip the left label (will be in top row)
+    if spec.widget not in ("file_picker", "dir_picker"):
+        label = QLabel(spec.label or spec.key, row)
+        label.setMinimumWidth(60)
+        label.setMaximumWidth(80)
+        label.setStyleSheet(LABEL_STYLE)
+        label.setToolTip(spec.description)
+        layout.addWidget(label)
 
     getter: Callable[[], Any]
     setter: Callable[[Any], None]
@@ -131,15 +138,58 @@ def create_config_row(
         layout.addWidget(combo, 1)
 
     elif spec.widget == "file_picker":
-        line = QLineEdit(row)
+        # Use vertical layout for two-row design
+        v_layout = QVBoxLayout()
+        v_layout.setContentsMargins(0, 0, 0, 0)
+        v_layout.setSpacing(2)
+
+        # First row: label + buttons
+        top_row = QWidget(row)
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(6)
+
+        label = QLabel(spec.label or spec.key, top_row)
+        label.setMinimumWidth(40)
+        label.setMaximumWidth(60)
+        label.setStyleSheet(LABEL_STYLE)
+        label.setToolTip(spec.description)
+        top_layout.addWidget(label)
+        top_layout.addStretch()
+
+        browse_btn = QPushButton("...", top_row)
+        browse_btn.setMaximumWidth(28)
+        browse_btn.setMinimumWidth(28)
+        browse_btn.setToolTip("浏览文件")
+
+        clear_btn = QPushButton("×", top_row)
+        clear_btn.setMaximumWidth(22)
+        clear_btn.setMinimumWidth(22)
+        clear_btn.setEnabled(bool(spec.default))
+        clear_btn.setToolTip("清空路径")
+
+        top_layout.addWidget(browse_btn)
+        top_layout.addWidget(clear_btn)
+
+        # Second row: path display (indented container)
+        bottom_container = QWidget(row)
+        bottom_layout = QHBoxLayout(bottom_container)
+        bottom_layout.setContentsMargins(12, 0, 0, 0)  # 12px left indent
+        bottom_layout.setSpacing(0)
+
+        line = QLineEdit(bottom_container)
         line.setReadOnly(True)
         line.setPlaceholderText("点击浏览...")
+        line.setCursor(Qt.CursorShape.PointingHandCursor)  # Pointer cursor
         line.setStyleSheet(LINEEDIT_STYLE)
         if spec.default:
             line.setText(str(spec.default))
-        btn = QPushButton("...", row)
-        btn.setMaximumWidth(28)
-        btn.setMinimumWidth(28)
+
+        def _clear():
+            line.clear()
+            clear_btn.setEnabled(False)
+            if on_change:
+                on_change()
 
         def _browse():
             accept = spec.accept or ""
@@ -148,39 +198,104 @@ def create_config_row(
                 f"支持的文件 (*{' *'.join(accept.split(','))} );;全部文件 (*)" if accept else "全部文件 (*)")
             if path:
                 line.setText(path)
+                clear_btn.setEnabled(True)
                 if on_change:
                     on_change()
 
-        btn.clicked.connect(_browse)
+        # Make line clickable
+        line.mousePressEvent = lambda _: _browse()
+
+        clear_btn.clicked.connect(_clear)
+        browse_btn.clicked.connect(_browse)
         getter = line.text
-        setter = line.setText
-        layout.addWidget(line, 1)
-        layout.addWidget(btn)
+
+        def setter(v):
+            line.setText(str(v) if v else "")
+            clear_btn.setEnabled(bool(v))
+
+        bottom_layout.addWidget(line)
+        v_layout.addWidget(top_row)
+        v_layout.addWidget(bottom_container)
+        layout.addLayout(v_layout)
 
     elif spec.widget == "dir_picker":
-        line = QLineEdit(row)
+        # Use vertical layout for two-row design
+        v_layout = QVBoxLayout()
+        v_layout.setContentsMargins(0, 0, 0, 0)
+        v_layout.setSpacing(2)
+
+        # First row: label + buttons
+        top_row = QWidget(row)
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(6)
+
+        label = QLabel(spec.label or spec.key, top_row)
+        label.setMinimumWidth(60)
+        label.setMaximumWidth(80)
+        label.setStyleSheet(LABEL_STYLE)
+        label.setToolTip(spec.description)
+        top_layout.addWidget(label)
+        top_layout.addStretch()
+
+        browse_btn = QPushButton("...", top_row)
+        browse_btn.setMaximumWidth(28)
+        browse_btn.setMinimumWidth(28)
+        browse_btn.setToolTip("浏览目录")
+
+        clear_btn = QPushButton("×", top_row)
+        clear_btn.setMaximumWidth(22)
+        clear_btn.setMinimumWidth(22)
+        clear_btn.setEnabled(bool(spec.default))
+        clear_btn.setToolTip("清空路径")
+
+        top_layout.addWidget(browse_btn)
+        top_layout.addWidget(clear_btn)
+
+        # Second row: path display (indented container)
+        bottom_container = QWidget(row)
+        bottom_layout = QHBoxLayout(bottom_container)
+        bottom_layout.setContentsMargins(12, 0, 0, 0)  # 12px left indent
+        bottom_layout.setSpacing(0)
+
+        line = QLineEdit(bottom_container)
         line.setReadOnly(True)
         line.setPlaceholderText("留空使用系统默认...")
+        line.setCursor(Qt.CursorShape.PointingHandCursor)  # Pointer cursor
         line.setStyleSheet(LINEEDIT_STYLE)
         if spec.default:
             line.setText(str(spec.default))
-        btn = QPushButton("...", row)
-        btn.setMaximumWidth(28)
-        btn.setMinimumWidth(28)
+
+        def _clear():
+            line.clear()
+            clear_btn.setEnabled(False)
+            if on_change:
+                on_change()
 
         def _browse_dir():
             path = QFileDialog.getExistingDirectory(
                 row, spec.label or "选择目录", line.text() or "")
             if path:
                 line.setText(path)
+                clear_btn.setEnabled(True)
                 if on_change:
                     on_change()
 
-        btn.clicked.connect(_browse_dir)
+        # Make line clickable
+        line.mousePressEvent = lambda _: _browse_dir()
+
+        clear_btn.clicked.connect(_clear)
+        browse_btn.clicked.connect(_browse_dir)
         getter = line.text
-        setter = lambda v: line.setText(str(v) if v else "")
-        layout.addWidget(line, 1)
-        layout.addWidget(btn)
+
+        def setter(v):
+            line.setText(str(v) if v else "")
+            clear_btn.setEnabled(bool(v))
+
+        bottom_layout.addWidget(line)
+        v_layout.addWidget(top_row)
+        v_layout.addWidget(bottom_container)
+        layout.addLayout(v_layout)
 
     elif spec.widget == "input" and spec.type == "int":
         spin = QSpinBox(row)
