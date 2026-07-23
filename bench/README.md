@@ -38,7 +38,8 @@
 - `python -m bench.cli run pipeline.workflow -- --input-dir <image-dir>`
   与 `pipeline.all` 等价；语义上表示 YAML/DAG workflow benchmark。
 - `python -m bench.cli run pipeline.compute -- --input-dir <image-dir>`
-  跑代表性的独立生产计算路径，包括对齐和叠加；用于看具体计算路径收益。
+  跑不经过 DAG engine 的独立生产计算路径，包括对齐和叠加；默认 `auto`
+  代表生产 dispatch，也是在 `auto / cpu / numpy` 之间做详细性能对比的入口。
 - `python -m bench.cli run pipeline.alignment -- --input-dir <image-dir>`
   只看完整生产对齐链路时使用；终端打印 pipeline 总耗时，单方法运行时也会打印阶段耗时。
 
@@ -74,14 +75,30 @@ python -m bench.cli run pipeline.all -- --input-dir <image-dir> --cases stack_me
 python -m bench.cli run pipeline.all -- --input-dir <image-dir> --repeat 3
 ```
 
-如果要强制禁用 custom-op compiled/CUDA 路径，测试 fallback 口径：
+`pipeline.workflow` 默认只需要用 `auto` 跑完整生产 DAG。`cpu` / `numpy`
+用于少量代表性 workflow 的 fallback 集成验证，不建议把完整 workflow case
+矩阵在三个 backend preference 下重复运行。详细后端性能对比放在
+`pipeline.compute`：
 
 ```bash
-python -m bench.cli run pipeline.all -- --input-dir <image-dir> --backend numpy
+python -m bench.cli run pipeline.compute -- --input-dir <image-dir>
+python -m bench.cli run pipeline.compute -- --input-dir <image-dir> --backend cpu
 python -m bench.cli run pipeline.compute -- --input-dir <image-dir> --backend numpy
+python -m bench.cli run pipeline.workflow -- --input-dir <image-dir> --cases stack_mean --backend numpy
 ```
 
 `--backend` 是 `pipeline.all` / `pipeline.workflow` / `pipeline.compute` 的参数。
+它表达 requested backend preference：
+
+- `auto`：默认生产 dispatch；每个 case 可能实际使用 CUDA、OpenMP、OpenCV
+  或 NumPy，不能把报告列名写成 “CUDA”；
+- `cpu`：禁用 CUDA，但保留 compiled CPU/OpenMP；
+- `numpy`：强制 custom-op 走 NumPy fallback。
+
+复合计算路径可能依次调用多个 logical op，也可能发生运行时 fallback，因此
+pipeline report 不伪造单一的 `actual_backend`。需要确认具体 kernel 命中时，
+使用对应 focused benchmark 或 `HNW_CUSTOM_OPS_DEBUG=1`。
+
 `pipeline.alignment` 没有这个参数；它直接走生产 wrapper 的默认选择。如果需要临时禁用
 custom-op，可以在命令外设置 `HNW_CUSTOM_OPS_FALLBACK=numpy`。
 
@@ -122,8 +139,9 @@ python -m bench.cli run pipeline.alignment -- --input-mode synthetic --frames 10
 | `calibration_sigma_clip` / `calibration_huber_mean` | `calibration_stack.meta.yaml` 主帧迭代叠加 |
 | `sky_ground_mean` | `sky_ground_stack.meta.yaml`，生成临时 sky/ground mask；需真实星点或足够大的 synthetic 输入 |
 
-`pipeline.compute` 是独立生产计算路径总览。这些 case 直接调用生产组件或
-custom-op wrapper；`stack_*` 不消费对齐输出。终端只打印每条路径的
+`pipeline.compute` 是独立生产计算路径总览，也是后端性能对比入口。这些 case
+直接调用生产组件或 custom-op wrapper，不经过 DAG engine；`stack_*` 不消费
+对齐输出。默认不传 `--backend` 时使用生产 `auto` dispatch。终端只打印每条路径的
 `mean/min/max`，详细阶段和输出信息保留在 JSON report 中。当前 case：
 
 | case | 覆盖路径 |
@@ -291,11 +309,11 @@ python -m bench.data_tools.generate_starfield_dataset --name align_u16_32f --fra
 
 1. `python -m bench.cli run pipeline.all -- --input-dir <image-dir>`
    先看真实 YAML/DAG workflow 在本机的一次端到端耗时。默认后端是 `auto`，
-   会按生产 wrapper 选择 compiled/CUDA/CPU fallback；需要禁用 custom-op
-   时加 `--backend numpy`。
+   会按生产 wrapper 选择 backend。`cpu` / `numpy` 只用于少量代表性 fallback
+   集成 smoke，不作为三后端完整性能矩阵。
 2. `python -m bench.cli run pipeline.compute -- --input-dir <image-dir>`
-   再看不经过 DAG engine 的代表性生产计算路径，便于区分 engine workflow
-   开销和核心计算路径耗时。
+   再看不经过 DAG engine 的代表性生产计算路径。默认 `auto` 是生产基线；
+   需要详细比较时分别加 `--backend cpu`、`--backend numpy`。
 3. `python -m bench.cli run pipeline.alignment -- --input-dir <image-dir> --method all`
    单独确认对齐链路的 `homography` 和 `camera_model` 两条路径。
 4. `python -m bench.cpu.kernels`

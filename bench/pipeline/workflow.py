@@ -3,7 +3,10 @@
 This suite intentionally calls the engine entry point instead of individual
 component helpers. It measures meta/flatten/preflight/runtime plan/executor for
 shipped stacker DAG workflows. Input image loading is done before timing so the
-reported totals focus on engine compute behavior, not file I/O.
+reported totals focus on engine compute behavior, not file I/O. The default
+``auto`` backend preference is the production integration benchmark. ``cpu``
+and ``numpy`` are intended for focused fallback validation rather than a full
+backend performance matrix.
 """
 
 from __future__ import annotations
@@ -484,7 +487,12 @@ def _time_workflow(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Benchmark shipped YAML/DAG workflows end to end. Auto is the "
+            "production default; cpu and numpy are fallback integration checks."
+        )
+    )
     parser.add_argument("--frames", type=int, default=10)
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=1024)
@@ -512,14 +520,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         dest="backend",
-        choices=["auto", "numpy"],
+        choices=["auto", "cpu", "numpy"],
         default="auto",
-        help="Use production backend selection or force numpy custom-op fallbacks.",
+        help=(
+            "Backend preference for DAG integration: auto follows production "
+            "dispatch (default); cpu disables CUDA; numpy forces custom-op "
+            "fallbacks. Use pipeline.compute for detailed backend comparisons."
+        ),
     )
     parser.add_argument(
         "--custom-op-backend",
         dest="backend",
-        choices=["auto", "numpy"],
+        choices=["auto", "cpu", "numpy"],
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--warmup", type=int, default=0)
@@ -604,6 +616,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
         return {
             "suite": SUITE_ID,
+            "benchmark_scope": "dag_workflow_end_to_end",
             "env": collect_env_info(),
             "custom_ops": custom_ops_build_info(),
             "config": {
@@ -618,6 +631,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "cases": requested_cases,
                 "buffer_mode": args.buffer_mode,
                 "backend": args.backend,
+                "backend_preference": args.backend,
                 "warmup": args.warmup,
                 "repeat": args.repeat,
                 "log_level": args.log_level,
