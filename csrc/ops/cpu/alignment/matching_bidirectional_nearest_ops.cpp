@@ -6,6 +6,7 @@
 
 #include <pybind11/numpy.h>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -23,6 +24,7 @@ struct BestCandidate {
 };
 
 constexpr long double MIN_OPENMP_SCALAR_PRODUCTS = 20'000'000.0L;
+constexpr ssize_t ROW_BLOCK_SIZE = 16;
 
 py::object matching_cosine_bidirectional_nearest_cpu_impl(const FloatArray& features1,
                                                           const FloatArray& features2) {
@@ -68,6 +70,9 @@ py::object matching_cosine_bidirectional_nearest_cpu_impl(const FloatArray& feat
         for (ssize_t i = 0; i < n1; ++i) {
             double squared_norm = 0.0;
             const double* feature = f1 + i * dim;
+#if HNW_ENABLE_OMP_SIMD || !defined(_MSC_VER)
+#pragma omp simd reduction(+ : squared_norm)
+#endif
             for (ssize_t k = 0; k < dim; ++k) {
                 squared_norm += feature[k] * feature[k];
             }
@@ -80,6 +85,9 @@ py::object matching_cosine_bidirectional_nearest_cpu_impl(const FloatArray& feat
         for (ssize_t j = 0; j < n2; ++j) {
             double squared_norm = 0.0;
             const double* feature = f2 + j * dim;
+#if HNW_ENABLE_OMP_SIMD || !defined(_MSC_VER)
+#pragma omp simd reduction(+ : squared_norm)
+#endif
             for (ssize_t k = 0; k < dim; ++k) {
                 squared_norm += feature[k] * feature[k];
             }
@@ -99,33 +107,46 @@ py::object matching_cosine_bidirectional_nearest_cpu_impl(const FloatArray& feat
             {
                 std::vector<BestCandidate> local_column_best(static_cast<size_t>(n2));
 #pragma omp for schedule(static)
-                for (ssize_t i = 0; i < n1; ++i) {
-                    BestCandidate row_best;
-                    const double* feature1 = f1 + i * dim;
+                for (ssize_t block_start = 0; block_start < n1; block_start += ROW_BLOCK_SIZE) {
+                    const ssize_t block_size =
+                        n1 - block_start < ROW_BLOCK_SIZE ? n1 - block_start : ROW_BLOCK_SIZE;
+                    std::array<BestCandidate, ROW_BLOCK_SIZE> row_bests;
                     for (ssize_t j = 0; j < n2; ++j) {
                         const double* feature2 = f2 + j * dim;
-                        double dot = 0.0;
-                        for (ssize_t k = 0; k < dim; ++k) {
-                            dot += feature1[k] * feature2[k];
+                        for (ssize_t row_offset = 0; row_offset < block_size; ++row_offset) {
+                            const ssize_t i = block_start + row_offset;
+                            const double* feature1 = f1 + i * dim;
+                            double dot = 0.0;
+#if HNW_ENABLE_OMP_SIMD || !defined(_MSC_VER)
+#pragma omp simd reduction(+ : dot)
+#endif
+                            for (ssize_t k = 0; k < dim; ++k) {
+                                dot += feature1[k] * feature2[k];
+                            }
+                            const double distance = 1.0 - dot / (norms1[static_cast<size_t>(i)] *
+                                                                 norms2[static_cast<size_t>(j)]);
+                            if (!std::isfinite(distance)) {
+                                ambiguous = 1;
+                                continue;
+                            }
+                            BestCandidate& row_best = row_bests[static_cast<size_t>(row_offset)];
+                            hnw::matching::update_best(
+                                row_best.distance, row_best.index, row_best.tied, distance,
+                                static_cast<int64_t>(j), static_cast<int64_t>(dim));
+                            BestCandidate& column = local_column_best[static_cast<size_t>(j)];
+                            hnw::matching::update_best(column.distance, column.index, column.tied,
+                                                       distance, static_cast<int64_t>(i),
+                                                       static_cast<int64_t>(dim));
                         }
-                        const double distance = 1.0 - dot / (norms1[static_cast<size_t>(i)] *
-                                                             norms2[static_cast<size_t>(j)]);
-                        if (!std::isfinite(distance)) {
-                            ambiguous = 1;
-                            continue;
-                        }
-                        hnw::matching::update_best(row_best.distance, row_best.index, row_best.tied,
-                                                   distance, static_cast<int64_t>(j),
-                                                   static_cast<int64_t>(dim));
-                        BestCandidate& column = local_column_best[static_cast<size_t>(j)];
-                        hnw::matching::update_best(column.distance, column.index, column.tied,
-                                                   distance, static_cast<int64_t>(i),
-                                                   static_cast<int64_t>(dim));
                     }
-                    row_idx[i] = row_best.index;
-                    row_dist[i] = row_best.distance;
-                    if (row_best.index < 0 || row_best.tied) {
-                        ambiguous = 1;
+                    for (ssize_t row_offset = 0; row_offset < block_size; ++row_offset) {
+                        const ssize_t i = block_start + row_offset;
+                        const BestCandidate& row_best = row_bests[static_cast<size_t>(row_offset)];
+                        row_idx[i] = row_best.index;
+                        row_dist[i] = row_best.distance;
+                        if (row_best.index < 0 || row_best.tied) {
+                            ambiguous = 1;
+                        }
                     }
                 }
 #pragma omp critical
@@ -146,6 +167,9 @@ py::object matching_cosine_bidirectional_nearest_cpu_impl(const FloatArray& feat
                 for (ssize_t j = 0; j < n2; ++j) {
                     const double* feature2 = f2 + j * dim;
                     double dot = 0.0;
+#if HNW_ENABLE_OMP_SIMD || !defined(_MSC_VER)
+#pragma omp simd reduction(+ : dot)
+#endif
                     for (ssize_t k = 0; k < dim; ++k) {
                         dot += feature1[k] * feature2[k];
                     }
