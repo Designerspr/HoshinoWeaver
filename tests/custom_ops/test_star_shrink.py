@@ -449,6 +449,33 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
         )
         np.testing.assert_array_equal(got, expected)
 
+    def test_star_shrink_detect_mask_rgb_large_kernel_can_force_numpy_fallback(
+        self,
+    ) -> None:
+        gray = np.full((17, 19), 40, dtype=np.uint8)
+        gray[7:10, 8:11] = 255
+        image = np.repeat(gray[..., np.newaxis], 3, axis=2)
+
+        with mock.patch.dict(
+            "os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"}, clear=False
+        ):
+            with mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_detect_mask_compiled",
+                side_effect=AssertionError("native backend should not be called"),
+            ):
+                star_shrink_ops._select_star_shrink_detect_mask_backend.cache_clear()
+                got = star_shrink_detect_mask(
+                    image,
+                    ksize=13,
+                    threshold_ratio=1.0,
+                    open_ksize=3,
+                    dilate_ksize=0,
+                )
+
+        self.assertEqual(got.shape, image.shape[:2])
+        self.assertEqual(got.dtype, np.uint8)
+
     def test_star_shrink_detect_mask_cpu_backend_error_propagates(self) -> None:
         image = np.arange(6 * 7, dtype=np.uint8).reshape(6, 7)
         candidate = backend_registry.BackendCandidate(

@@ -8,7 +8,7 @@ import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
 
-from hoshicore._custom_op import median_filter_2d, wavelet_dec_rec
+from hoshicore._custom_op import median_star_mask, wavelet_dec_rec
 from hoshicore._custom_op._dispatch import (CustomOpResourceExhaustedError,
                                             CustomOpUnavailableError)
 from hoshicore._custom_op.ops.detection import (
@@ -144,7 +144,7 @@ def _gray_u16_for_detection(img: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(gray_u16)
 
 
-def detect_starmask_by_threshold_with_response(
+def _detect_starmask_by_threshold_details(
     img: np.ndarray,
     ksize: int = 13,
     med_algo: str = "median",
@@ -152,8 +152,8 @@ def detect_starmask_by_threshold_with_response(
     open_ksize: int = 3,
     dilate_ksize: int = 0,
     mask: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return a uint8 star mask and normalized float32 signed residual.
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return the star mask, signed residual, and threshold used for it.
 
     Integer inputs are converted to a uint16 working image. Floating-point
     inputs must contain finite values in [0, 1] and are quantized to that same
@@ -161,6 +161,27 @@ def detect_starmask_by_threshold_with_response(
     intensity units and may contain negative values.
     """
     started_at = perf_counter()
+    if med_algo == "median" and ksize > 5:
+        gray_u16 = _gray_u16_for_detection(img)
+        star_mask, response, threshold = median_star_mask(
+            gray_u16,
+            median_ksize=ksize,
+            threshold_ratio=threshold_ratio,
+            open_ksize=open_ksize,
+            dilate_ksize=dilate_ksize,
+            mask=mask,
+        )
+        finished_at = perf_counter()
+        logger.debug(
+            "Star-mask timing: backend=median_star_mask ksize={} total={:.3f}s "
+            "threshold={:.8f} foreground={}",
+            ksize,
+            finished_at - started_at,
+            threshold,
+            int(np.count_nonzero(star_mask)),
+        )
+        return star_mask, response, float(threshold)
+
     gray_u16 = _gray_u16_for_detection(img)
     gray = gray_u16.astype(np.float32) / np.float32(65535.0)
     gray_at = perf_counter()
@@ -182,8 +203,7 @@ def detect_starmask_by_threshold_with_response(
             background_backend = "cv2.medianBlur"
             bg_u16 = cv2.medianBlur(gray_u16, ksize=ksize)
         else:
-            background_backend = "median_filter_2d"
-            bg_u16 = median_filter_2d(gray_u16, ksize)
+            raise AssertionError("large median kernels must use median_star_mask")
         # Promote both operands before subtraction. Subtracting uint16 arrays
         # directly would wrap negative residuals around to large positives.
         diff = (gray_u16.astype(np.float32) - bg_u16.astype(np.float32))
@@ -234,7 +254,29 @@ def detect_starmask_by_threshold_with_response(
         finished_at - started_at,
         int(np.count_nonzero(star_mask)),
     )
-    return star_mask, diff
+    return star_mask, diff, float(threshold)
+
+
+def detect_starmask_by_threshold_with_response(
+    img: np.ndarray,
+    ksize: int = 13,
+    med_algo: str = "median",
+    threshold_ratio: int | float = 5,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+    mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a uint8 star mask and normalized float32 signed residual."""
+    star_mask, response, _ = _detect_starmask_by_threshold_details(
+        img,
+        ksize=ksize,
+        med_algo=med_algo,
+        threshold_ratio=threshold_ratio,
+        open_ksize=open_ksize,
+        dilate_ksize=dilate_ksize,
+        mask=mask,
+    )
+    return star_mask, response
 
 
 def _find_star_contours(bw: NDArray[np.uint8]) -> list[NDArray[np.int32]]:
@@ -445,7 +487,7 @@ def detect_star_points_median_detailed(
     if min_area < 0:
         raise ValueError("min_area must be non-negative")
 
-    star_mask, response = detect_starmask_by_threshold_with_response(
+    star_mask, response, threshold = _detect_starmask_by_threshold_details(
         image,
         ksize=median_ksize,
         med_algo="median",
@@ -453,9 +495,6 @@ def detect_star_points_median_detailed(
         open_ksize=open_ksize,
         mask=mask,
     )
-    valid_pixel_mask = (np.ones(image.shape, dtype=bool)
-                        if mask is None else np.asarray(mask) > 0)
-    threshold = float(np.std(response[valid_pixel_mask]) * threshold_ratio)
     bw = star_mask * np.uint8(255)
     contours, _ = cv2.findContours(bw, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
     contours = [contour for contour in contours if len(contour) > 5]

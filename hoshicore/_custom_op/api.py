@@ -10,7 +10,10 @@ from hoshicore._custom_op.ops.calibration import (
     calibration_divide,
     calibration_subtract,
 )
-from hoshicore._custom_op.ops.detection import star_detect_fused_pixel_components
+from hoshicore._custom_op.ops.detection import (
+    median_star_mask,
+    star_detect_fused_pixel_components,
+)
 from hoshicore._custom_op.ops.fgp import (
     fgp_accumulate,
     fgp_masked_mean_merge,
@@ -62,6 +65,7 @@ __all__ = [
     "matching_cosine_bidirectional_nearest",
     "median_filter_2d",
     "median_reduce_chunk",
+    "median_star_mask",
     "noise_equalization_params",
     "noise_fill_local_mean",
     "sigma_clip_fused_chunk",

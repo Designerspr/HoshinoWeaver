@@ -37,7 +37,119 @@ def _threshold_morph_reference(
 class TestStarDetectCustomOps(unittest.TestCase):
     def tearDown(self) -> None:
         detection_ops._load_compiled_module_result.cache_clear()
+        detection_ops._select_median_star_mask_backend.cache_clear()
         detection_ops._select_star_detect_fused_pixel_components_backend.cache_clear()
+
+    def test_median_star_mask_backend_registered(self) -> None:
+        candidates = registered_backend_candidates("median_star_mask")
+        self.assertTrue(
+            any(candidate.kernel_name == "median_star_mask_cpu"
+                and candidate.backend == "openmp_cpu"
+                for candidate in candidates))
+
+    def test_median_star_mask_cpu_matches_numpy(self) -> None:
+        rng = np.random.default_rng(19)
+        for dtype in (np.uint8, np.uint16, np.float32, np.float64):
+            with self.subTest(dtype=np.dtype(dtype).name):
+                if np.issubdtype(dtype, np.integer):
+                    image = rng.integers(
+                        0,
+                        np.iinfo(dtype).max + 1,
+                        size=(37, 41),
+                        dtype=dtype,
+                    )
+                else:
+                    image = rng.random((37, 41)).astype(dtype)
+                mask = rng.random(image.shape) > 0.2
+                expected = detection_ops.median_star_mask_numpy(
+                    image,
+                    median_ksize=13,
+                    threshold_ratio=1.2,
+                    open_ksize=3,
+                    dilate_ksize=3,
+                    mask=mask,
+                )
+                got = detection_ops.median_star_mask_cpu_compiled(
+                    image,
+                    median_ksize=13,
+                    threshold_ratio=1.2,
+                    open_ksize=3,
+                    dilate_ksize=3,
+                    mask=mask,
+                )
+
+                np.testing.assert_array_equal(got[0], expected[0])
+                np.testing.assert_array_equal(got[1], expected[1])
+                self.assertAlmostEqual(got[2], expected[2], places=7)
+
+    def test_median_star_mask_large_mask_decisions_match_numpy(self) -> None:
+        rng = np.random.default_rng(41)
+        image = rng.random((257, 263), dtype=np.float32)
+        image[::17, ::19] = 1.0
+
+        expected = detection_ops.median_star_mask_numpy(image)
+        got = detection_ops.median_star_mask_cpu_compiled(image)
+
+        np.testing.assert_array_equal(got[0], expected[0])
+        np.testing.assert_array_equal(got[1], expected[1])
+        np.testing.assert_allclose(got[2], expected[2], rtol=5e-6, atol=1e-10)
+
+    def test_median_star_mask_can_force_numpy_fallback(self) -> None:
+        image = np.arange(31 * 33, dtype=np.uint16).reshape(31, 33)
+        expected = detection_ops.median_star_mask_numpy(image)
+
+        with mock.patch.dict(
+                "os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "numpy"},
+                clear=False):
+            detection_ops._select_median_star_mask_backend.cache_clear()
+            with mock.patch.object(
+                    detection_ops,
+                    "median_star_mask_cpu_compiled",
+                    side_effect=AssertionError("compiled backend must not run")):
+                got = detection_ops.median_star_mask(image)
+
+        np.testing.assert_array_equal(got[0], expected[0])
+        np.testing.assert_array_equal(got[1], expected[1])
+        self.assertEqual(got[2], expected[2])
+
+    def test_norma_large_median_routes_through_fused_mask(self) -> None:
+        image = np.linspace(0.0, 1.0, num=31 * 33, dtype=np.float64).reshape(
+            31, 33)
+        expected_mask = np.zeros(image.shape, dtype=np.uint8)
+        expected_response = np.zeros(image.shape, dtype=np.float32)
+
+        with mock.patch.object(
+                star_detection,
+                "median_star_mask",
+                return_value=(expected_mask, expected_response, 0.125)) as fused:
+            got = star_detection.detect_starmask_by_threshold_with_response(
+                image,
+                ksize=13,
+                threshold_ratio=1.5,
+                open_ksize=3,
+                dilate_ksize=5,
+            )
+
+        fused.assert_called_once()
+        args, kwargs = fused.call_args
+        np.testing.assert_array_equal(
+            args[0],
+            np.rint(image.astype(np.float32) * np.float32(65535.0)).astype(
+                np.uint16
+            ),
+        )
+        self.assertEqual(
+            kwargs,
+            {
+                "median_ksize": 13,
+                "threshold_ratio": 1.5,
+                "open_ksize": 3,
+                "dilate_ksize": 5,
+                "mask": None,
+            },
+        )
+        self.assertIs(got[0], expected_mask)
+        self.assertIs(got[1], expected_response)
 
     def test_star_detect_threshold_morph_numpy_matches_reference(self) -> None:
         rng = np.random.default_rng(0)
@@ -514,21 +626,25 @@ class TestStarDetectCustomOps(unittest.TestCase):
             volumes=np.empty((0,)),
         )
         cpu_impl = detection_ops._star_detect_fused_pixel_components_cpu_validated
-        with mock.patch.object(
-                detection_ops,
-                "_star_detect_fused_pixel_components_cpu_validated",
-                wraps=cpu_impl,
-        ) as cpu_backend:
+        with mock.patch.dict(
+                "os.environ", {"HNW_CUSTOM_OPS_FALLBACK": "auto"},
+                clear=False):
+            detection_ops._select_star_detect_fused_pixel_components_backend.cache_clear()
             with mock.patch.object(
-                star_detection,
-                "_detect_star_points_contour",
-                return_value=expected,
-            ) as contour:
-                got = star_detection.detect_star_points(
-                    image,
-                    resize_length=10000,
-                    min_star_points=0,
-                )
+                    detection_ops,
+                    "_star_detect_fused_pixel_components_cpu_validated",
+                    wraps=cpu_impl,
+            ) as cpu_backend:
+                with mock.patch.object(
+                        star_detection,
+                        "_detect_star_points_contour",
+                        return_value=expected,
+                ) as contour:
+                    got = star_detection.detect_star_points(
+                        image,
+                        resize_length=10000,
+                        min_star_points=0,
+                    )
 
         cpu_backend.assert_called_once()
         contour.assert_called_once()

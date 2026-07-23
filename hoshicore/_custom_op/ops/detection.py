@@ -23,6 +23,7 @@ from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavaila
 from hoshicore._custom_op.backend_registry import select_backend as _select_backend
 from hoshicore._custom_op.cuda_memory import cuda_memory_admission
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
+from hoshicore._custom_op.ops.filter import median_filter_2d_numpy as _median_filter_2d_numpy
 from hoshicore._custom_op.ops.wavelet import _wavelet_level
 
 
@@ -31,6 +32,171 @@ _debug_log = partial(debug_log, "detection")
 
 class StarDetectCapacityError(RuntimeError):
     """Raised when the selected connected-component algorithm exceeds its limits."""
+
+
+def _validate_median_star_mask_inputs(
+    image: np.ndarray,
+    mask: np.ndarray | None,
+) -> tuple[np.ndarray, NDArray[np.uint8] | None]:
+    image_arr = np.asarray(image)
+    if image_arr.ndim != 2 or image_arr.shape[0] <= 0 or image_arr.shape[1] <= 0:
+        raise ValueError("median_star_mask: image must be a non-empty 2D array")
+    if image_arr.dtype not in (np.uint8, np.uint16, np.float32, np.float64):
+        raise TypeError(
+            "median_star_mask: expected uint8, uint16, float32, or float64 image")
+    if image_arr.dtype.kind == "f":
+        if not np.all(np.isfinite(image_arr)):
+            raise ValueError("median_star_mask: floating-point image must be finite")
+        if image_arr.size and (
+            float(image_arr.min()) < 0.0 or float(image_arr.max()) > 1.0
+        ):
+            raise ValueError(
+                "median_star_mask: floating-point image must be normalized to [0, 1]")
+    image_arr = np.ascontiguousarray(image_arr)
+
+    if mask is None:
+        return image_arr, None
+    mask_arr = np.asarray(mask)
+    if mask_arr.shape != image_arr.shape:
+        raise ValueError("median_star_mask: mask shape must match image")
+    mask_u8 = np.ascontiguousarray(mask_arr > 0, dtype=np.uint8)
+    if not np.any(mask_u8):
+        raise ValueError("median_star_mask: mask selects no pixels")
+    return image_arr, mask_u8
+
+
+def _validate_median_star_mask_params(
+    median_ksize: int,
+    threshold_ratio: float,
+    open_ksize: int,
+    dilate_ksize: int,
+) -> tuple[int, float, int, int]:
+    values = {
+        "median_ksize": median_ksize,
+        "open_ksize": open_ksize,
+        "dilate_ksize": dilate_ksize,
+    }
+    for name, value in values.items():
+        if not isinstance(value, (int, np.integer)):
+            raise TypeError(f"median_star_mask: {name} must be an int")
+        if name == "median_ksize":
+            valid = value > 0 and value % 2 == 1
+        else:
+            valid = value == 0 or (value > 0 and value % 2 == 1)
+        if not valid:
+            requirement = (
+                "a positive odd integer"
+                if name == "median_ksize"
+                else "zero or a positive odd integer"
+            )
+            raise ValueError(f"median_star_mask: {name} must be {requirement}")
+    ratio = float(threshold_ratio)
+    if not np.isfinite(ratio):
+        raise ValueError("median_star_mask: threshold_ratio must be finite")
+    return int(median_ksize), ratio, int(open_ksize), int(dilate_ksize)
+
+
+def _median_working_u16(image: np.ndarray) -> NDArray[np.uint16]:
+    if image.dtype == np.uint16:
+        return image
+    if image.dtype == np.uint8:
+        return image.astype(np.uint16) * np.uint16(257)
+    image_f32 = image.astype(np.float32, copy=False)
+    return np.rint(image_f32 * np.float32(65535.0)).astype(np.uint16)
+
+
+def median_star_mask_numpy(
+    image: np.ndarray,
+    median_ksize: int = 13,
+    threshold_ratio: float = 1.0,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+    mask: np.ndarray | None = None,
+) -> tuple[NDArray[np.uint8], NDArray[np.float32], float]:
+    image_arr, mask_u8 = _validate_median_star_mask_inputs(image, mask)
+    median_ksize, threshold_ratio, open_ksize, dilate_ksize = (
+        _validate_median_star_mask_params(
+            median_ksize, threshold_ratio, open_ksize, dilate_ksize)
+    )
+    working = _median_working_u16(image_arr)
+    background = _median_filter_2d_numpy(working, median_ksize)
+    response = (
+        working.astype(np.float32) - background.astype(np.float32)
+    ) / np.float32(65535.0)
+    valid = np.ones(response.shape, dtype=bool) if mask_u8 is None else mask_u8 > 0
+    threshold = float(np.std(response[valid]) * threshold_ratio)
+    star_mask = np.logical_and(response > threshold, valid).astype(np.uint8)
+    if open_ksize > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_CROSS, (open_ksize, open_ksize))
+        star_mask = cv2.morphologyEx(star_mask, cv2.MORPH_OPEN, kernel)
+    if dilate_ksize > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_CROSS, (dilate_ksize, dilate_ksize))
+        star_mask = cv2.morphologyEx(star_mask, cv2.MORPH_DILATE, kernel)
+    return star_mask, response, threshold
+
+
+def median_star_mask_cpu_compiled(
+    image: np.ndarray,
+    median_ksize: int = 13,
+    threshold_ratio: float = 1.0,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+    mask: np.ndarray | None = None,
+) -> tuple[NDArray[np.uint8], NDArray[np.float32], float]:
+    image_arr, mask_u8 = _validate_median_star_mask_inputs(image, mask)
+    median_ksize, threshold_ratio, open_ksize, dilate_ksize = (
+        _validate_median_star_mask_params(
+            median_ksize, threshold_ratio, open_ksize, dilate_ksize)
+    )
+    module, _ = _load_compiled_module_result()
+    if module is None or not hasattr(module, "median_star_mask_cpu"):
+        raise RuntimeError("compiled median_star_mask CPU backend is unavailable")
+    _apply_compiled_threads("median_star_mask", image_arr)
+    star_mask, response, threshold = module.median_star_mask_cpu(
+        image_arr,
+        median_ksize,
+        threshold_ratio,
+        open_ksize,
+        dilate_ksize,
+        mask_u8,
+    )
+    return star_mask, response, float(threshold)
+
+
+@lru_cache(maxsize=3)
+def _select_median_star_mask_backend(preference: str) -> BackendSelection:
+    return _select_backend(
+        "median_star_mask",
+        preference,
+        load_module=_load_compiled_module_result,
+    )
+
+
+def median_star_mask(
+    image: np.ndarray,
+    median_ksize: int = 13,
+    threshold_ratio: float = 1.0,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+    mask: np.ndarray | None = None,
+) -> tuple[NDArray[np.uint8], NDArray[np.float32], float]:
+    preference = _fallback_preference()
+    selection = _select_median_star_mask_backend(preference)
+    backend = (
+        median_star_mask_cpu_compiled
+        if selection.native
+        else median_star_mask_numpy
+    )
+    return backend(
+        image,
+        median_ksize=median_ksize,
+        threshold_ratio=threshold_ratio,
+        open_ksize=open_ksize,
+        dilate_ksize=dilate_ksize,
+        mask=mask,
+    )
 
 
 def _is_native_star_detect_capacity_error(exc: RuntimeError) -> bool:

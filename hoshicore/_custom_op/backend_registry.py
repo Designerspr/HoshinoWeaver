@@ -117,7 +117,10 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
     BackendCandidate("calibration_divide", "openmp_cpu", "calibration_divide"),
     BackendCandidate("fgp_accumulate", "openmp_cpu", "fgp_accumulate"),
     BackendCandidate("fgp_masked_mean_merge", "openmp_cpu", "fgp_masked_mean_merge"),
+    # Public primitive and fused-mask benchmark baseline; the production
+    # median detector consumes median_star_mask instead.
     BackendCandidate("median_filter_2d", "openmp_cpu", "median_filter_2d"),
+    BackendCandidate("median_star_mask", "openmp_cpu", "median_star_mask_cpu"),
     BackendCandidate("huber_weighted_accumulate", "openmp_cpu", "huber_weighted_accumulate"),
     BackendCandidate("sigma_clip_fused_merge", "openmp_cpu", "sigma_clip_fused_merge"),
     BackendCandidate(
