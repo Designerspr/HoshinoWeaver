@@ -150,10 +150,8 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         camera = CameraModel(intrinsics=intrinsics)
         image = np.arange(8 * 12, dtype=np.uint16).reshape(8, 12)
 
-        # Force both calls through the pure-Python coordinate-map path so this
-        # exercises map_scale's own semantics rather than whether the fused
-        # custom op happens to short-circuit the call. The fused op does not
-        # accept map_scale yet; once it does, this bypass can be dropped.
+        # Isolate the generic fallback: supported built-in camera pairs prefer
+        # the exact fused path even when the fallback map scale is below 1.
         with mock.patch.object(
                 CameraModel,
                 "_project_image_from_camera_fused",
@@ -1423,6 +1421,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                         image,
                         (width, height),
                         rotation_dst_to_src=rotation,
+                        map_scale=1.0,
                     )
                     expected = dst_camera.project_image_from_camera(
                         src_camera,

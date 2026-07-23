@@ -439,8 +439,9 @@ class BaseCameraModel(abc.ABC):
 
         ``rotation_dst_to_src`` maps destination camera-local rays into source
         camera-local rays. Identity is used when it is omitted.
-        Linear full-frame remaps use the fused custom op for all supported
-        perspective/fisheye source and destination combinations.
+        Supported perspective/fisheye combinations prefer the exact fused
+        custom op. ``map_scale`` controls the generic coordinate-map fallback
+        used when that native path is unavailable.
         """
         if not 0.0 < map_scale <= 1.0:
             raise ValueError("map_scale must be in (0, 1]")
