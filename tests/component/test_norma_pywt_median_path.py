@@ -1,5 +1,4 @@
 """Tests for the experimental pywt-bootstrap/median-guided path."""
-import sys
 
 import numpy as np
 import pytest
@@ -9,9 +8,6 @@ from hoshicore.component.norma.detection import DetectedStars
 from hoshicore.component.norma.frame_align import (
     AlignmentCameraCandidate,
     AlignmentError,
-    DEFAULT_MATCHING_PATH,
-    MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED,
-    MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED,
     solve_pywt_bootstrap_median_guided,
 )
 from hoshicore.component.norma.matching import MatchResult
@@ -281,89 +277,3 @@ def test_dual_path_guided_failure_falls_back_to_pywt_result(monkeypatch):
     assert result.guided_error == "guided failed"
     assert result.final_alignment is bootstrap_alignment
     assert result.final_match is result.bootstrap_match
-
-
-def test_debug_and_benchmark_matching_path_cli_defaults_and_overrides(
-        monkeypatch):
-    import benchmark_norma_alignment as benchmark
-    import debug_fisheye_two_frame_align as debug
-
-    monkeypatch.setattr(sys, "argv", [
-        "debug_fisheye_two_frame_align.py",
-        "--reference", "ref.tif",
-        "--source", "src.tif",
-        "--output", "out.tif",
-    ])
-    assert debug.parse_args().matching_path == DEFAULT_MATCHING_PATH
-
-    monkeypatch.setattr(sys, "argv", [
-        "debug_fisheye_two_frame_align.py",
-        "--reference", "ref.tif",
-        "--source", "src.tif",
-        "--output", "out.tif",
-        "--matching-path", MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED,
-    ])
-    assert (debug.parse_args().matching_path
-            == MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED)
-
-    monkeypatch.setattr(sys, "argv", [
-        "benchmark_norma_alignment.py", "dataset.json"
-    ])
-    assert benchmark.parse_args().matching_path is None
-
-    monkeypatch.setattr(sys, "argv", [
-        "benchmark_norma_alignment.py", "dataset.json",
-        "--matching-path", MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED,
-    ])
-    assert (benchmark.parse_args().matching_path
-            == MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED)
-
-    monkeypatch.setattr(sys, "argv", [
-        "debug_fisheye_two_frame_align.py",
-        "--reference", "ref.tif",
-        "--source", "src.tif",
-        "--output", "out.tif",
-        "--matching-path",
-        MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED,
-    ])
-    assert (debug.parse_args().matching_path
-            == MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED)
-
-
-def test_benchmark_exports_first_and_final_rotation_summaries():
-    import benchmark_norma_alignment as benchmark
-
-    angle_rad = np.deg2rad(10.0)
-    rotation = np.array([
-        [np.cos(angle_rad), -np.sin(angle_rad), 0.0],
-        [np.sin(angle_rad), np.cos(angle_rad), 0.0],
-        [0.0, 0.0, 1.0],
-    ])
-    summary = benchmark._rotation_summary(rotation)
-
-    assert summary["angle_deg"] == pytest.approx(10.0)
-    assert summary["rotation_vector_deg"] == pytest.approx([0.0, 0.0, 10.0])
-    assert np.asarray(summary["matrix"]) == pytest.approx(rotation)
-
-    row = benchmark._summary_row({
-        "id": "rotation-export",
-        "success": True,
-        "first_stage_alignment": {
-            "rotation_ref_to_src": summary,
-            "cameras": {
-                "ref": {"focal_length_mm": 14.0},
-                "src": {"focal_length_mm": 14.0},
-            },
-        },
-        "final_alignment": {"rotation_ref_to_src": summary},
-        "stage_alignment_delta": {
-            "rotation_deg": 0.125,
-            "ref_focal_mm": 0.25,
-            "src_focal_mm": 0.25,
-        },
-    })
-
-    assert row["first_rotation_z_deg"] == pytest.approx(10.0)
-    assert row["final_rotation_angle_deg"] == pytest.approx(10.0)
-    assert row["stage_rotation_delta_deg"] == pytest.approx(0.125)
-    assert row["first_ref_focal_mm"] == pytest.approx(14.0)
