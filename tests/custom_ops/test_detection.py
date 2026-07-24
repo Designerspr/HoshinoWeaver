@@ -413,7 +413,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
 
         candidates = detection_ops.star_detect_fused_pixel_components_compiled_cpu(
             image, None, 1.0, gaussian_ksize=9, sigma=2.0)
-        measured = star_detection._measure_cuda_hybrid_contour_candidates(*candidates)
+        measured = star_detection._measure_native_hybrid_contour_candidates(*candidates)
         got = star_detection._filter_star_candidates(*measured)
         expected = star_detection._detect_star_points_opencv(
             image,
@@ -482,7 +482,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
                     f"CUDA fused pixel-component runtime unavailable: {exc}")
             raise
 
-        measured = star_detection._measure_cuda_hybrid_contour_candidates(*candidates)
+        measured = star_detection._measure_native_hybrid_contour_candidates(*candidates)
         got = star_detection._filter_star_candidates(*measured)
         expected = star_detection._detect_star_points_opencv(
             image,
@@ -501,7 +501,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         nearest = np.min(distances, axis=1)
         self.assertLess(float(np.percentile(nearest, 95)), 1.5)
 
-    def test_detect_star_points_uses_cuda_hybrid_backend_by_default(self) -> None:
+    def test_detect_star_points_uses_native_hybrid_backend_by_default(self) -> None:
         image = np.zeros((16, 16), dtype=np.float64)
         expected = star_detection.DetectedStars(
             positions=np.array([[4.0, 5.0]]),
@@ -511,14 +511,14 @@ class TestStarDetectCustomOps(unittest.TestCase):
         with mock.patch.object(
                 star_detection,
                 "_detect_star_points_native_hybrid",
-                return_value=expected) as cuda_hybrid:
+                return_value=expected) as native_hybrid:
             with mock.patch.object(
                     star_detection,
                     "_detect_star_points_contour") as contour:
                 got = star_detection.detect_star_points(
                     image, min_star_points=0)
 
-        cuda_hybrid.assert_called_once()
+        native_hybrid.assert_called_once()
         contour.assert_not_called()
         self.assertIs(got, expected)
 
@@ -571,7 +571,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         with mock.patch.object(
                 star_detection,
                 "_detect_star_points_native_hybrid",
-                side_effect=star_detection._CudaHybridGeometryMismatch(
+                side_effect=star_detection._NativeHybridGeometryMismatch(
                     "ambiguous mapping")):
             with mock.patch.object(
                     star_detection,
@@ -710,7 +710,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         self.assertEqual(got.positions.shape, (0, 2))
         self.assertEqual(got.volumes.shape, (0,))
 
-    def test_cuda_hybrid_candidate_filter_uses_norma_thresholds(self) -> None:
+    def test_native_hybrid_candidate_filter_uses_norma_thresholds(self) -> None:
         positions = np.arange(24, dtype=np.float64).reshape(12, 2)
         areas = np.arange(1, 13, dtype=np.float64)
         intensities = np.arange(12, 0, -1, dtype=np.float64)
@@ -732,7 +732,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         np.testing.assert_array_equal(
             got.volumes, areas[valid] * intensities[valid])
 
-    def test_cuda_hybrid_contours_map_component_intensities_by_position(self) -> None:
+    def test_native_hybrid_contours_map_component_intensities_by_position(self) -> None:
         binary_mask = np.zeros((64, 64), dtype=np.uint8)
         cv2.circle(binary_mask, (15, 16), 4, 255, -1)
         cv2.circle(binary_mask, (46, 45), 5, 255, -1)
@@ -741,7 +741,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
         component_intensities = np.array([7.0, 3.0], dtype=np.float64)
 
         positions, _, intensities, _ = (
-            star_detection._measure_cuda_hybrid_contour_candidates(
+            star_detection._measure_native_hybrid_contour_candidates(
                 component_positions,
                 component_intensities,
                 binary_mask,
@@ -757,47 +757,47 @@ class TestStarDetectCustomOps(unittest.TestCase):
         np.testing.assert_array_equal(
             intensities, component_intensities[nearest])
 
-    def test_cuda_hybrid_contour_mapping_rejects_duplicate_component(self) -> None:
+    def test_native_hybrid_contour_mapping_rejects_duplicate_component(self) -> None:
         binary_mask = np.zeros((64, 64), dtype=np.uint8)
         cv2.circle(binary_mask, (15, 16), 4, 255, -1)
         cv2.circle(binary_mask, (46, 45), 5, 255, -1)
 
         with self.assertRaisesRegex(
-                star_detection._CudaHybridGeometryMismatch,
+                star_detection._NativeHybridGeometryMismatch,
                 "fewer components"):
-            star_detection._measure_cuda_hybrid_contour_candidates(
+            star_detection._measure_native_hybrid_contour_candidates(
                 np.array([[15.0, 16.0]], dtype=np.float64),
                 np.array([3.0], dtype=np.float64),
                 binary_mask,
             )
 
-    def test_cuda_hybrid_contour_mapping_rejects_non_unique_match(self) -> None:
+    def test_native_hybrid_contour_mapping_rejects_non_unique_match(self) -> None:
         binary_mask = np.zeros((64, 64), dtype=np.uint8)
         cv2.circle(binary_mask, (32, 32), 10, 255, 3)
 
         with self.assertRaisesRegex(
-                star_detection._CudaHybridGeometryMismatch,
+                star_detection._NativeHybridGeometryMismatch,
                 "one-to-one"):
-            star_detection._measure_cuda_hybrid_contour_candidates(
+            star_detection._measure_native_hybrid_contour_candidates(
                 np.array([[32.0, 32.0], [0.0, 0.0]], dtype=np.float64),
                 np.array([3.0, 1.0], dtype=np.float64),
                 binary_mask,
             )
 
-    def test_cuda_hybrid_contour_mapping_rejects_distant_component(self) -> None:
+    def test_native_hybrid_contour_mapping_rejects_distant_component(self) -> None:
         binary_mask = np.zeros((64, 64), dtype=np.uint8)
         cv2.circle(binary_mask, (15, 16), 4, 255, -1)
 
         with self.assertRaisesRegex(
-                star_detection._CudaHybridGeometryMismatch,
+                star_detection._NativeHybridGeometryMismatch,
                 "one-to-one"):
-            star_detection._measure_cuda_hybrid_contour_candidates(
+            star_detection._measure_native_hybrid_contour_candidates(
                 np.array([[20.0, 20.0]], dtype=np.float64),
                 np.array([3.0], dtype=np.float64),
                 binary_mask,
             )
 
-    def test_cuda_hybrid_external_empty_mask_is_not_relaxed(self) -> None:
+    def test_star_detect_cuda_external_empty_mask_is_not_relaxed(self) -> None:
         if not build_info().get("cuda"):
             self.skipTest("CUDA fused pixel-component backend is not built")
         image = np.arange(128 * 128, dtype=np.float64).reshape(128, 128)

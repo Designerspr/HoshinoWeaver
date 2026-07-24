@@ -245,6 +245,10 @@ def wavelet_dec_rec(
     if small.size < MIN_CUDA_WAVELET_PIXELS:
         reconstructed = wavelet_dec_rec_core_numpy(small, level)
         return cv2.resize(reconstructed, (image_arr.shape[1], image_arr.shape[0]))
+    # Mid-size tier: the standalone ``wavelet_dec_rec_cuda_core`` logical op runs
+    # CUDA-or-NumPy and deliberately skips the OpenMP CPU kernel, whose launch
+    # overhead does not pay off at this size. This branch is that op's only
+    # consumer, so the op is reachable-but-internal here, not dead code.
     if small.size < MIN_COMPILED_WAVELET_PIXELS:
         reconstructed = wavelet_dec_rec_core_cuda_or_numpy(small, level)
     else:

@@ -70,9 +70,6 @@ class _NativeHybridGeometryMismatch(RuntimeError):
     pass
 
 
-_CudaHybridGeometryMismatch = _NativeHybridGeometryMismatch
-
-
 def _empty_detected_stars() -> DetectedStars:
     return DetectedStars(
         positions=np.empty((0, 2), dtype=np.float64),
@@ -391,9 +388,6 @@ def _measure_native_hybrid_contour_candidates(
     return positions, areas, intensities, eccentricities
 
 
-_measure_cuda_hybrid_contour_candidates = _measure_native_hybrid_contour_candidates
-
-
 def _detect_star_points_contour(
     img_gray: NDArray,
     mask=None,
@@ -673,11 +667,6 @@ def _detect_star_points_native_hybrid(
     detected = _filter_star_candidates(*candidates)
     logger.debug(f"Final native hybrid star points = {len(detected.positions)}")
     return detected
-
-
-# Compatibility alias for existing benchmark/report tooling. The implementation
-# now supports both CUDA and OpenMP pixel/component backends.
-_detect_star_points_cuda_hybrid = _detect_star_points_native_hybrid
 
 
 def detect_star_points(
