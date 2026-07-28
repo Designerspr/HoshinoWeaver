@@ -9,38 +9,20 @@ from typing import Callable
 import numpy as np
 
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
-from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
-from hoshicore._custom_op.backend_registry import resolve_after_resource_exhausted
-from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
+from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
 from hoshicore._custom_op.backend_registry import select_backend as _select_backend
-from hoshicore._custom_op.cuda_memory import CudaMemoryEstimate
-from hoshicore._custom_op.cuda_memory import cuda_memory_admission
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
+from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
 from hoshicore.component.star_shrink import apply_mask, deringing, morph_shrink_luma
 
 
 _debug_log = partial(debug_log, "star_shrink")
 _SUPPORTED_DTYPES = (np.dtype(np.uint8), np.dtype(np.uint16), np.dtype(np.float32))
 _COMPILED_SUPPORTED_DTYPES = (np.dtype(np.uint8), np.dtype(np.uint16))
-
-
-def _run_admitted_cuda(
-    estimate: CudaMemoryEstimate,
-    kernel: Callable[..., np.ndarray],
-    *args: object,
-) -> np.ndarray:
-    with cuda_memory_admission(estimate) as admission:
-        if not admission.granted:
-            raise CustomOpResourceExhaustedError(
-                f"{estimate.logical_op} skipped CUDA because estimated peak "
-                f"{admission.estimated_peak_bytes} bytes exceeds usable VRAM"
-            )
-        return kernel(*args)
 
 
 def _validate_dog_image(image: np.ndarray, logical_op: str) -> np.ndarray:
@@ -318,28 +300,12 @@ def star_shrink_process(
     try:
         return backend(*kernel_args)
     except RuntimeError as exc:
-        if is_cuda_resource_exhausted_error(exc):
-            fallback_selection = resolve_after_resource_exhausted(
-                "star_shrink_process",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "CUDA backend exhausted resources, falling back to the next "
-                f"backend: {exc}"
-            )
-        else:
-            fallback_selection = resolve_after_runtime_unavailable(
-                "star_shrink_process",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "CUDA backend unavailable at runtime, falling back to the next "
-                f"backend: {exc}"
-            )
+        fallback_selection = resolve_after_cuda_failure(
+            "star_shrink_process",
+            exc,
+            load_module=_load_compiled_module_result,
+            log=_debug_log,
+        )
 
     fallback_name, fallback_backend = _star_shrink_process_backend(
         fallback_selection
@@ -599,28 +565,12 @@ def star_mask_dog(
     try:
         return backend(image, **kernel_kwargs)
     except RuntimeError as exc:
-        if is_cuda_resource_exhausted_error(exc):
-            fallback_selection = resolve_after_resource_exhausted(
-                "star_mask_dog",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "CUDA DoG mask backend exhausted resources, falling back "
-                f"to the next backend: {exc}"
-            )
-        else:
-            fallback_selection = resolve_after_runtime_unavailable(
-                "star_mask_dog",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "CUDA DoG mask backend unavailable at runtime, falling "
-                f"back to the next backend: {exc}"
-            )
+        fallback_selection = resolve_after_cuda_failure(
+            "star_mask_dog",
+            exc,
+            load_module=_load_compiled_module_result,
+            log=_debug_log,
+        )
 
     fallback_name, fallback_backend = _star_mask_dog_backend(fallback_selection)
     if fallback_name == "cuda":
@@ -773,28 +723,12 @@ def star_shrink_dog_process(
                     deringing_ksize=deringing_ksize,
                 )
             except RuntimeError as exc:
-                if is_cuda_resource_exhausted_error(exc):
-                    fallback_selection = resolve_after_resource_exhausted(
-                        "star_shrink_dog_process",
-                        "cuda_host_io",
-                        exc,
-                        load_module=_load_compiled_module_result,
-                    )
-                    _debug_log(
-                        "CUDA DoG shrink backend exhausted resources, using "
-                        f"the composed path: {exc}"
-                    )
-                else:
-                    fallback_selection = resolve_after_runtime_unavailable(
-                        "star_shrink_dog_process",
-                        "cuda_host_io",
-                        exc,
-                        load_module=_load_compiled_module_result,
-                    )
-                    _debug_log(
-                        "CUDA DoG shrink backend unavailable at runtime, using "
-                        f"the composed path: {exc}"
-                    )
+                fallback_selection = resolve_after_cuda_failure(
+                    "star_shrink_dog_process",
+                    exc,
+                    load_module=_load_compiled_module_result,
+                    log=_debug_log,
+                )
                 if fallback_selection.native:
                     raise RuntimeError(
                         "star_shrink_dog_process selected an unsupported native fallback"

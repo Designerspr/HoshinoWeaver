@@ -400,7 +400,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
             ):
                 cpu_fallback = mock.Mock(return_value=expected)
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=backend_registry.BackendSelection(
                         backend_registry.BackendCandidate(
@@ -479,7 +479,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                 ),
             ):
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=backend_registry.BackendSelection(
                         None,
@@ -523,7 +523,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                     side_effect=ValueError("bad CPU fallback input")
                 )
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=backend_registry.BackendSelection(
                         backend_registry.BackendCandidate(
@@ -580,7 +580,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
             ):
                 cpu_fallback = mock.Mock(side_effect=RuntimeError("native CPU bug"))
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=backend_registry.BackendSelection(
                         backend_registry.BackendCandidate(
@@ -722,7 +722,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                 ),
             ):
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=cpu_selection,
                 ) as resource_resolver:

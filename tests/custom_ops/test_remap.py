@@ -6,6 +6,8 @@ import numpy as np
 from hoshicore._custom_op import build_info, camera_model_remap
 from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
+import hoshicore._custom_op.backend_registry as backend_registry
+import hoshicore._custom_op.cuda_memory as cuda_memory
 import hoshicore._custom_op.ops.remap as remap_ops
 import hoshicore.component.norma.types as norma_types
 from hoshicore.component.norma.types import (
@@ -988,7 +990,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 return_value=("cuda", mock.Mock(side_effect=RuntimeError(
                     "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=_cpu_remap_selection()):
                 with mock.patch.object(
@@ -1030,7 +1032,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 return_value=("cuda", mock.Mock(side_effect=RuntimeError(
                     "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=_numpy_remap_selection()):
                 got = camera_model_remap(**kwargs)
@@ -1062,7 +1064,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 return_value=("cuda", mock.Mock(side_effect=RuntimeError(
                     "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=_cpu_remap_selection()):
                 with mock.patch.object(
@@ -1159,7 +1161,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                                                   CustomOpResourceExhaustedError(
                                                       "estimated VRAM is insufficient")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=_cpu_remap_selection()) as resolve:
                 with mock.patch.object(
@@ -1198,7 +1200,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                                                   CustomOpResourceExhaustedError(
                                                       "cudaMalloc output")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=_numpy_remap_selection()):
                 got = camera_model_remap(**kwargs)
@@ -1221,7 +1223,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 "_load_compiled_module_result",
                 return_value=(module, None)):
             with mock.patch.object(
-                    remap_ops,
+                    cuda_memory,
                     "cuda_memory_admission",
                     admission):
                 with self.assertRaisesRegex(

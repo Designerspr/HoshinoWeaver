@@ -721,3 +721,66 @@ class TestBackendRegistry(CustomOpsTestCase):
             )
 
         loader.assert_not_called()
+
+    def test_cuda_failure_resolver_classifies_resource_exhaustion(self) -> None:
+        class Module:
+            def sigma_clip_fused_chunk_cuda(self):
+                return None
+
+            def sigma_clip_fused_chunk(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        log = mock.Mock()
+        selection = backend_registry.resolve_after_cuda_failure(
+            "sigma_clip_fused_chunk",
+            CustomOpResourceExhaustedError("estimated VRAM is insufficient"),
+            load_module=lambda: (Module(), None),
+            log=log,
+        )
+
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(selection.reason_code, "cuda_resource_exhausted")
+        log.assert_called_once()
+        self.assertIn("exhausted resources", log.call_args.args[0])
+
+    def test_cuda_failure_resolver_classifies_runtime_unavailability(self) -> None:
+        class Module:
+            def sigma_clip_fused_chunk_cuda(self):
+                return None
+
+            def sigma_clip_fused_chunk(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": True}
+
+        log = mock.Mock()
+        selection = backend_registry.resolve_after_cuda_failure(
+            "sigma_clip_fused_chunk",
+            RuntimeError("no CUDA-capable device is detected"),
+            load_module=lambda: (Module(), None),
+            log=log,
+        )
+
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(selection.reason_code, "cuda_runtime_unavailable")
+        log.assert_called_once()
+        self.assertIn("unavailable at runtime", log.call_args.args[0])
+
+    def test_cuda_failure_resolver_reraises_unclassified_errors(self) -> None:
+        loader = mock.Mock(side_effect=AssertionError("resolver should not run"))
+        log = mock.Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "illegal memory access"):
+            backend_registry.resolve_after_cuda_failure(
+                "sigma_clip_fused_chunk",
+                RuntimeError("an illegal memory access was encountered"),
+                load_module=loader,
+                log=log,
+            )
+
+        loader.assert_not_called()
+        log.assert_not_called()

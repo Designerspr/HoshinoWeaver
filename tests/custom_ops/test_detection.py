@@ -13,6 +13,8 @@ from hoshicore._custom_op._dispatch import CustomOpUnavailableError
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op.ops import detection as detection_ops
 import hoshicore.component.norma.detection as star_detection
+import hoshicore._custom_op.backend_registry as backend_registry
+import hoshicore._custom_op.cuda_memory as cuda_memory
 
 
 def _is_compiled_backend_unavailable(exc: RuntimeError) -> bool:
@@ -263,7 +265,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
                 return_value=(module, None),
             ):
                 with mock.patch.object(
-                    detection_ops,
+                    cuda_memory,
                     "cuda_memory_admission",
                     return_value=admission,
                 ):
@@ -311,7 +313,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
                     "_star_detect_fused_pixel_components_compiled_validated",
                     side_effect=RuntimeError("no CUDA-capable device is detected")):
                 with mock.patch.object(
-                        detection_ops,
+                        backend_registry,
                         "resolve_after_runtime_unavailable",
                         return_value=cpu_selection):
                     with mock.patch.object(
@@ -395,7 +397,7 @@ class TestStarDetectCustomOps(unittest.TestCase):
                     "_star_detect_fused_pixel_components_compiled_validated",
                     backend):
                 with mock.patch.object(
-                        detection_ops,
+                        backend_registry,
                         "resolve_after_resource_exhausted",
                         return_value=unavailable):
                     with self.assertRaisesRegex(CustomOpUnavailableError, "no CPU backend"):

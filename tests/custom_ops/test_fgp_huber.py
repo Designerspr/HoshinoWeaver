@@ -309,7 +309,7 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
                 ),
             ):
                 with mock.patch.object(
-                    fgp_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=backend_registry.BackendSelection(None, mock.Mock()),
                 ):
@@ -380,7 +380,7 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
                 ),
             ):
                 with mock.patch.object(
-                    fgp_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=backend_registry.BackendSelection(
                         None, mock.Mock())
@@ -424,7 +424,7 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
                 ),
             ):
                 with mock.patch.object(
-                    fgp_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=backend_registry.BackendSelection(
                         None, mock.Mock())
@@ -614,7 +614,7 @@ class TestFgpHuberCustomOps(CustomOpsTestCase):
                     ),
                 ):
                     with mock.patch.object(
-                        fgp_ops,
+                        backend_registry,
                         "resolve_after_resource_exhausted",
                         return_value=backend_registry.BackendSelection(
                             None, mock.Mock()

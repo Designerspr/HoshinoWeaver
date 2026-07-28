@@ -628,6 +628,38 @@ class TestCudaMemoryEstimate(unittest.TestCase):
             with cuda_memory.cuda_memory_admission(_estimate()) as after:
                 self.assertEqual(after.reserved_bytes, 0)
 
+    def test_run_admitted_cuda_executes_kernel_when_granted(self) -> None:
+        kernel = mock.Mock(return_value="kernel-result")
+        with mock.patch.object(
+                cuda_memory,
+                "cuda_memory_info",
+                return_value=_available_memory_info()):
+            result = cuda_memory.run_admitted_cuda(_estimate(), kernel, 1, 2)
+
+        self.assertEqual(result, "kernel-result")
+        kernel.assert_called_once_with(1, 2)
+
+    def test_run_admitted_cuda_raises_typed_error_without_calling_kernel(
+        self,
+    ) -> None:
+        kernel = mock.Mock()
+        info = _available_memory_info(
+            free_bytes=300 * MiB,
+            total_bytes=2 * 1024 * MiB,
+        )
+        with mock.patch.object(
+                cuda_memory, "cuda_memory_info", return_value=info):
+            with mock.patch.object(
+                    cuda_memory,
+                    "_clear_current_thread_cuda_cache",
+                    return_value=False):
+                with self.assertRaisesRegex(
+                        CustomOpResourceExhaustedError,
+                        "test_cuda_op skipped CUDA"):
+                    cuda_memory.run_admitted_cuda(_estimate(), kernel)
+
+        kernel.assert_not_called()
+
     def test_detection_compiled_path_stops_before_kernel_when_denied(self) -> None:
         image = np.arange(64, dtype=np.float64).reshape(8, 8)
         native = mock.Mock()

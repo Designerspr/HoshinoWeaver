@@ -15,6 +15,7 @@ from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
+from hoshicore._custom_op.ops.fgp import _validate_scalar_weight
 
 
 _debug_log = partial(debug_log, "max")
@@ -65,18 +66,6 @@ def _validate_threshold_inputs(
     if not std_arr.flags.c_contiguous:
         std_arr = np.ascontiguousarray(std_arr)
     return frame_arr, mean_arr, std_arr, result_arr
-
-
-def _validate_scalar_weight(weight: Any, *, op_name: str) -> float | None:
-    if weight is None:
-        return None
-    if isinstance(weight, np.ndarray):
-        if weight.ndim == 0:
-            return float(weight.item())
-        return None
-    if np.isscalar(weight):
-        return float(weight)
-    raise TypeError(f"{op_name}: unsupported weight type")
 
 
 def max_combine_numpy(base: np.ndarray, fresh: np.ndarray) -> np.ndarray:

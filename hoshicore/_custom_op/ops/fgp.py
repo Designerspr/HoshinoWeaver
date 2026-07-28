@@ -8,19 +8,16 @@ from typing import Any, Callable
 
 import numpy as np
 
-from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
-from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
-from hoshicore._custom_op.backend_registry import resolve_after_resource_exhausted
-from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
+from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
 from hoshicore._custom_op.backend_registry import resolve_backend as _resolve_backend
 from hoshicore._custom_op.cuda_memory import cuda_chunk_memory_model
-from hoshicore._custom_op.cuda_memory import cuda_memory_admission
+from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
 
 
 _debug_log = partial(debug_log, "fgp")
@@ -491,19 +488,15 @@ def huber_weighted_chunk_compiled_cuda(
         include_weights=weights_arr is not None,
     )
     # The flattened plane is one modeled row, so estimate(1) covers this chunk.
-    with cuda_memory_admission(model.estimate(1)) as admission:
-        if not admission.granted:
-            raise CustomOpResourceExhaustedError(
-                "huber_weighted_chunk skipped CUDA because estimated peak "
-                f"{admission.estimated_peak_bytes} bytes exceeds usable VRAM"
-            )
-        return module.huber_weighted_chunk_cuda(
-            stack_arr,
-            ref_mean_arr,
-            ref_std_arr,
-            float(huber_c),
-            weights_arr,
-        )
+    return _run_admitted_cuda(
+        model.estimate(1),
+        module.huber_weighted_chunk_cuda,
+        stack_arr,
+        ref_mean_arr,
+        ref_std_arr,
+        float(huber_c),
+        weights_arr,
+    )
 
 
 def _select_huber_chunk_backend(
@@ -545,28 +538,12 @@ def huber_weighted_chunk(
     try:
         return backend(stack, ref_mean, ref_std, huber_c, weights)
     except RuntimeError as exc:
-        if is_cuda_resource_exhausted_error(exc):
-            resolve_after_resource_exhausted(
-                "huber_weighted_chunk",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "compiled CUDA backend exhausted resources, falling back to "
-                f"numpy: {exc}"
-            )
-        else:
-            resolve_after_runtime_unavailable(
-                "huber_weighted_chunk",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "compiled CUDA backend unavailable at runtime, falling back "
-                f"to numpy: {exc}"
-            )
+        resolve_after_cuda_failure(
+            "huber_weighted_chunk",
+            exc,
+            load_module=_load_compiled_module_result,
+            log=_debug_log,
+        )
     return huber_weighted_chunk_numpy(stack, ref_mean, ref_std, huber_c, weights)
 
 
@@ -584,22 +561,12 @@ def try_huber_weighted_chunk_native(
     try:
         return backend(stack, ref_mean, ref_std, huber_c, weights)
     except RuntimeError as exc:
-        if is_cuda_resource_exhausted_error(exc):
-            resolve_after_resource_exhausted(
-                "huber_weighted_chunk",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(f"compiled CUDA backend exhausted resources: {exc}")
-        else:
-            resolve_after_runtime_unavailable(
-                "huber_weighted_chunk",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(f"compiled CUDA backend unavailable at runtime: {exc}")
+        resolve_after_cuda_failure(
+            "huber_weighted_chunk",
+            exc,
+            load_module=_load_compiled_module_result,
+            log=_debug_log,
+        )
         return None
 
 

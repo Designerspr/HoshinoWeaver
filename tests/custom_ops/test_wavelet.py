@@ -11,6 +11,8 @@ from hoshicore._custom_op.backend_registry import registered_backend_candidates
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op.ops import wavelet as wavelet_ops
 import hoshicore.component.norma.detection as detection
+import hoshicore._custom_op.backend_registry as backend_registry
+import hoshicore._custom_op.cuda_memory as cuda_memory
 
 
 def _is_compiled_backend_unavailable(exc: RuntimeError) -> bool:
@@ -94,7 +96,7 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
             return_value=(module, None),
         ):
             with mock.patch.object(
-                wavelet_ops,
+                cuda_memory,
                 "cuda_memory_admission",
                 return_value=self._admission(False),
             ):
@@ -133,7 +135,7 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
                 return_value=mock.Mock(logical_op="wavelet_dec_rec"),
             ) as estimate:
                 with mock.patch.object(
-                    wavelet_ops,
+                    cuda_memory,
                     "cuda_memory_admission",
                     return_value=self._admission(True),
                 ):
@@ -270,7 +272,7 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
                 wavelet_ops, "_select_wavelet_dec_rec_backend",
                 return_value=("cuda", raise_no_cuda)):
             with mock.patch.object(
-                    wavelet_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=cpu_selection):
                 with mock.patch.object(
@@ -304,7 +306,7 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
                 wavelet_ops, "_select_wavelet_dec_rec_backend",
                 return_value=("cuda", raise_no_cuda)):
             with mock.patch.object(
-                    wavelet_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=cpu_selection):
                 with mock.patch.object(
@@ -341,7 +343,7 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
             return_value=("cuda", raise_resource),
         ):
             with mock.patch.object(
-                wavelet_ops,
+                backend_registry,
                 "resolve_after_resource_exhausted",
                 return_value=cpu_selection,
             ) as resolve:
@@ -377,7 +379,7 @@ class TestWaveletDecRecCustomOp(unittest.TestCase):
             return_value=("compiled", raise_resource),
         ):
             with mock.patch.object(
-                wavelet_ops,
+                backend_registry,
                 "resolve_after_resource_exhausted",
                 return_value=numpy_selection,
             ) as resolve:

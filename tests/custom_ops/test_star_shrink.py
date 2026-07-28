@@ -12,6 +12,7 @@ import hoshicore._custom_op.backend_registry as backend_registry
 from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import cuda_memory_info
 import hoshicore._custom_op.ops.star_shrink as star_shrink_ops
+import hoshicore._custom_op.cuda_memory as cuda_memory
 
 
 from tests.custom_ops._base import CustomOpsTestCase
@@ -164,7 +165,7 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
         ):
             with mock.patch.object(star_shrink_ops, "_apply_compiled_threads"):
                 with mock.patch.object(
-                    star_shrink_ops,
+                    cuda_memory,
                     "cuda_memory_admission",
                     return_value=self._denied_admission(),
                 ):
@@ -238,7 +239,7 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
                 side_effect=RuntimeError("no CUDA-capable device is detected"),
             ) as mock_cuda:
                 with mock.patch.object(
-                    star_shrink_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=cpu_selection,
                 ):
@@ -296,7 +297,7 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
                 side_effect=CustomOpResourceExhaustedError("admission denied"),
             ):
                 with mock.patch.object(
-                    star_shrink_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=cpu_selection,
                 ) as resolve:
@@ -562,7 +563,7 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
                 side_effect=RuntimeError("no CUDA-capable device is detected"),
             ) as mock_cuda:
                 with mock.patch.object(
-                    star_shrink_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=cpu_selection,
                 ):
@@ -683,7 +684,7 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
                 side_effect=CustomOpResourceExhaustedError("admission denied"),
             ):
                 with mock.patch.object(
-                    star_shrink_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=numpy_selection,
                 ) as resolve:
@@ -750,7 +751,7 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
             return_value=(module, None),
         ):
             with mock.patch.object(
-                star_shrink_ops,
+                cuda_memory,
                 "cuda_memory_admission",
                 return_value=self._denied_admission(),
             ):
@@ -903,7 +904,7 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
                 side_effect=CustomOpResourceExhaustedError("admission denied"),
             ):
                 with mock.patch.object(
-                    star_shrink_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=numpy_selection,
                 ) as resolve:
@@ -1030,7 +1031,7 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
             return_value=(module, None),
         ):
             with mock.patch.object(
-                star_shrink_ops,
+                cuda_memory,
                 "cuda_memory_admission",
                 return_value=self._denied_admission(),
             ):

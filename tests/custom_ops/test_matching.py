@@ -11,6 +11,7 @@ from hoshicore._custom_op.backend_registry import BackendSelection
 import hoshicore._custom_op.cuda_memory as cuda_memory
 import hoshicore._custom_op.ops.alignment as alignment_ops
 import hoshicore.component.norma.matching as norma_matching
+import hoshicore._custom_op.backend_registry as backend_registry
 
 
 LOGICAL_OP = "matching_cosine_bidirectional_nearest"
@@ -339,7 +340,7 @@ class TestMatchingCosineBidirectionalNearest(unittest.TestCase):
                 side_effect=CustomOpResourceExhaustedError("estimated VRAM"),
             ):
                 with mock.patch.object(
-                    alignment_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=_selection("openmp_cpu"),
                 ) as resolve:
@@ -385,7 +386,7 @@ class TestMatchingCosineBidirectionalNearest(unittest.TestCase):
                         return_value=False,
                     ):
                         with mock.patch.object(
-                            alignment_ops,
+                            backend_registry,
                             "resolve_after_resource_exhausted",
                             return_value=_selection("openmp_cpu"),
                         ) as resolve:

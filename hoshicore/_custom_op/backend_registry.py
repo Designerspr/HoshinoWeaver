@@ -523,6 +523,49 @@ def resolve_after_resource_exhausted(
     )
 
 
+def resolve_after_cuda_failure(
+    logical_op: str,
+    exc: RuntimeError,
+    *,
+    load_module: ModuleLoader = load_compiled_module,
+    build_info: Mapping[str, Any] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> BackendSelection:
+    """Classify a CUDA host-I/O kernel failure and resolve the next backend.
+
+    Resource exhaustion and runtime unavailability re-resolve with the CUDA
+    backend excluded; any other error propagates unchanged (enforced by the
+    underlying resolve_after_* contracts).
+    """
+    if is_cuda_resource_exhausted_error(exc):
+        selection = resolve_after_resource_exhausted(
+            logical_op,
+            "cuda_host_io",
+            exc,
+            load_module=load_module,
+            build_info=build_info,
+        )
+        if log is not None:
+            log(
+                "CUDA backend exhausted resources, falling back to the "
+                f"next backend: {exc}"
+            )
+    else:
+        selection = resolve_after_runtime_unavailable(
+            logical_op,
+            "cuda_host_io",
+            exc,
+            load_module=load_module,
+            build_info=build_info,
+        )
+        if log is not None:
+            log(
+                "CUDA backend unavailable at runtime, falling back to the "
+                f"next backend: {exc}"
+            )
+    return selection
+
+
 def native_backend_available(
     logical_op: str,
     preference: str = "auto",

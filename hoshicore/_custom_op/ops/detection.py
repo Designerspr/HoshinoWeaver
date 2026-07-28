@@ -10,19 +10,16 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import CustomOpUnavailableError
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
-from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
-from hoshicore._custom_op.backend_registry import resolve_after_resource_exhausted
-from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
+from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
 from hoshicore._custom_op.backend_registry import select_backend as _select_backend
-from hoshicore._custom_op.cuda_memory import cuda_memory_admission
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
+from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
 from hoshicore._custom_op.ops.filter import median_filter_2d_numpy as _median_filter_2d_numpy
 from hoshicore._custom_op.ops.wavelet import _wavelet_level
 
@@ -340,16 +337,7 @@ def _star_detect_fused_pixel_components_native_validated(
         level=level,
         gaussian_ksize=gaussian_kernel.size,
     )
-    with cuda_memory_admission(estimate) as admission:
-        if not admission.granted:
-            raise CustomOpResourceExhaustedError(
-                "star_detect_fused_pixel_components skipped CUDA because "
-                f"estimated peak {admission.estimated_peak_bytes} bytes exceeds "
-                f"usable VRAM (free={admission.free_bytes}, "
-                f"reserved={admission.reserved_bytes}, "
-                f"headroom={admission.headroom_bytes})"
-            )
-        return kernel(*kernel_args)
+    return _run_admitted_cuda(estimate, kernel, *kernel_args)
 
 
 def _star_detect_fused_pixel_components_compiled_validated(
@@ -491,22 +479,13 @@ def star_detect_fused_pixel_components(
             if not fallback_selection.native:
                 raise StarDetectCapacityError(str(exc)) from exc
             _debug_log(f"CUDA component capacity exceeded, falling back to CPU: {exc}")
-        elif is_cuda_resource_exhausted_error(exc):
-            fallback_selection = resolve_after_resource_exhausted(
-                "star_detect_fused_pixel_components",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(f"CUDA resources exhausted, falling back to CPU: {exc}")
         else:
-            fallback_selection = resolve_after_runtime_unavailable(
+            fallback_selection = resolve_after_cuda_failure(
                 "star_detect_fused_pixel_components",
-                "cuda_host_io",
                 exc,
                 load_module=_load_compiled_module_result,
+                log=_debug_log,
             )
-            _debug_log(f"CUDA backend unavailable, falling back to CPU: {exc}")
 
     fallback_name, fallback_backend = _star_detect_fused_pixel_components_backend(
         fallback_selection
