@@ -1,6 +1,7 @@
 #include "star_shrink_ops.h"
 
 #include "common/cpu_compat.h"
+#include "common/median_histogram.h"
 
 #include <pybind11/numpy.h>
 
@@ -165,71 +166,7 @@ template <typename T> T cast_output(const float value, const float max_value) {
     }
 }
 
-template <typename T> struct MedianHistogram;
-
-template <> struct MedianHistogram<uint8_t> {
-    std::array<uint32_t, 256> bins{};
-
-    void clear() { bins.fill(0); }
-
-    void add(const uint8_t value) { ++bins[value]; }
-
-    void remove(const uint8_t value) { --bins[value]; }
-
-    uint8_t median(const uint32_t target_rank) const {
-        uint32_t count = 0;
-        for (uint32_t value = 0; value < bins.size(); ++value) {
-            count += bins[value];
-            if (count >= target_rank) {
-                return static_cast<uint8_t>(value);
-            }
-        }
-        return 255;
-    }
-};
-
-template <> struct MedianHistogram<uint16_t> {
-    std::array<uint32_t, 256> coarse{};
-    std::vector<uint32_t> fine;
-
-    MedianHistogram() : fine(65536, 0) {}
-
-    void clear() {
-        coarse.fill(0);
-        std::fill(fine.begin(), fine.end(), 0);
-    }
-
-    void add(const uint16_t value) {
-        ++coarse[value >> 8];
-        ++fine[value];
-    }
-
-    void remove(const uint16_t value) {
-        --coarse[value >> 8];
-        --fine[value];
-    }
-
-    uint16_t median(const uint32_t target_rank) const {
-        uint32_t count = 0;
-        uint32_t high_bin = 0;
-        for (; high_bin < coarse.size(); ++high_bin) {
-            const uint32_t next = count + coarse[high_bin];
-            if (next >= target_rank) {
-                break;
-            }
-            count = next;
-        }
-        const uint32_t start = high_bin << 8;
-        const uint32_t end = start + 256;
-        for (uint32_t value = start; value < end; ++value) {
-            count += fine[value];
-            if (count >= target_rank) {
-                return static_cast<uint16_t>(value);
-            }
-        }
-        return 65535;
-    }
-};
+using hnw::cpu::MedianHistogram;
 
 int64_t clamp_index(const int64_t value, const int64_t low, const int64_t high) {
     return std::max(low, std::min(value, high));
@@ -257,46 +194,25 @@ T gray_at(const std::vector<T>& gray, const int64_t height, const int64_t width,
 }
 
 template <typename T>
-void build_gray_histogram_for_row(MedianHistogram<T>& hist, const std::vector<T>& gray,
-                                  const int64_t height, const int64_t width, const int64_t y,
-                                  const int64_t radius) {
-    hist.clear();
-    for (int64_t dy = -radius; dy <= radius; ++dy) {
-        for (int64_t dx = -radius; dx <= radius; ++dx) {
-            hist.add(gray_at(gray, height, width, y + dy, dx));
-        }
-    }
-}
-
-template <typename T>
-void slide_gray_histogram_right(MedianHistogram<T>& hist, const std::vector<T>& gray,
-                                const int64_t height, const int64_t width, const int64_t y,
-                                const int64_t x, const int64_t radius) {
-    const int64_t remove_x = x - radius;
-    const int64_t add_x = x + radius + 1;
-    for (int64_t dy = -radius; dy <= radius; ++dy) {
-        hist.remove(gray_at(gray, height, width, y + dy, remove_x));
-        hist.add(gray_at(gray, height, width, y + dy, add_x));
-    }
-}
-
-template <typename T>
 void median_filter_gray(const std::vector<T>& gray, std::vector<T>& background,
                         const int64_t height, const int64_t width, const int ksize) {
     const int64_t radius = ksize / 2;
     const uint64_t window_area = static_cast<uint64_t>(ksize) * static_cast<uint64_t>(ksize);
     const uint32_t target_rank = static_cast<uint32_t>(window_area / 2 + 1);
+    const auto at = [&](const int64_t y, const int64_t x) {
+        return gray_at(gray, height, width, y, x);
+    };
 #if defined(_OPENMP)
 #pragma omp parallel
     {
         MedianHistogram<T> hist;
 #pragma omp for schedule(static)
         for (int64_t y = 0; y < height; ++y) {
-            build_gray_histogram_for_row(hist, gray, height, width, y, radius);
+            hnw::cpu::build_median_histogram_for_row(hist, at, y, radius);
             for (int64_t x = 0; x < width; ++x) {
                 background[static_cast<size_t>(y * width + x)] = hist.median(target_rank);
                 if (x + 1 < width) {
-                    slide_gray_histogram_right(hist, gray, height, width, y, x, radius);
+                    hnw::cpu::slide_median_histogram_right(hist, at, y, x, radius);
                 }
             }
         }
@@ -304,11 +220,11 @@ void median_filter_gray(const std::vector<T>& gray, std::vector<T>& background,
 #else
     MedianHistogram<T> hist;
     for (int64_t y = 0; y < height; ++y) {
-        build_gray_histogram_for_row(hist, gray, height, width, y, radius);
+        hnw::cpu::build_median_histogram_for_row(hist, at, y, radius);
         for (int64_t x = 0; x < width; ++x) {
             background[static_cast<size_t>(y * width + x)] = hist.median(target_rank);
             if (x + 1 < width) {
-                slide_gray_histogram_right(hist, gray, height, width, y, x, radius);
+                hnw::cpu::slide_median_histogram_right(hist, at, y, x, radius);
             }
         }
     }
