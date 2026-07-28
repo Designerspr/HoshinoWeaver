@@ -5,6 +5,7 @@ import numpy as np
 
 from hoshicore._custom_op import build_info, camera_model_remap
 from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
+from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 import hoshicore._custom_op.ops.remap as remap_ops
 import hoshicore.component.norma.types as norma_types
 from hoshicore.component.norma.types import (
@@ -322,7 +323,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 
@@ -430,7 +431,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                     try:
                         got = remap_ops.camera_model_remap_compiled(image=image, **kwargs)
                     except RuntimeError as exc:
-                        if remap_ops._is_cuda_runtime_unavailable_error(exc):
+                        if is_cuda_runtime_unavailable_error(exc):
                             self.skipTest(f"CUDA runtime unavailable: {exc}")
                         raise
 
@@ -628,7 +629,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                     try:
                         got = remap_ops.camera_model_remap_compiled(**kwargs)
                     except RuntimeError as exc:
-                        if remap_ops._is_cuda_runtime_unavailable_error(exc):
+                        if is_cuda_runtime_unavailable_error(exc):
                             self.skipTest(f"CUDA runtime unavailable: {exc}")
                         raise
                     np.testing.assert_allclose(
@@ -670,7 +671,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 
@@ -699,7 +700,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                         try:
                             got = remap_ops.camera_model_remap_compiled(**kwargs)
                         except RuntimeError as exc:
-                            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+                            if is_cuda_runtime_unavailable_error(exc):
                                 self.skipTest(f"CUDA runtime unavailable: {exc}")
                             raise
                         np.testing.assert_array_equal(got, expected)
@@ -716,7 +717,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 
@@ -755,7 +756,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 
@@ -796,7 +797,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 

@@ -15,7 +15,6 @@ from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
-from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import resolve_after_resource_exhausted
@@ -26,7 +25,6 @@ from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
 
 
 _debug_log = partial(debug_log, "remap")
-_is_cuda_runtime_unavailable_error = is_cuda_runtime_unavailable_error
 _COMPILED_SUPPORTED_DTYPES = (
     np.dtype(np.uint8),
     np.dtype(np.uint16),

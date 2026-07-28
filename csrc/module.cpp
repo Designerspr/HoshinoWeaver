@@ -1,6 +1,5 @@
 #include "common/backend_info.h"
 #include "common/cuda_error.h"
-#include "common/star_detect_capacity.h"
 #include "ops/cpu/alignment/alignment_ops.h"
 #include "ops/cpu/alignment/matching_bidirectional_nearest_ops.h"
 #include "ops/cpu/calibration/calibration_ops.h"

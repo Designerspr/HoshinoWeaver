@@ -28,7 +28,7 @@ class BackendCandidate:
     priority: int = 0
     requires_contiguous: bool = True
     dtypes: tuple[str, ...] = ()
-    fallback: str = "numpy"
+    fallback: str | None = "numpy"
     build_flag: str | None = None
     memory_model: str | None = None
     memory_model_reason: str | None = None
@@ -160,6 +160,9 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "cuda_host_io",
         "star_shrink_dog_process_cuda",
         priority=10,
+        # Real fallback is the composed star_mask_dog + star_shrink_process
+        # path, which is not expressible as a single registry candidate.
+        fallback=None,
         build_flag="cuda",
         memory_model="static_estimator",
     ),
@@ -212,6 +215,9 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         "star_detect_fused_pixel_components",
         "openmp_cpu",
         "star_detect_fused_pixel_components_cpu",
+        # No numpy backend exists; production falls back to Norma's contour
+        # detector at the component layer.
+        fallback=None,
     ),
     BackendCandidate(
         "camera_model_remap",

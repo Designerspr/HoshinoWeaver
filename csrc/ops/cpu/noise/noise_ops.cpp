@@ -105,7 +105,6 @@ py::array equalize_noise_correct_dispatch(const py::array& max_img, const py::ar
                                           const double sigma_ref, const double c_n_eff,
                                           const double max_value, const double highlight_preserve) {
     hnw::require_same_dtype(max_img, filled_std_img, "equalize_noise_correct");
-    const std::string max_dtype = py::str(max_img.dtype()).cast<std::string>();
 
     if (py::isinstance<py::array_t<float>>(max_img)) {
         return equalize_noise_correct_impl<float>(
@@ -388,7 +387,6 @@ py::object noise_equalization_params_dispatch(const py::array& max_img, const py
                                               const bool minus_only) {
     hnw::require_same_dtype(max_img, mean_img, "noise_equalization_params");
     hnw::require_same_dtype(max_img, std_img, "noise_equalization_params");
-    const std::string max_dtype = py::str(max_img.dtype()).cast<std::string>();
 
     if (py::isinstance<py::array_t<float>>(max_img)) {
         return noise_equalization_params_impl<float>(

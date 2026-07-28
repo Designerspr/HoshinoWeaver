@@ -100,6 +100,30 @@ class TestBackendRegistry(CustomOpsTestCase):
             huber_chunk_candidates[0].kernel_name, "huber_weighted_chunk_cuda"
         )
 
+    def test_candidates_without_numpy_fallback_declare_it_explicitly(self) -> None:
+        """Ops whose last resort lives outside the registry must not claim numpy."""
+        detect_candidates = backend_registry.registered_backend_candidates(
+            "star_detect_fused_pixel_components"
+        )
+        cpu_detect = [
+            candidate
+            for candidate in detect_candidates
+            if candidate.backend == "openmp_cpu"
+        ]
+        self.assertEqual(len(cpu_detect), 1)
+        self.assertIsNone(cpu_detect[0].fallback)
+
+        dog_candidates = backend_registry.registered_backend_candidates(
+            "star_shrink_dog_process"
+        )
+        cuda_dog = [
+            candidate
+            for candidate in dog_candidates
+            if candidate.backend == "cuda_host_io"
+        ]
+        self.assertEqual(len(cuda_dog), 1)
+        self.assertIsNone(cuda_dog[0].fallback)
+
     def test_builtin_cuda_candidates_declare_consumed_memory_models(self) -> None:
         candidates = backend_registry.registered_backend_candidates()
 

@@ -10,8 +10,6 @@ import numpy as np
 from hoshicore._custom_op import thread_tuning as _thread_tuning
 from hoshicore._custom_op._dispatch import \
     apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import \
-    compiled_build_info as _compiled_build_info
 from hoshicore._custom_op._dispatch import debug_enabled as _debug_enabled
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference

@@ -349,12 +349,6 @@ def star_shrink_process(
     return fallback_backend(*kernel_args)
 
 
-StarShrinkProcessCallable = Callable[
-    [np.ndarray, np.ndarray, int, str, int, float | None, int],
-    np.ndarray,
-]
-
-
 def star_shrink_detect_mask_numpy(
     image: np.ndarray,
     ksize: int = 13,

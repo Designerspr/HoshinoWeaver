@@ -142,7 +142,6 @@ py::array threshold_max_merge_dispatch(py::array result, const py::array& frame,
     hnw::require_same_dtype(result, frame, "threshold_max_merge");
     hnw::require_same_dtype(result, mean_img, "threshold_max_merge");
     hnw::require_same_dtype(result, std_img, "threshold_max_merge");
-    const std::string result_dtype = py::str(result.dtype()).cast<std::string>();
 
     if (py::isinstance<py::array_t<float>>(result)) {
         return threshold_max_merge_inplace_impl<float>(
