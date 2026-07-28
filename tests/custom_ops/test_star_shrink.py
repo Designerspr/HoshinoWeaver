@@ -1052,3 +1052,19 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
                     )
 
         native.assert_not_called()
+
+    def test_star_mask_dog_cuda_native_rejects_non_finite_sigma(self) -> None:
+        """Native CUDA binding validates sigma before allocating device buffers."""
+        module, error = star_shrink_ops._load_compiled_module_result()
+        if module is None:
+            self.skipTest(error or "compiled custom ops unavailable")
+        if not module.build_info().get("cuda"):
+            self.skipTest("CUDA star-shrink backend is not built")
+        info = cuda_memory_info()
+        if not info.get("available"):
+            self.skipTest(f"CUDA runtime unavailable: {info.get('reason', 'unknown')}")
+
+        image = np.zeros((9, 11), dtype=np.uint16)
+
+        with self.assertRaisesRegex(ValueError, "positive and finite"):
+            module.star_mask_dog_cuda(image, float("inf"), 3.0, 1.0, 0, 0)

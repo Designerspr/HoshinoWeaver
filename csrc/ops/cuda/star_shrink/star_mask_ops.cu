@@ -43,6 +43,8 @@ void throw_if_cuda_failed(const cudaError_t error, const char* context) {
 }
 
 template <typename T> __device__ inline float dtype_max_value() {
+    static_assert(std::is_same_v<T, uint8_t> || std::is_same_v<T, uint16_t>,
+                  "star_mask_dog_cuda supports uint8/uint16 only");
     if constexpr (std::is_same_v<T, uint8_t>) {
         return 255.0f;
     } else {

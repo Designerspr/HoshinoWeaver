@@ -53,8 +53,8 @@ using process_launch_fn_t = void (*)(const T* image_host, T* out_host, int heigh
                                      float shrink_ratio, int deringing_ksize);
 
 std::vector<float> make_gaussian_kernel(const float sigma) {
-    if (!(sigma > 0.0f)) {
-        throw std::invalid_argument("star_mask_dog_cuda: sigma values must be positive");
+    if (!std::isfinite(sigma) || !(sigma > 0.0f)) {
+        throw std::invalid_argument("star_mask_dog_cuda: sigma values must be positive and finite");
     }
     const int radius = std::max(1, static_cast<int>(std::ceil(3.0f * sigma)));
     std::vector<float> kernel(static_cast<size_t>(2 * radius + 1));
