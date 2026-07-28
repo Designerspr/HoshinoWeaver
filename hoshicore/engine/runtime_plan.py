@@ -12,14 +12,13 @@ from .._custom_op._dispatch import cuda_memory_info
 from .._custom_op._dispatch import fallback_preference
 from .._custom_op.backend_registry import BackendDecision, resolve_backend
 from .._custom_op.cuda_memory import cuda_chunk_memory_model
+from .._custom_op.cuda_memory import cuda_usable_memory_bytes
 from ..component.image_io import peek_shape
 from ..ops.base import BaseOp
 from .build import ValidatedDag
-from .preflight import PreflightReport
+from .preflight import PreflightReport, host_memory_budget_bytes
 from .registry import REGISTERED_OP
 
-MEMORY_SAFETY_FACTOR = 0.7
-MEMORY_FIXED_OVERHEAD = 200 * 1024 * 1024
 DEFAULT_MIN_CHUNK_ROWS = 1
 DEFAULT_MAX_CHUNK_ROWS = 1024
 CHUNK_ROW_ALIGNMENT = 16
@@ -254,8 +253,7 @@ def _plan_chunk_rows(
 
 
 def _memory_budget_bytes() -> int:
-    avail_mem = psutil.virtual_memory().available
-    return int(avail_mem * MEMORY_SAFETY_FACTOR) - MEMORY_FIXED_OVERHEAD
+    return host_memory_budget_bytes(psutil.virtual_memory().available)
 
 
 def _cuda_chunk_memory_budget_bytes(
@@ -272,7 +270,11 @@ def _cuda_chunk_memory_budget_bytes(
         free_bytes = int(info["free_bytes"])
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError("available CUDA memory info has invalid free_bytes") from exc
-    return int(free_bytes * MEMORY_SAFETY_FACTOR) - MEMORY_FIXED_OVERHEAD
+    try:
+        total_bytes = int(info["total_bytes"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("available CUDA memory info has invalid total_bytes") from exc
+    return cuda_usable_memory_bytes(free_bytes, total_bytes, reserved_bytes=0)
 
 
 def _uses_cuda_host_io_chunk_backend(

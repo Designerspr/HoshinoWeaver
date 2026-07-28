@@ -343,6 +343,56 @@ class TestCudaMemoryEstimate(unittest.TestCase):
             4 * 32 * 64 * 2 + 3 * 32 * 64 * 8,
         )
 
+    def test_usable_memory_subtracts_headroom_from_free_bytes(self) -> None:
+        total_bytes = 24 * GiB
+        free_bytes = 5 * GiB
+        headroom = cuda_memory._headroom_bytes(total_bytes)
+
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(free_bytes, total_bytes),
+            free_bytes - headroom,
+        )
+
+    def test_usable_memory_clamps_free_bytes_to_total(self) -> None:
+        """Probe quirks may report free above total; the cap must still hold."""
+        total_bytes = 8 * GiB
+        headroom = cuda_memory._headroom_bytes(total_bytes)
+
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(total_bytes + 3 * GiB, total_bytes),
+            total_bytes - headroom,
+        )
+
+    def test_usable_memory_deducts_reservations(self) -> None:
+        total_bytes = 24 * GiB
+        free_bytes = 5 * GiB
+        reserved_bytes = 2 * GiB
+        headroom = cuda_memory._headroom_bytes(total_bytes)
+
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(
+                free_bytes, total_bytes, reserved_bytes
+            ),
+            free_bytes - headroom - reserved_bytes,
+        )
+
+    def test_usable_memory_is_never_negative(self) -> None:
+        total_bytes = 24 * GiB
+        headroom = cuda_memory._headroom_bytes(total_bytes)
+
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(headroom, total_bytes), 0
+        )
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(headroom // 2, total_bytes), 0
+        )
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(
+                headroom + GiB, total_bytes, 4 * GiB
+            ),
+            0,
+        )
+
     def test_admission_reserves_and_releases_current_device(self) -> None:
         with mock.patch.object(
                 cuda_memory,

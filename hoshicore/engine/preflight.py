@@ -26,8 +26,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
-PreflightAction = Literal["apply", "ignore", "abort"]
-
 import psutil
 from loguru import logger
 
@@ -36,10 +34,16 @@ from ..ops.base import BaseOp
 from .build import ValidatedDag
 from .registry import REGISTERED_OP
 
+PreflightAction = Literal["apply", "ignore", "abort"]
+
 MEMORY_SAFETY_FACTOR = 0.7
 MEMORY_FIXED_OVERHEAD = 200 * 1024 * 1024  # 200MB
 RESOURCE_CHECK_NAME = "资源检查"
 CONFIG_VALIDITY_CHECK_NAME = "参数合法性"
+
+
+def host_memory_budget_bytes(available_bytes: int) -> int:
+    return int(available_bytes * MEMORY_SAFETY_FACTOR) - MEMORY_FIXED_OVERHEAD
 
 
 class PreflightAbortError(Exception):
@@ -310,7 +314,7 @@ def _resource_check(
 
     # 4. 比较 + 生成 issues
     issues: list[PreflightIssue] = []
-    mem_budget = int(avail_mem * MEMORY_SAFETY_FACTOR) - MEMORY_FIXED_OVERHEAD
+    mem_budget = host_memory_budget_bytes(avail_mem)
 
     if total_mem > 0 and (mem_budget <= 0 or total_mem > mem_budget):
         fix = None

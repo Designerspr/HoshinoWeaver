@@ -599,6 +599,15 @@ def _headroom_bytes(total_bytes: int) -> int:
     )
 
 
+def cuda_usable_memory_bytes(
+    free_bytes: int,
+    total_bytes: int,
+    reserved_bytes: int = 0,
+) -> int:
+    headroom = _headroom_bytes(total_bytes)
+    return max(0, min(total_bytes, free_bytes) - headroom - reserved_bytes)
+
+
 def _clear_current_thread_cuda_cache() -> bool:
     module, _ = load_compiled_module()
     if module is None or not hasattr(module, "clear_cuda_host_io_cache"):
@@ -642,13 +651,11 @@ def _probe_admission(
     total_bytes = int(info["total_bytes"])
     headroom = _headroom_bytes(total_bytes)
     reserved = _reserved_bytes_by_device.get(device, 0)
-    process_available = max(0, total_bytes - headroom - reserved)
     # Reservations may later also reduce free_bytes.  Counting both is a
     # deliberate conservative v0 policy: a false rejection is safer than two
     # workers concurrently committing more than the currently free memory.
-    runtime_available = max(0, free_bytes - headroom - reserved)
-    granted = estimate.peak_device_bytes <= min(
-        process_available, runtime_available)
+    granted = estimate.peak_device_bytes <= cuda_usable_memory_bytes(
+        free_bytes, total_bytes, reserved)
     return CudaAdmissionDecision(
         logical_op=estimate.logical_op,
         granted=granted,

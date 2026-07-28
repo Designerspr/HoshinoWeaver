@@ -1,9 +1,12 @@
 import json
+from unittest import mock
 
 import numpy as np
+import pytest
 import tifffile
 
 from hoshicore.engine.build import ValidatedDag
+import hoshicore.engine.preflight as preflight_module
 from hoshicore.engine.preflight import PreflightReport, ResourceEstimate
 from hoshicore.engine.runtime_plan import apply_runtime_plan, plan_runtime
 import hoshicore.engine.runtime_plan as runtime_plan_module
@@ -90,8 +93,8 @@ def _report(non_chunk_mem: int = 0) -> PreflightReport:
 
 def _mock_available_memory(monkeypatch, budget: int, non_chunk_mem: int = 0) -> None:
     available = int(
-        (runtime_plan_module.MEMORY_FIXED_OVERHEAD + budget + non_chunk_mem) /
-        runtime_plan_module.MEMORY_SAFETY_FACTOR) + 16
+        (preflight_module.MEMORY_FIXED_OVERHEAD + budget + non_chunk_mem) /
+        preflight_module.MEMORY_SAFETY_FACTOR) + 16
 
     class FakeVMem:
         pass
@@ -111,16 +114,15 @@ def _mock_cuda_memory(monkeypatch, budget: int, available: bool = True) -> None:
             lambda: {"available": False, "reason": "mock unavailable"},
         )
         return
-    free_bytes = int(
-        (runtime_plan_module.MEMORY_FIXED_OVERHEAD + budget) /
-        runtime_plan_module.MEMORY_SAFETY_FACTOR) + 16
+    total_bytes = 8 * 1024 * 1024 * 1024
+    free_bytes = cuda_memory._headroom_bytes(total_bytes) + budget
     monkeypatch.setattr(
         runtime_plan_module,
         "cuda_memory_info",
         lambda: {
             "available": True,
             "free_bytes": free_bytes,
-            "total_bytes": free_bytes * 2,
+            "total_bytes": total_bytes,
         },
     )
 
@@ -342,6 +344,62 @@ def test_runtime_planner_uses_cuda_budget_for_cuda_chunk_op(tmp_path, monkeypatc
     assert plan.config_overrides["chunk_rows"] == 64
     assert "gpu=" in plan.decisions[0].reason
     assert plan.backend_hints["chunk"].backend == "cuda_host_io"
+
+
+def test_runtime_planner_gpu_budget_matches_cuda_usable_memory(tmp_path, monkeypatch):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    monkeypatch.delenv("HNW_CUSTOM_OPS_FALLBACK", raising=False)
+    budget = 6400
+    total_bytes = 8 * 1024 * 1024 * 1024
+    free_bytes = cuda_memory._headroom_bytes(total_bytes) + budget
+    _mock_available_memory(monkeypatch, budget=12800)
+    _mock_cuda_memory(monkeypatch, budget=budget)
+    _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
+    usable = mock.Mock(side_effect=cuda_memory.cuda_usable_memory_bytes)
+    monkeypatch.setattr(runtime_plan_module, "cuda_usable_memory_bytes", usable)
+
+    plan = plan_runtime(
+        _make_cuda_chunk_dag(),
+        {"runtime_planner": True},
+        {"fnames": [str(path)] * 4},
+        op_registry={"FixedCudaChunkOp": FixedCudaChunkOp},
+        preflight_report=_report(),
+    )
+
+    expected_budget = cuda_memory.cuda_usable_memory_bytes(free_bytes, total_bytes, 0)
+    usable.assert_called_once_with(free_bytes, total_bytes, reserved_bytes=0)
+    # Device cost is 100 bytes/row, so the planner consumed exactly the
+    # unified usable-memory budget.
+    assert plan.config_overrides["chunk_rows"] == expected_budget // 100
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        {"available": True, "free_bytes": 4096},
+        {"available": True, "free_bytes": 4096, "total_bytes": "8g"},
+    ],
+    ids=["missing", "non_int"],
+)
+def test_runtime_planner_rejects_invalid_cuda_total_bytes(tmp_path, monkeypatch, info):
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((512, 10), dtype=np.uint16))
+    monkeypatch.delenv("HNW_CUSTOM_OPS_FALLBACK", raising=False)
+    _mock_available_memory(monkeypatch, budget=12800)
+    _mock_cuda_backend(monkeypatch, "fixed_cuda_chunk")
+    monkeypatch.setattr(runtime_plan_module, "cuda_memory_info", lambda: info)
+
+    with pytest.raises(
+        RuntimeError, match="available CUDA memory info has invalid total_bytes"
+    ):
+        plan_runtime(
+            _make_cuda_chunk_dag(),
+            {"runtime_planner": True},
+            {"fnames": [str(path)] * 4},
+            op_registry={"FixedCudaChunkOp": FixedCudaChunkOp},
+            preflight_report=_report(),
+        )
 
 
 def test_runtime_planner_uses_registered_cuda_device_cost(tmp_path, monkeypatch):
