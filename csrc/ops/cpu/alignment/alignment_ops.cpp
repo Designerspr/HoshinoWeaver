@@ -87,91 +87,112 @@ py::array_t<double> extract_point_features_impl(
         py::gil_scoped_release release;
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel
 #endif
-        for (ssize_t i = 0; i < n_points; ++i) {
+        {
+            // Per-thread scratch reused across points: the two N-sized
+            // buffers exceed the allocator's mmap threshold, so per-point
+            // construction would pay one mmap/munmap pair per allocation.
             std::vector<ssize_t> order(static_cast<size_t>(n_points));
-            std::iota(order.begin(), order.end(), 0);
             std::vector<double> similarities(static_cast<size_t>(n_points));
-            const double* v0 = vec_ptr + i * 3;
-            for (ssize_t j = 0; j < n_points; ++j) {
-                similarities[static_cast<size_t>(j)] =
-                    clamp_unit(cosine_similarity3(v0, vec_ptr + j * 3));
-            }
-            std::stable_sort(order.begin(), order.end(), [&](ssize_t lhs, ssize_t rhs) {
-                return similarities[static_cast<size_t>(lhs)] >
-                       similarities[static_cast<size_t>(rhs)];
-            });
-
             std::vector<double> rho_pool(static_cast<size_t>(neighbor_count));
             std::vector<ssize_t> local_order(static_cast<size_t>(neighbor_count));
-            std::iota(local_order.begin(), local_order.end(), 0);
-            for (ssize_t j = 0; j < neighbor_count; ++j) {
-                rho_pool[static_cast<size_t>(j)] =
-                    std::acos(clamp_unit(similarities[static_cast<size_t>(order[j])]));
-            }
-            std::stable_sort(local_order.begin(), local_order.end(), [&](ssize_t lhs, ssize_t rhs) {
-                const ssize_t lhs_idx = order[static_cast<size_t>(lhs)];
-                const ssize_t rhs_idx = order[static_cast<size_t>(rhs)];
-                return vol_ptr[lhs_idx] * rho_pool[static_cast<size_t>(lhs)] >
-                       vol_ptr[rhs_idx] * rho_pool[static_cast<size_t>(rhs)];
-            });
 
-            double angle0[3] = {0.0, 0.0, 0.0};
-            bool have_angle0 = false;
-            std::vector<double> theta(static_cast<size_t>(k));
-            std::vector<double> rho(static_cast<size_t>(k));
-            std::vector<double> selected_vol(static_cast<size_t>(k));
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+            for (ssize_t i = 0; i < n_points; ++i) {
+                std::iota(order.begin(), order.end(), 0);
+                const double* v0 = vec_ptr + i * 3;
+                for (ssize_t j = 0; j < n_points; ++j) {
+                    similarities[static_cast<size_t>(j)] =
+                        clamp_unit(cosine_similarity3(v0, vec_ptr + j * 3));
+                }
+                // Only the top neighbor_count entries of `order` are consumed
+                // below. The index tie-break makes this a total order whose
+                // sorted prefix is bit-identical to the previous full
+                // stable_sort for equal similarities.
+                std::partial_sort(order.begin(), order.begin() + neighbor_count, order.end(),
+                                  [&](ssize_t lhs, ssize_t rhs) {
+                                      const double lhs_sim = similarities[static_cast<size_t>(lhs)];
+                                      const double rhs_sim = similarities[static_cast<size_t>(rhs)];
+                                      if (lhs_sim != rhs_sim) {
+                                          return lhs_sim > rhs_sim;
+                                      }
+                                      return lhs < rhs;
+                                  });
 
-            for (int jj = 0; jj < k; ++jj) {
-                const ssize_t pool_pos = local_order[static_cast<size_t>(jj)];
-                const ssize_t src_idx = order[static_cast<size_t>(pool_pos)];
-                const double* vs = vec_ptr + src_idx * 3;
+                std::iota(local_order.begin(), local_order.end(), 0);
+                for (ssize_t j = 0; j < neighbor_count; ++j) {
+                    rho_pool[static_cast<size_t>(j)] =
+                        std::acos(clamp_unit(similarities[static_cast<size_t>(order[j])]));
+                }
+                std::stable_sort(local_order.begin(), local_order.end(),
+                                 [&](ssize_t lhs, ssize_t rhs) {
+                                     const ssize_t lhs_idx = order[static_cast<size_t>(lhs)];
+                                     const ssize_t rhs_idx = order[static_cast<size_t>(rhs)];
+                                     return vol_ptr[lhs_idx] * rho_pool[static_cast<size_t>(lhs)] >
+                                            vol_ptr[rhs_idx] * rho_pool[static_cast<size_t>(rhs)];
+                                 });
 
-                double angle[3];
-                inner_with_cross_matrix(vs, v0, angle);
-                normalize3(angle);
-                if (!have_angle0) {
-                    angle0[0] = angle[0];
-                    angle0[1] = angle[1];
-                    angle0[2] = angle[2];
-                    have_angle0 = true;
+                double angle0[3] = {0.0, 0.0, 0.0};
+                bool have_angle0 = false;
+                std::vector<double> theta(static_cast<size_t>(k));
+                std::vector<double> rho(static_cast<size_t>(k));
+                std::vector<double> selected_vol(static_cast<size_t>(k));
+
+                for (int jj = 0; jj < k; ++jj) {
+                    const ssize_t pool_pos = local_order[static_cast<size_t>(jj)];
+                    const ssize_t src_idx = order[static_cast<size_t>(pool_pos)];
+                    const double* vs = vec_ptr + src_idx * 3;
+
+                    double angle[3];
+                    inner_with_cross_matrix(vs, v0, angle);
+                    normalize3(angle);
+                    if (!have_angle0) {
+                        angle0[0] = angle[0];
+                        angle0[1] = angle[1];
+                        angle0[2] = angle[2];
+                        have_angle0 = true;
+                    }
+
+                    double cr[3];
+                    inner_with_cross_matrix(angle, angle0, cr);
+                    const double s_norm = std::sqrt(cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]);
+                    const double sign_dot = cr[0] * v0[0] + cr[1] * v0[1] + cr[2] * v0[2];
+                    const double s = s_norm * ((sign_dot > 0.0) - (sign_dot < 0.0));
+                    const double c =
+                        angle[0] * angle0[0] + angle[1] * angle0[1] + angle[2] * angle0[2];
+                    theta[static_cast<size_t>(jj)] = std::atan2(s, c);
+                    rho[static_cast<size_t>(jj)] = rho_pool[static_cast<size_t>(pool_pos)];
+                    selected_vol[static_cast<size_t>(jj)] = vol_ptr[src_idx];
                 }
 
-                double cr[3];
-                inner_with_cross_matrix(angle, angle0, cr);
-                const double s_norm = std::sqrt(cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]);
-                const double sign_dot = cr[0] * v0[0] + cr[1] * v0[1] + cr[2] * v0[2];
-                const double s = s_norm * ((sign_dot > 0.0) - (sign_dot < 0.0));
-                const double c = angle[0] * angle0[0] + angle[1] * angle0[1] + angle[2] * angle0[2];
-                theta[static_cast<size_t>(jj)] = std::atan2(s, c);
-                rho[static_cast<size_t>(jj)] = rho_pool[static_cast<size_t>(pool_pos)];
-                selected_vol[static_cast<size_t>(jj)] = vol_ptr[src_idx];
-            }
-
-            double* out_row = out_ptr + i * FEATURE_BINS;
-            std::fill(out_row, out_row + FEATURE_BINS, 0.0);
-            for (int jj = 0; jj < k; ++jj) {
-                const double sigma = 2.5 * std::exp(-rho[static_cast<size_t>(jj)] * 100.0) + 0.04;
-                const double scale = selected_vol[static_cast<size_t>(jj)] *
-                                     rho[static_cast<size_t>(jj)] * rho[static_cast<size_t>(jj)] /
-                                     sigma;
-                for (ssize_t bin = 0; bin < FEATURE_BINS; ++bin) {
-                    const double fx =
-                        -3.14159265358979323846 + static_cast<double>(bin) * FEATURE_STEP;
-                    const double delta = theta[static_cast<size_t>(jj)] - fx;
-                    out_row[bin] += std::exp(-(delta * delta) / (2.0 * sigma * sigma)) * scale;
+                double* out_row = out_ptr + i * FEATURE_BINS;
+                std::fill(out_row, out_row + FEATURE_BINS, 0.0);
+                for (int jj = 0; jj < k; ++jj) {
+                    const double sigma =
+                        2.5 * std::exp(-rho[static_cast<size_t>(jj)] * 100.0) + 0.04;
+                    const double scale = selected_vol[static_cast<size_t>(jj)] *
+                                         rho[static_cast<size_t>(jj)] *
+                                         rho[static_cast<size_t>(jj)] / sigma;
+                    for (ssize_t bin = 0; bin < FEATURE_BINS; ++bin) {
+                        const double fx =
+                            -3.14159265358979323846 + static_cast<double>(bin) * FEATURE_STEP;
+                        const double delta = theta[static_cast<size_t>(jj)] - fx;
+                        out_row[bin] += std::exp(-(delta * delta) / (2.0 * sigma * sigma)) * scale;
+                    }
                 }
-            }
 
-            double norm = 0.0;
-            for (ssize_t bin = 0; bin < FEATURE_BINS; ++bin) {
-                norm += out_row[bin] * out_row[bin];
-            }
-            norm = std::sqrt(norm);
-            if (norm > 0.0 && std::isfinite(norm)) {
+                double norm = 0.0;
                 for (ssize_t bin = 0; bin < FEATURE_BINS; ++bin) {
-                    out_row[bin] /= norm;
+                    norm += out_row[bin] * out_row[bin];
+                }
+                norm = std::sqrt(norm);
+                if (norm > 0.0 && std::isfinite(norm)) {
+                    for (ssize_t bin = 0; bin < FEATURE_BINS; ++bin) {
+                        out_row[bin] /= norm;
+                    }
                 }
             }
         }
