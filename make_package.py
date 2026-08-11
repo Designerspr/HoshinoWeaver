@@ -114,15 +114,9 @@ try:
 except Exception:
     pass
 
-# pyexiv2 loads exiv2api via sys.path.append + bare import;
-# PyInstaller can't trace that, so add the platform extension dir explicitly.
-import os as _os, sys as _sys, pyexiv2 as _pyexiv2
-_plib = _os.path.join(_os.path.dirname(_pyexiv2.__file__), 'lib')
-_pyver = '{{}}.{{}}'.format(_sys.version_info.major, _sys.version_info.minor)
-_plat = {{'darwin': 'darwin', 'linux': 'linux', 'win32': 'win'}}[_sys.platform]
-#if _plat != 'win':
-#    _ext_dir = _os.path.join(_plib, 'py{{}}-{{}}'.format(_pyver, _plat))
-#    shared_datas.append((_ext_dir, _os.path.join('pyexiv2', 'lib', 'py{{}}-{{}}'.format(_pyver, _plat))))
+# LOAD-BEARING: importing pyexiv2 appends its platform extension directory to
+# sys.path, which is what lets PyInstaller resolve the top-level `exiv2api`.
+import pyexiv2 as _pyexiv2
 
 # Static resource files (user-modifiable DAG yamls + default settings + LICENSE)
 shared_datas.append(({join_path(work_path, 'hoshicore', 'dag')!r}, 'hoshicore/dag'))

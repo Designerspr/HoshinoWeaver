@@ -37,6 +37,12 @@ class TestGeneratedSpec(unittest.TestCase):
         self.assertIn("raise RuntimeError(", self.spec)
         self.assertIn("is missing; rebuild with", self.spec)
 
+    def test_spec_keeps_the_load_bearing_pyexiv2_import(self) -> None:
+        # Looks unused, but its side effect is what makes the top-level
+        # `exiv2api` resolvable at analysis time.
+        self.assertIn("import pyexiv2 as _pyexiv2", self.spec)
+        self.assertIn("LOAD-BEARING", self.spec)
+
     def test_metal_collection_is_conditional(self) -> None:
         # Non-macOS builds have no _metal module; collection must stay guarded
         # so Linux/Windows packaging is unaffected.
