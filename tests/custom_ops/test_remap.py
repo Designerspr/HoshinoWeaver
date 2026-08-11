@@ -332,7 +332,9 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
 
     def test_camera_model_remap_cpu_compiled_uint16_matches_numpy(self) -> None:
-        image = (np.arange(8 * 9 * 2, dtype=np.uint16).reshape(8, 9, 2) * 19)
+        # C3 is a production channel count; see the dispatch test for why C2/C5
+        # cannot be compared against cv2 across architectures.
+        image = (np.arange(8 * 9 * 3, dtype=np.uint16).reshape(8, 9, 3) * 19)
         rotation = np.array([
             [0.9998, -0.0170, 0.0030],
             [0.0170, 0.9998, -0.0020],
@@ -364,8 +366,9 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
 
     def test_camera_model_remap_cpu_matches_opencv5_channel_dispatch(self) -> None:
-        # OpenCV 5's exact path handles C1/C3/C4; other channel counts retain the
-        # legacy 1/32 table. These fractional samples distinguish the two paths.
+        # OpenCV 5's exact path handles C1/C3/C4 on every architecture; its 1/32
+        # table fallback for other channel counts is x86_64-only (arm64 is exact
+        # throughout). These fractional samples distinguish the two paths.
         cases = (
             (np.uint8, 255, 0.1, 3, 2),
             (np.uint16, 65535, 0.02, 26, 64),
@@ -393,13 +396,17 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                         if channels == 1
                         else np.repeat(base[:, :, None], channels, axis=2)
                     )
-                    expected = remap_ops.camera_model_remap_numpy(image=image, **kwargs)
                     got = remap_ops.camera_model_remap_cpu_compiled(image=image, **kwargs)
-                    expected_value = exact_value if channels in {1, 3, 4} else table_value
-
-                    np.testing.assert_array_equal(
-                        expected, np.full_like(expected, expected_value))
-                    np.testing.assert_array_equal(got, expected)
+                    if channels in {1, 3, 4}:
+                        expected = remap_ops.camera_model_remap_numpy(
+                            image=image, **kwargs)
+                        np.testing.assert_array_equal(
+                            expected, np.full_like(expected, exact_value))
+                        np.testing.assert_array_equal(got, expected)
+                    else:
+                        # cv2 is not comparable here, so pin the kernel's own contract.
+                        np.testing.assert_array_equal(
+                            got, np.full_like(got, table_value))
 
     def test_camera_model_remap_cuda_matches_opencv5_channel_dispatch(self) -> None:
         if not build_info().get("cuda"):
