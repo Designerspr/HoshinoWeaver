@@ -15,6 +15,7 @@ import hoshicore._custom_op.ops.sigma_clip as sigma_clip_chunk_ops
 class CustomOpsTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         _dispatch.compiled_build_info.cache_clear()
+        _dispatch.load_metal_module.cache_clear()
         filter_ops._load_compiled_module_result.cache_clear()
         filter_ops._select_median_filter_backend.cache_clear()
         fgp_ops._load_compiled_module_result.cache_clear()
@@ -28,6 +29,7 @@ class CustomOpsTestCase(unittest.TestCase):
         noise_ops._select_fill_local_mean_backend.cache_clear()
         noise_ops._select_equalization_params_backend.cache_clear()
         star_shrink_ops._load_compiled_module_result.cache_clear()
+        star_shrink_ops._load_metal_module_result.cache_clear()
         star_shrink_ops._select_star_mask_dog_backend.cache_clear()
         star_shrink_ops._select_star_shrink_detect_mask_backend.cache_clear()
         star_shrink_ops._select_star_shrink_dog_process_backend.cache_clear()

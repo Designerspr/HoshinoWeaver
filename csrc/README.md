@@ -6,7 +6,7 @@
 
 - 只覆盖 custom-op 原生层
 - Python 公共入口保持为 `hoshicore._custom_op`
-- 运行时通过 backend registry 选择 CUDA/OpenMP/NumPy；只有明确的 runtime
+- 运行时通过 backend registry 选择 Metal/CUDA/OpenMP/NumPy；只有明确的 runtime
   unavailable 或类型化 resource exhausted 才按各 wrapper 契约 fallback
 - 构建统一走 `CMake + Ninja`
 
@@ -27,6 +27,7 @@ csrc/
       noise/
       sigma_clip/
     cuda/
+    metal/
 ```
 
 职责：
@@ -37,6 +38,9 @@ csrc/
   单个算子的 compiled CPU 实现与绑定；OpenMP 是可选并行能力
 - `ops/cuda/<name>/`
   单个算子的 CUDA 实现与绑定
+- `ops/metal/<name>/`
+  单个算子的 Metal shader 与 Objective-C++ host binding；编译到独立 `_metal`
+  extension，不与 CUDA `_C` 混合
 - `build_ops.py`
   统一本地构建入口
 - `CMakeLists.txt` / `CMakePresets.json`
@@ -93,6 +97,12 @@ CUDA 构建：
 python csrc/build_ops.py --cuda --cc /usr/bin/gcc --cxx /usr/bin/g++
 ```
 
+macOS 默认构建 OpenMP `_C`、Metal `_metal` 和项目 shader library；无需单独开关：
+
+```bash
+python csrc/build_ops.py --compiler clang
+```
+
 显式解释器：
 
 ```bash
@@ -105,7 +115,7 @@ python csrc/build_ops.py --cuda --cc /usr/bin/gcc --cxx /usr/bin/g++
 python csrc/build_ops.py --dry-run
 ```
 
-## C++ / CUDA 格式检查
+## C++ / CUDA / Metal 格式检查
 
 仓库固定使用 `clang-format 20.1.8`，规则位于根目录 `.clang-format`：
 
@@ -117,7 +127,8 @@ python csrc/check_format.py
 python csrc/check_format.py --fix
 ```
 
-检查覆盖 `csrc/` 下的 C++/CUDA 源码并排除生成的 build tree；CI 使用同一入口。
+检查覆盖 `csrc/` 下的 C++/CUDA/Objective-C++/Metal 源码并排除生成的 build tree；
+CI 使用同一入口。
 
 ## 常用参数
 
@@ -131,6 +142,8 @@ python csrc/check_format.py --fix
   选择编译器家族
 - `--no-openmp`
   关闭 OpenMP
+- `--no-metal`
+  在 macOS 上显式关闭独立 Metal extension；其他平台始终关闭
 - `--march-native`
   启用本机 CPU 指令集优化；只建议本机 benchmark 使用
 - `--lto`
@@ -144,7 +157,8 @@ python csrc/check_format.py --fix
 
 ## 输出与中间产物
 
-- 扩展模块输出到 `hoshicore/_custom_op/_C*.so|.pyd`
+- 主扩展输出到 `hoshicore/_custom_op/_C*.so|.pyd`
+- macOS Metal 构建额外输出 `_metal*.so` 与 `_metal_kernels.metallib`
 - `cmake` 中间产物默认在 `csrc/build/<preset>/`
 - CUDA custom-op 包含 fused `camera_model_remap`，支持 perspective/fisheye
   的四种源目标投影组合，并与 OpenMP backend 共用双精度投影数学
@@ -160,6 +174,8 @@ python csrc/check_format.py --fix
 
 最终发布为 PyInstaller single-folder 模式。CUDA runtime 静态链接到 `_C`；
 OpenMP 在 Linux/Windows 为动态链接（PyInstaller 自动收集），macOS 为静态链接。
+Metal、Foundation 与 CoreGraphics 使用 macOS 系统 framework，不需要随应用捆绑第三方 GPU runtime；
+项目自己的 `_metal_kernels.metallib` 必须随 `_metal` 一起收集。
 
 ### 链接策略
 
@@ -169,6 +185,8 @@ OpenMP 在 Linux/Windows 为动态链接（PyInstaller 自动收集），macOS �
 | OpenMP (Windows + MSVC) | 动态（`vcomp140.dll`） | VC++ Redistributable 组件，PyInstaller 自动收集 |
 | OpenMP (macOS) | 静态（Homebrew `libomp.a`） | 需先 `brew install libomp`，编译时自动检测并静态链接 |
 | CUDA runtime | 静态（`cudart_static`） | 消除 `libcudart.so` / `cudart64_*.dll` 依赖 |
+| Metal / Foundation / CoreGraphics | macOS 系统 framework | 不额外打包 runtime；随系统提供 |
+| Metal shader library | PyInstaller data | 收集项目生成的 `_metal_kernels.metallib` |
 
 ### 验证依赖
 
@@ -183,6 +201,8 @@ dumpbin /dependents hoshicore/_custom_op/_C*.pyd
 
 # 跨平台最小 frozen-package smoke；会清理 Python/编译器/CUDA 环境路径后启动
 python csrc/verify_packaged_custom_ops.py
+# macOS Metal 发布 gate：必须收集 shader 并真实执行 Metal kernel
+python csrc/verify_packaged_custom_ops.py --require-metal
 ```
 
 ### PyInstaller 收集
@@ -190,8 +210,14 @@ python csrc/verify_packaged_custom_ops.py
 OpenMP 动态库由 PyInstaller 自动收集。spec file 确保 `_C` 模块被包含即可：
 
 ```python
-# PyInstaller spec — hiddenimports 确保 _C 被打包
-hiddenimports=['hoshicore._custom_op._C']
+# PyInstaller spec — macOS 同时收集独立 extension 与 shader
+hiddenimports=[
+    'hoshicore._custom_op._C',
+    'hoshicore._custom_op._metal',
+]
+datas=[
+    ('hoshicore/_custom_op/_metal_kernels.metallib', 'hoshicore/_custom_op'),
+]
 ```
 
 若后续使用了 cuBLAS/cuFFT 等额外 CUDA 库且无法静态链接，再按需添加到
@@ -223,17 +249,36 @@ Preset 参考：
 | `linux-gcc-cuda` | Linux |
 | `windows-msvc-cuda` | Windows |
 
+### Metal
+
+Metal v0 面向 Apple unified-memory 设备。`star_shrink_process` 的生产选择链为
+Metal → OpenMP → NumPy；独立 `_metal` 模块通过 `metal_device_info()` 探测设备，
+wrapper 在执行前消费同一 logical op 的 working-set estimator，并使用进程内
+reservation、固定/比例 headroom 与 typed resource/runtime error。普通 kernel
+错误不会被误吞。
+
+v0 的 workspace 按 worker thread 复用 buffer；多个长寿命并发 worker 可能各自
+保留一套大图工作集，admission 只能清理当前线程 cache。这是已知的
+v0 限制；在真实 Mac 的生产分辨率与并发度 benchmark 完成前，不声明
+Metal 路径已具备稳定性或性能收益。
+
+标准 macOS 构建不需要额外第三方 SDK，但必须选中提供
+`xcrun metal` / `metallib` 的完整 Xcode/Metal toolchain，并链接系统 framework。
+CI 的 `macos-15` job 会执行真实
+device probe、kernel 对拍、workspace high-water 校验与 frozen-package smoke。
+
 ### 其他 GPU 后端（规划中）
 
 | 方向 | 状态 |
 |------|------|
 | AMD (ROCm/HIP) | 待评估 |
-| macOS (Metal/MPS) | 待设计 |
+| macOS (Metal) | v0：`star_shrink_process` |
+| macOS (MPS) | 后续按热点评估 |
 | Vulkan (compute shader) | 待评估 |
 
 所有 GPU 后端保持 CPU fallback 语义不变。
 
-运行时可通过 `HNW_CUSTOM_OPS_FALLBACK=cpu` 禁用 CUDA 并保留 OpenMP，或在
+运行时可通过 `HNW_CUSTOM_OPS_FALLBACK=cpu` 禁用 Metal/CUDA 并保留 OpenMP，或在
 pipeline 启动前调用 `hoshicore._custom_op.set_backend_preference("cpu")`。传入
 `"auto"` 恢复自动选择，传入 `None` 则恢复由环境变量控制。该接口为进程级设置，
 暂不包含 GUI wiring。

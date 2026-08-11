@@ -11,7 +11,9 @@ from pathlib import Path
 
 CLANG_FORMAT_VERSION = "20.1.8"
 CSRC_ROOT = Path(__file__).resolve().parent
-SOURCE_SUFFIXES = frozenset({".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp"})
+SOURCE_SUFFIXES = frozenset(
+    {".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".metal", ".mm"}
+)
 
 
 def _source_files() -> list[Path]:

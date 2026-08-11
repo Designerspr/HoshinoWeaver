@@ -179,6 +179,38 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
 
         native.assert_not_called()
 
+    def test_star_shrink_process_metal_uses_selected_module_and_admission(
+        self,
+    ) -> None:
+        image = np.arange(8 * 9 * 3, dtype=np.uint16).reshape(8, 9, 3)
+        mask = np.ones(image.shape[:2], dtype=np.uint8)
+        native = mock.Mock(return_value=image.copy())
+        module = mock.Mock(star_shrink_process_metal=native)
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_load_metal_module_result",
+                return_value=(module, None),
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "_run_admitted_metal",
+                side_effect=lambda estimate, kernel, *args: kernel(*args),
+            ) as admitted,
+        ):
+            got = star_shrink_ops.star_shrink_process_compiled_metal(
+                image, mask, 3, "CIRCLE", 1, 1.0, 5
+            )
+
+        np.testing.assert_array_equal(got, image)
+        admitted.assert_called_once()
+        self.assertEqual(
+            admitted.call_args.args[0].logical_op,
+            "star_shrink_process",
+        )
+        native.assert_called_once()
+
     def test_star_shrink_process_can_force_numpy_fallback(self) -> None:
         image = np.arange(6 * 7 * 3, dtype=np.uint8).reshape(6, 7, 3)
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -316,6 +348,118 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
             image, mask, 3, "CIRCLE", 1, 1.0, 5
         )
         np.testing.assert_array_equal(got, expected)
+
+    def test_star_shrink_process_metal_resource_exhaustion_falls_back_to_cpu(
+        self,
+    ) -> None:
+        image = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)
+        mask = np.ones(image.shape[:2], dtype=np.uint8)
+        metal_candidate = backend_registry.BackendCandidate(
+            "star_shrink_process",
+            "metal_host_io",
+            "star_shrink_process_metal",
+            module_key="metal",
+            build_flag="metal",
+        )
+        cpu_candidate = backend_registry.BackendCandidate(
+            "star_shrink_process",
+            "openmp_cpu",
+            "star_shrink_process",
+        )
+        metal_selection = backend_registry.BackendSelection(
+            metal_candidate,
+            object(),
+            None,
+        )
+        cpu_selection = backend_registry.BackendSelection(
+            cpu_candidate,
+            object(),
+            None,
+        )
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_select_star_shrink_process_backend",
+                return_value=metal_selection,
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "_star_shrink_process_compiled_kernel",
+                side_effect=CustomOpResourceExhaustedError(
+                    "working set is insufficient"
+                ),
+            ) as metal_backend,
+            mock.patch.object(
+                backend_registry,
+                "resolve_after_resource_exhausted",
+                return_value=cpu_selection,
+            ) as resolve,
+            mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_process_compiled",
+                wraps=star_shrink_ops.star_shrink_process_numpy,
+            ) as cpu_backend,
+        ):
+            got = star_shrink_process(
+                image,
+                mask,
+                3,
+                "CIRCLE",
+                1,
+                1.0,
+                5,
+            )
+
+        metal_backend.assert_called_once()
+        resolve.assert_called_once()
+        cpu_backend.assert_called_once()
+        expected = star_shrink_ops.star_shrink_process_numpy(
+            image, mask, 3, "CIRCLE", 1, 1.0, 5
+        )
+        np.testing.assert_array_equal(got, expected)
+
+    def test_star_shrink_process_unknown_metal_error_propagates(self) -> None:
+        image = np.arange(6 * 7 * 3, dtype=np.uint8).reshape(6, 7, 3)
+        mask = np.ones(image.shape[:2], dtype=np.uint8)
+        candidate = backend_registry.BackendCandidate(
+            "star_shrink_process",
+            "metal_host_io",
+            "star_shrink_process_metal",
+            module_key="metal",
+            build_flag="metal",
+        )
+        selection = backend_registry.BackendSelection(
+            candidate,
+            object(),
+            None,
+        )
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_select_star_shrink_process_backend",
+                return_value=selection,
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "_star_shrink_process_compiled_kernel",
+                side_effect=RuntimeError("Metal kernel validation failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Metal kernel validation failed",
+            ):
+                star_shrink_process(
+                    image,
+                    mask,
+                    3,
+                    "CIRCLE",
+                    1,
+                    1.0,
+                    5,
+                )
 
     def test_star_shrink_process_cpu_backend_error_propagates(self) -> None:
         image = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)

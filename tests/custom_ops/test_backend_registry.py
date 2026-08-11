@@ -11,6 +11,8 @@ from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op.cuda_memory import cuda_chunk_memory_model
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
 from hoshicore._custom_op.cuda_memory import cuda_memory_model_kind
+from hoshicore._custom_op.metal_memory import metal_memory_estimate
+from hoshicore._custom_op.metal_memory import metal_memory_model_kind
 import hoshicore._custom_op.ops.max as max_ops
 
 
@@ -100,6 +102,21 @@ class TestBackendRegistry(CustomOpsTestCase):
             huber_chunk_candidates[0].kernel_name, "huber_weighted_chunk_cuda"
         )
 
+        process_candidates = backend_registry.registered_backend_candidates(
+            "star_shrink_process"
+        )
+        self.assertEqual(
+            {candidate.backend for candidate in process_candidates},
+            {"metal_host_io", "cuda_host_io", "openmp_cpu"},
+        )
+        metal_process = next(
+            candidate
+            for candidate in process_candidates
+            if candidate.backend == "metal_host_io"
+        )
+        self.assertEqual(metal_process.module_key, "metal")
+        self.assertEqual(metal_process.build_flag, "metal")
+
     def test_candidates_without_numpy_fallback_declare_it_explicitly(self) -> None:
         """Ops whose last resort lives outside the registry must not claim numpy."""
         detect_candidates = backend_registry.registered_backend_candidates(
@@ -176,6 +193,33 @@ class TestBackendRegistry(CustomOpsTestCase):
                 dtype_bytes=2,
             )
             self.assertGreater(model.device_bytes_per_row, 0)
+
+    def test_builtin_metal_candidates_declare_consumed_memory_models(self) -> None:
+        candidates = backend_registry.registered_backend_candidates()
+
+        backend_registry.validate_metal_memory_policy_declarations(
+            candidates,
+            require_memory_models=True,
+        )
+        metal_candidates = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.backend == "metal_host_io"
+        )
+        self.assertEqual(len(metal_candidates), 1)
+        candidate = metal_candidates[0]
+        self.assertEqual(
+            candidate.memory_model,
+            metal_memory_model_kind(candidate.logical_op),
+        )
+        estimate = metal_memory_estimate(
+            candidate.logical_op,
+            height=32,
+            width=48,
+            channels=3,
+            dtype_bytes=2,
+        )
+        self.assertGreater(estimate.peak_device_bytes, 0)
 
     def test_registered_cuda_non_chunk_models_are_consumable(self) -> None:
         sample_args = {
@@ -325,6 +369,70 @@ class TestBackendRegistry(CustomOpsTestCase):
         self.assertIs(selection.module, module)
         self.assertEqual(selection.backend, "openmp_cpu")
 
+    def test_backend_registry_selects_metal_from_separate_module(self) -> None:
+        class MetalModule:
+            def star_shrink_process_metal(self):
+                return None
+
+            def build_info(self):
+                return {"metal": True}
+
+        class CompiledModule:
+            def star_shrink_process(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": False, "openmp": True}
+
+        metal_module = MetalModule()
+        selection = backend_registry.resolve_backend(
+            "star_shrink_process",
+            load_module=lambda: (CompiledModule(), None),
+            module_loaders={"metal": lambda: (metal_module, None)},
+            metal_probe=lambda: {
+                "available": True,
+                "status": "available",
+            },
+        )
+
+        self.assertTrue(selection.native)
+        self.assertIs(selection.module, metal_module)
+        self.assertEqual(selection.backend, "metal_host_io")
+
+    def test_metal_runtime_unavailable_falls_back_to_openmp(self) -> None:
+        class MetalModule:
+            def star_shrink_process_metal(self):
+                return None
+
+            def build_info(self):
+                return {"metal": True}
+
+        class CompiledModule:
+            def star_shrink_process(self):
+                return None
+
+            def build_info(self):
+                return {"cuda": False, "openmp": True}
+
+        selection = backend_registry.resolve_backend(
+            "star_shrink_process",
+            load_module=lambda: (CompiledModule(), None),
+            module_loaders={"metal": lambda: (MetalModule(), None)},
+            metal_probe=lambda: {
+                "available": False,
+                "status": "explicitly_unavailable",
+                "reason_code": "metal_unified_memory_required",
+                "reason": "unified memory required",
+            },
+        )
+
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(selection.reason_code, "metal_unified_memory_required")
+        self.assertEqual(
+            selection.decision.reason_code,
+            "metal_unified_memory_required",
+        )
+
     def test_backend_registry_respects_build_flag(self) -> None:
         class Module:
             def wavelet_dec_rec_cuda_core(self):
@@ -415,6 +523,32 @@ class TestBackendRegistry(CustomOpsTestCase):
         self.assertEqual(selection.reason_code, "forced_cpu")
         self.assertEqual(selection.decision.reason_code, "forced_cpu")
         probe.assert_not_called()
+
+    def test_cpu_preference_does_not_load_or_probe_metal(self) -> None:
+        class Module:
+            def star_shrink_process(self):
+                return None
+
+            def build_info(self):
+                return {"openmp": True}
+
+        metal_loader = mock.Mock(
+            side_effect=AssertionError("Metal module must not load")
+        )
+        metal_probe = mock.Mock(
+            side_effect=AssertionError("Metal runtime must not be probed")
+        )
+        selection = backend_registry.resolve_backend(
+            "star_shrink_process",
+            "cpu",
+            load_module=lambda: (Module(), None),
+            module_loaders={"metal": metal_loader},
+            metal_probe=metal_probe,
+        )
+
+        self.assertEqual(selection.backend, "openmp_cpu")
+        metal_loader.assert_not_called()
+        metal_probe.assert_not_called()
 
     def test_cpu_preference_uses_numpy_for_cuda_only_op(self) -> None:
         loader = mock.Mock(side_effect=AssertionError("module must not load"))
@@ -688,6 +822,25 @@ class TestBackendRegistry(CustomOpsTestCase):
         self.assertEqual(selection.reason_code, "cuda_resource_exhausted")
         self.assertEqual(
             selection.decision.reason_code, "cuda_resource_exhausted")
+
+    def test_metal_resource_resolver_selects_openmp(self) -> None:
+        class CompiledModule:
+            def star_shrink_process(self):
+                return None
+
+            def build_info(self):
+                return {"openmp": True}
+
+        selection = backend_registry.resolve_after_resource_exhausted(
+            "star_shrink_process",
+            "metal_host_io",
+            CustomOpResourceExhaustedError("working set is insufficient"),
+            load_module=lambda: (CompiledModule(), None),
+            module_loaders={"metal": lambda: (None, "failed Metal module")},
+        )
+
+        self.assertEqual(selection.backend, "openmp_cpu")
+        self.assertEqual(selection.reason_code, "metal_resource_exhausted")
 
     def test_resource_resolver_selects_numpy_without_cpu_candidate(self) -> None:
         class Module:

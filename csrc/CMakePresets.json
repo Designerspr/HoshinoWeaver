@@ -17,7 +17,8 @@
         "HNW_ENABLE_OMP_SIMD": "OFF",
         "HNW_ENABLE_LTO": "OFF",
         "HNW_ENABLE_MARCH_NATIVE": "OFF",
-        "HNW_ENABLE_CUDA": "OFF"
+        "HNW_ENABLE_CUDA": "OFF",
+        "HNW_ENABLE_METAL": "OFF"
       }
     },
     {
@@ -54,7 +55,8 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "HNW_ENABLE_CUDA": "OFF"
+        "HNW_ENABLE_CUDA": "OFF",
+        "HNW_ENABLE_METAL": "ON"
       }
     },
     {

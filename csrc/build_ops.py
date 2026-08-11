@@ -200,7 +200,18 @@ def _render_cmd(cmd: list[str]) -> str:
 
 
 def _shared_module_patterns() -> tuple[str, ...]:
-    return ("_C*.so", "_C*.pyd", "_C*.dylib")
+    return (
+        "_C*.so",
+        "_C*.pyd",
+        "_C*.dylib",
+        "_metal*.so",
+        "_metal*.dylib",
+        "_metal_kernels.metallib",
+    )
+
+
+def _metal_output_patterns() -> tuple[str, ...]:
+    return ("_metal*.so", "_metal*.dylib", "_metal_kernels.metallib")
 
 
 def _collect_mingw_deps(start: Path, bin_dir: Path, objdump: Path) -> list[str]:
@@ -254,6 +265,12 @@ def _copy_mingw_runtime_dlls(cc: str) -> None:
 
 def _clean_shared_module_outputs() -> None:
     for pattern in _shared_module_patterns():
+        for path in PACKAGE_DIR.glob(pattern):
+            path.unlink()
+
+
+def _clean_metal_outputs() -> None:
+    for pattern in _metal_output_patterns():
         for path in PACKAGE_DIR.glob(pattern):
             path.unlink()
 
@@ -370,6 +387,9 @@ def _cmake_build_commands(
         "HNW_ENABLE_MARCH_NATIVE": "ON" if env.get("HNW_CSRC_ARCH", "0") == "1" else "OFF",
         "HNW_ENABLE_LTO": "ON" if args.lto else "OFF",
         "HNW_ENABLE_CUDA": "ON" if args.cuda else "OFF",
+        "HNW_ENABLE_METAL": (
+            "ON" if SYSTEM == "Darwin" and not args.no_metal else "OFF"
+        ),
     }
     if env.get("HNW_CSRC_EXTRA_CFLAGS"):
         cache_vars["HNW_EXTRA_CXX_FLAGS"] = env["HNW_CSRC_EXTRA_CFLAGS"]
@@ -474,6 +494,11 @@ def main() -> int:
         help="Disable OpenMP for this build.",
     )
     parser.add_argument(
+        "--no-metal",
+        action="store_true",
+        help="Disable the Metal custom-op extension on macOS.",
+    )
+    parser.add_argument(
         "--march-native",
         action="store_true",
         help="Enable -march=native on non-Windows builds.",
@@ -538,6 +563,7 @@ def main() -> int:
     print(f"lto={args.lto}")
     print(f"omp_simd={env.get('HNW_CSRC_OMP_SIMD', '0')}")
     print(f"cuda={int(args.cuda)}")
+    print(f"metal={int(SYSTEM == 'Darwin' and not args.no_metal)}")
     if "HNW_LIBOMP_PREFIX" in env:
         print(f"libomp_prefix={env['HNW_LIBOMP_PREFIX']}")
     if "CUDAHOSTCXX" in env:
@@ -557,6 +583,10 @@ def main() -> int:
     try:
         if args.clean:
             _clean_cmake_outputs(resolved_preset)
+        elif SYSTEM == "Darwin" and args.no_metal:
+            # CMake stops producing the target, but it does not remove a
+            # previously built extension or shader sidecar from the package.
+            _clean_metal_outputs()
         _run_command(
             configure_cmd,
             cwd=ROOT,

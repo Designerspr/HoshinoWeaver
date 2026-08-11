@@ -5,6 +5,7 @@ option(HNW_ENABLE_OMP_SIMD "Enable explicit OpenMP SIMD pragmas." OFF)
 option(HNW_ENABLE_LTO "Enable link-time optimization." OFF)
 option(HNW_ENABLE_MARCH_NATIVE "Enable -march=native for local builds." OFF)
 option(HNW_ENABLE_CUDA "Enable CUDA native custom-op targets." OFF)
+option(HNW_ENABLE_METAL "Enable Metal native custom-op targets on macOS." OFF)
 
 set(HNW_EXTRA_CXX_FLAGS "" CACHE STRING "Extra C++ compiler flags for custom-op builds.")
 set(HNW_EXTRA_LINK_FLAGS "" CACHE STRING "Extra linker flags for custom-op builds.")

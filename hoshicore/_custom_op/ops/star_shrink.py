@@ -12,11 +12,16 @@ from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_comp
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
+from hoshicore._custom_op._dispatch import load_metal_module as _load_metal_module_result
+from hoshicore._custom_op.backend_registry import ACCELERATOR_BACKENDS as _ACCELERATOR_BACKENDS
 from hoshicore._custom_op.backend_registry import BackendSelection
+from hoshicore._custom_op.backend_registry import resolve_after_accelerator_failure
 from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
 from hoshicore._custom_op.backend_registry import select_backend as _select_backend
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
 from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
+from hoshicore._custom_op.metal_memory import metal_memory_estimate
+from hoshicore._custom_op.metal_memory import run_admitted_metal as _run_admitted_metal
 from hoshicore.component.star_shrink import apply_mask, deringing, morph_shrink_luma
 
 
@@ -150,7 +155,11 @@ def star_shrink_process_numpy(
     return apply_mask(image_arr, processed, mask_arr)
 
 
+_NATIVE_BACKENDS = frozenset({"openmp_cpu", "cuda_host_io", "metal_host_io"})
+
+
 def _star_shrink_process_compiled_kernel(
+    backend: str,
     kernel_name: str,
     image: np.ndarray,
     star_mask: np.ndarray,
@@ -160,9 +169,17 @@ def _star_shrink_process_compiled_kernel(
     shrink_ratio: float | None,
     deringing_ksize: int,
 ) -> np.ndarray:
-    module, _ = _load_compiled_module_result()
+    if backend not in _NATIVE_BACKENDS:
+        raise RuntimeError(f"star_shrink_process: unsupported native backend {backend}")
+    # Metal lives in its own extension; OpenMP and CUDA share the _C module.
+    if backend == "metal_host_io":
+        module, module_error = _load_metal_module_result()
+    else:
+        module, module_error = _load_compiled_module_result()
     if module is None or not hasattr(module, kernel_name):
-        raise RuntimeError("compiled custom op backend is unavailable")
+        raise RuntimeError(
+            module_error or f"{backend} star_shrink_process backend is unavailable"
+        )
     image_arr, mask_arr, shrink_size, shape, times, ratio, dering_size = _validate_inputs(
         image,
         star_mask,
@@ -174,7 +191,9 @@ def _star_shrink_process_compiled_kernel(
     )
     if np.dtype(image_arr.dtype) not in _COMPILED_SUPPORTED_DTYPES:
         raise ValueError("star_shrink_process: compiled backend supports uint8/uint16 only")
-    _apply_compiled_threads("star_shrink_process", image_arr)
+    # Only the OpenMP kernel consumes the process-wide thread count.
+    if backend == "openmp_cpu":
+        _apply_compiled_threads("star_shrink_process", image_arr)
     kernel = getattr(module, kernel_name)
     kernel_args = (
         image_arr,
@@ -185,14 +204,25 @@ def _star_shrink_process_compiled_kernel(
         ratio,
         dering_size,
     )
-    if kernel_name != "star_shrink_process_cuda":
-        return kernel(*kernel_args)
-
-    estimate = cuda_memory_estimate(
-        "star_shrink_process",
-        **_star_shrink_estimate_args(image_arr),
-    )
-    return _run_admitted_cuda(estimate, kernel, *kernel_args)
+    if backend == "metal_host_io":
+        return _run_admitted_metal(
+            metal_memory_estimate(
+                "star_shrink_process",
+                **_star_shrink_estimate_args(image_arr),
+            ),
+            kernel,
+            *kernel_args,
+        )
+    if backend == "cuda_host_io":
+        return _run_admitted_cuda(
+            cuda_memory_estimate(
+                "star_shrink_process",
+                **_star_shrink_estimate_args(image_arr),
+            ),
+            kernel,
+            *kernel_args,
+        )
+    return kernel(*kernel_args)
 
 
 def star_shrink_process_compiled(
@@ -205,6 +235,7 @@ def star_shrink_process_compiled(
     deringing_ksize: int,
 ) -> np.ndarray:
     return _star_shrink_process_compiled_kernel(
+        "openmp_cpu",
         "star_shrink_process",
         image,
         star_mask,
@@ -226,7 +257,30 @@ def star_shrink_process_compiled_cuda(
     deringing_ksize: int,
 ) -> np.ndarray:
     return _star_shrink_process_compiled_kernel(
+        "cuda_host_io",
         "star_shrink_process_cuda",
+        image,
+        star_mask,
+        shrink_ksize,
+        shrink_shape,
+        shrink_times,
+        shrink_ratio,
+        deringing_ksize,
+    )
+
+
+def star_shrink_process_compiled_metal(
+    image: np.ndarray,
+    star_mask: np.ndarray,
+    shrink_ksize: int,
+    shrink_shape: str,
+    shrink_times: int,
+    shrink_ratio: float | None,
+    deringing_ksize: int,
+) -> np.ndarray:
+    return _star_shrink_process_compiled_kernel(
+        "metal_host_io",
+        "star_shrink_process_metal",
         image,
         star_mask,
         shrink_ksize,
@@ -239,6 +293,8 @@ def star_shrink_process_compiled_cuda(
 
 @lru_cache(maxsize=2)
 def _select_star_shrink_process_backend(preference: str) -> BackendSelection:
+    # The registry resolves candidate.module_key to its own default loader, so
+    # the Metal module needs no per-call injection here.
     return _select_backend(
         "star_shrink_process",
         preference,
@@ -251,9 +307,12 @@ def _star_shrink_process_backend(
 ) -> tuple[str, Callable[..., np.ndarray]]:
     if not selection.native or selection.candidate is None:
         return "numpy", star_shrink_process_numpy
-    if selection.candidate.kernel_name == "star_shrink_process_cuda":
+    backend = selection.candidate.backend
+    if backend == "cuda_host_io":
         return "cuda", star_shrink_process_compiled_cuda
-    if selection.candidate.kernel_name == "star_shrink_process":
+    if backend == "metal_host_io":
+        return "metal", star_shrink_process_compiled_metal
+    if backend == "openmp_cpu":
         return "cpu", star_shrink_process_compiled
     raise RuntimeError(
         f"unknown star_shrink_process backend candidate: {selection.candidate}"
@@ -294,14 +353,16 @@ def star_shrink_process(
         shrink_ratio,
         deringing_ksize,
     )
-    if backend_name != "cuda":
+    candidate = selection.candidate
+    if candidate is None or candidate.backend not in _ACCELERATOR_BACKENDS:
         return backend(*kernel_args)
 
     try:
         return backend(*kernel_args)
     except RuntimeError as exc:
-        fallback_selection = resolve_after_cuda_failure(
+        fallback_selection = resolve_after_accelerator_failure(
             "star_shrink_process",
+            candidate.backend,
             exc,
             load_module=_load_compiled_module_result,
             log=_debug_log,
@@ -310,8 +371,10 @@ def star_shrink_process(
     fallback_name, fallback_backend = _star_shrink_process_backend(
         fallback_selection
     )
-    if fallback_name == "cuda":
-        raise RuntimeError("CUDA backend remained selected after runtime exclusion")
+    if fallback_name == backend_name:
+        raise RuntimeError(
+            f"{backend_name} backend remained selected after runtime exclusion"
+        )
     return fallback_backend(*kernel_args)
 
 

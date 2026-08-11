@@ -8,12 +8,15 @@ import hoshicore._custom_op as custom_ops
 import hoshicore._custom_op._dispatch as custom_op_dispatch
 from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
+from hoshicore._custom_op._dispatch import is_metal_resource_exhausted_error
+from hoshicore._custom_op._dispatch import is_metal_runtime_unavailable_error
 import hoshicore._custom_op.ops.sigma_clip as sigma_clip_chunk_ops
 
 
 class TestCustomOpDispatchHelpers(unittest.TestCase):
     def tearDown(self) -> None:
         custom_op_dispatch.set_backend_preference(None)
+        custom_op_dispatch.load_metal_module.cache_clear()
 
     def test_backend_preference_accepts_cpu_from_environment(self) -> None:
         with mock.patch.dict(
@@ -175,6 +178,70 @@ class TestCustomOpDispatchHelpers(unittest.TestCase):
                 RuntimeError("cudaMalloc: out of memory")
             )
         )
+
+    def test_metal_runtime_classifier_requires_structured_error(self) -> None:
+        class MetalRuntimeUnavailableError(RuntimeError):
+            pass
+
+        module = mock.Mock(
+            MetalRuntimeUnavailableError=MetalRuntimeUnavailableError
+        )
+        with mock.patch.object(
+            custom_op_dispatch,
+            "load_metal_module",
+            return_value=(module, None),
+        ):
+            self.assertTrue(
+                is_metal_runtime_unavailable_error(
+                    MetalRuntimeUnavailableError("device was removed")
+                )
+            )
+            self.assertFalse(
+                is_metal_runtime_unavailable_error(
+                    RuntimeError("device was removed")
+                )
+            )
+
+    def test_metal_resource_classifier_requires_structured_error(self) -> None:
+        class MetalResourceExhaustedError(RuntimeError):
+            pass
+
+        module = mock.Mock(
+            MetalResourceExhaustedError=MetalResourceExhaustedError
+        )
+        with mock.patch.object(
+            custom_op_dispatch,
+            "load_metal_module",
+            return_value=(module, None),
+        ):
+            self.assertTrue(
+                is_metal_resource_exhausted_error(
+                    MetalResourceExhaustedError("working set exhausted")
+                )
+            )
+            self.assertFalse(
+                is_metal_resource_exhausted_error(
+                    RuntimeError("Metal buffer allocation failed")
+                )
+            )
+
+    def test_metal_device_probe_validates_available_payload(self) -> None:
+        module = mock.Mock()
+        module.metal_device_info.return_value = {
+            "available": True,
+            "status": "available",
+            "recommended_max_working_set_bytes": 4096,
+            "current_allocated_bytes": 512,
+        }
+        with mock.patch.object(
+            custom_op_dispatch,
+            "load_metal_module",
+            return_value=(module, None),
+        ):
+            payload = custom_op_dispatch.metal_device_info()
+
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["current_allocated_bytes"], 512)
 
     def test_cuda_memory_probe_propagates_runtime_errors(self) -> None:
         module = mock.Mock()

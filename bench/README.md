@@ -92,7 +92,7 @@ python -m bench.cli run pipeline.workflow -- --input-dir <image-dir> --cases sta
 
 - `auto`：默认生产 dispatch；每个 case 可能实际使用 CUDA、OpenMP、OpenCV
   或 NumPy，不能把报告列名写成 “CUDA”；
-- `cpu`：禁用 CUDA，但保留 compiled CPU/OpenMP；
+- `cpu`：禁用 Metal/CUDA 等 GPU backend，但保留 compiled CPU/OpenMP；
 - `numpy`：强制 custom-op 走 NumPy fallback。
 
 复合计算路径可能依次调用多个 logical op，也可能发生运行时 fallback，因此
