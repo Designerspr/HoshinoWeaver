@@ -114,3 +114,49 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
           HNW_CUSTOM_OPS_FALLBACK: numpy
         run: python -m pytest tests/ -v --tb=short -x
+
+  test-macos-metal:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          brew install libomp
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build OpenMP and Metal custom ops
+        run: python csrc/build_ops.py --compiler clang
+
+      - name: Verify real Metal runtime and kernel
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python csrc/verify_metal_runtime.py
+
+      - name: Run focused Metal and fallback tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m pytest tests/custom_ops/test_dispatch.py -v --tb=short -x
+          python -m pytest tests/custom_ops/test_backend_registry.py -v --tb=short -x
+          python -m pytest tests/custom_ops/test_metal_memory.py -v --tb=short -x
+          python -m pytest tests/custom_ops/test_star_shrink.py -v --tb=short -x
+          python -m pytest tests/component/test_star_shrink.py -v --tb=short -x
+
+      - name: Verify Metal in clean PyInstaller package
+        run: python csrc/verify_packaged_custom_ops.py --require-metal
+
+      # Runs last: it deletes the Metal artifacts the steps above rely on.
+      - name: Rebuild without Metal and verify OpenMP fallback
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python csrc/build_ops.py --compiler clang --no-metal
+          python csrc/verify_no_metal_fallback.py
