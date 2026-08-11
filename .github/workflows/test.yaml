@@ -128,7 +128,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install libomp
+          # pyexiv2 ships a libexiv2.dylib linked against Homebrew inih, so the
+          # component tests cannot even be collected without libINIReader.
+          brew install libomp inih
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
