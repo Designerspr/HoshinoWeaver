@@ -82,6 +82,23 @@ if _c_spec is not None:
     for _dll in _glob.glob(_osp.join(_cop_dir, '*.dll')):
         shared_binaries.append((_dll, '.'))
 
+# Standalone Metal extension (macOS): the shader library is resolved at runtime
+# from the directory of the loaded _metal module, so it must land in the same
+# package directory rather than the bundle root.
+_metal_spec = _imputil.find_spec('hoshicore._custom_op._metal')
+if _metal_spec is not None and _metal_spec.origin:
+    import os.path as _osp_metal
+    shared_hiddenimports.append('hoshicore._custom_op._metal')
+    _metallib = _osp_metal.join(
+        _osp_metal.dirname(_metal_spec.origin), '_metal_kernels.metallib')
+    if not _osp_metal.exists(_metallib):
+        raise RuntimeError(
+            'hoshicore._custom_op._metal is present but _metal_kernels.metallib '
+            'is missing; rebuild with "python csrc/build_ops.py" or drop the '
+            'Metal backend with "python csrc/build_ops.py --no-metal"'
+        )
+    shared_datas.append((_metallib, 'hoshicore/_custom_op'))
+
 # libturbojpeg: loaded via ctypes at runtime, not traced by PyInstaller
 # turbojpeg Python package uses conditional import in image_io, so add explicitly.
 try:
