@@ -143,12 +143,9 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
     BackendCandidate("equalize_noise_correct", "openmp_cpu", "equalize_noise_correct"),
     BackendCandidate("noise_fill_local_mean", "openmp_cpu", "noise_fill_local_mean"),
     BackendCandidate("noise_equalization_params", "openmp_cpu", "noise_equalization_params"),
-    # Provisional priority: above OpenMP so the production Metal -> OpenMP ->
-    # NumPy chain is actually exercised, but below CUDA rather than relying on
-    # declaration order to break a tie.  Whether Metal stays the macOS default
-    # must be settled by paired Metal/OpenMP timing on real Apple hardware;
-    # hosted CI runners virtualize the GPU and expose few vCPUs, so their
-    # numbers are smoke-level only and cannot decide this.
+    # Provisional: above OpenMP so the Metal -> OpenMP -> NumPy chain is
+    # exercised, explicitly below CUDA instead of relying on declaration order.
+    # Real Apple hardware timing decides whether it stays the macOS default.
     BackendCandidate(
         "star_shrink_process",
         "metal_host_io",

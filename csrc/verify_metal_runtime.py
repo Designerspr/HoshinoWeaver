@@ -13,9 +13,7 @@ from hoshicore._custom_op.metal_memory import metal_memory_estimate
 from hoshicore._custom_op.ops import star_shrink as star_shrink_ops
 
 
-# Large enough to dispatch many threadgroups per kernel, small enough to stay
-# inside a hosted runner's working set.  Real-hardware benchmarking should use
-# production frame sizes instead.
+# Many threadgroups per kernel, still inside a hosted runner's working set.
 _TIMED_SHAPE = (1152, 1536, 3)
 _TIMED_PARAMS = (3, "CIRCLE", 1, 1.0, 5)
 _TIMING_REPEATS = 3
@@ -52,9 +50,8 @@ def _best_seconds(fn, *args) -> float:
 def _paired_timing() -> dict[str, object]:
     """Smoke-level Metal/OpenMP timing through the production wrappers.
 
-    Hosted macOS runners virtualize the GPU and expose few vCPUs, so these
-    numbers only prove both paths run at scale and agree numerically.  They are
-    NOT a basis for choosing the production backend priority.
+    Hosted runners virtualize the GPU, so this only proves both paths run at
+    scale and agree numerically; it cannot decide backend priority.
     """
     rng = np.random.default_rng(20260811)
     image = rng.integers(100, 50000, size=_TIMED_SHAPE, dtype=np.uint16)

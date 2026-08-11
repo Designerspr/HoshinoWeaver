@@ -115,6 +115,50 @@ jobs:
           HNW_CUSTOM_OPS_FALLBACK: numpy
         run: python -m pytest tests/ -v --tb=short -x
 
+  test-macos-cpu:
+    runs-on: macos-15
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          # pyexiv2 ships a libexiv2.dylib linked against Homebrew inih, so the
+          # component tests cannot even be collected without libINIReader.
+          brew install libomp inih
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build OpenMP custom ops without Metal
+        run: python csrc/build_ops.py --compiler clang --no-metal
+
+      - name: Verify the build is OpenMP-only with no Metal artifacts
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python csrc/verify_no_metal_fallback.py
+
+      - name: Verify custom ops in clean PyInstaller package
+        run: python csrc/verify_packaged_custom_ops.py
+
+      - name: Run tests (compiled backend)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m pytest tests/ -v --tb=short -x
+
+      - name: Run tests (numpy fallback)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          HNW_CUSTOM_OPS_FALLBACK: numpy
+        run: python -m pytest tests/ -v --tb=short -x
+
   test-macos-metal:
     runs-on: macos-15
 
@@ -142,15 +186,11 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python csrc/verify_metal_runtime.py
 
-      - name: Run focused Metal and fallback tests
+      # The runtime gate above already gives the Metal-specific fast signal.
+      - name: Run tests (compiled backend)
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python -m pytest tests/custom_ops/test_dispatch.py -v --tb=short -x
-          python -m pytest tests/custom_ops/test_backend_registry.py -v --tb=short -x
-          python -m pytest tests/custom_ops/test_metal_memory.py -v --tb=short -x
-          python -m pytest tests/custom_ops/test_star_shrink.py -v --tb=short -x
-          python -m pytest tests/component/test_star_shrink.py -v --tb=short -x
+        run: python -m pytest tests/ -v --tb=short -x
 
       - name: Verify Metal in clean PyInstaller package
         run: python csrc/verify_packaged_custom_ops.py --require-metal

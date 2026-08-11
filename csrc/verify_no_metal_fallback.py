@@ -1,8 +1,7 @@
 """Verify a --no-metal macOS build drops Metal and falls back to OpenMP.
 
-Run this after `python csrc/build_ops.py --compiler clang --no-metal` on a
-machine whose previous build produced the Metal extension: a stale `_metal`
-module or shader sidecar would otherwise keep being selected.
+Covers both a rebuild over a previous Metal build (stale extension or shader
+sidecar would still be selected) and a plain CPU-only macOS build.
 """
 
 from __future__ import annotations
@@ -28,8 +27,15 @@ def main() -> None:
         raise SystemExit(f"--no-metal build left stale Metal artifacts: {stale}")
 
     from hoshicore._custom_op import backend_registry
+    from hoshicore._custom_op import build_info
     from hoshicore._custom_op._dispatch import load_metal_module
     from hoshicore._custom_op.ops import star_shrink as star_shrink_ops
+
+    info = build_info()
+    if info.get("openmp") is not True:
+        raise SystemExit(f"expected an OpenMP-enabled build, got openmp={info.get('openmp')!r}")
+    if info.get("cuda") is not False:
+        raise SystemExit(f"expected a CUDA-free build, got cuda={info.get('cuda')!r}")
 
     module, _ = load_metal_module()
     if module is not None:
