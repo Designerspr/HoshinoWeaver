@@ -546,6 +546,38 @@ def star_mask_dog_compiled_cuda(
     )
 
 
+def star_mask_dog_compiled_metal(
+    image: np.ndarray,
+    sigma_small: float = 1.5,
+    sigma_large: float = 12.0,
+    threshold_ratio: int | float = 3,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+) -> np.ndarray:
+    module, module_error = _load_metal_module_result()
+    if module is None or not hasattr(module, "star_mask_dog_metal"):
+        raise RuntimeError(module_error or "Metal custom op backend is unavailable")
+    image_arr = _validate_dog_image(image, "star_mask_dog")
+    small_kernel_size = _dog_kernel_size(sigma_small, "star_mask_dog")
+    large_kernel_size = _dog_kernel_size(sigma_large, "star_mask_dog")
+    estimate = metal_memory_estimate(
+        "star_mask_dog",
+        **_star_shrink_estimate_args(image_arr),
+        small_kernel_size=small_kernel_size,
+        large_kernel_size=large_kernel_size,
+    )
+    return _run_admitted_metal(
+        estimate,
+        module.star_mask_dog_metal,
+        image_arr,
+        float(sigma_small),
+        float(sigma_large),
+        float(threshold_ratio),
+        int(open_ksize),
+        int(dilate_ksize),
+    )
+
+
 def star_mask_dog_compiled_cpu(
     image: np.ndarray,
     sigma_small: float = 1.5,
@@ -585,9 +617,11 @@ def _star_mask_dog_backend(
 ) -> tuple[str, Callable[..., np.ndarray]]:
     if not selection.native or selection.candidate is None:
         return "numpy", star_mask_dog_numpy
-    if selection.candidate.kernel_name == "star_mask_dog_cuda":
+    if selection.candidate.backend == "cuda_host_io":
         return "cuda", star_mask_dog_compiled_cuda
-    if selection.candidate.kernel_name == "star_mask_dog_cpu":
+    if selection.candidate.backend == "metal_host_io":
+        return "metal", star_mask_dog_compiled_metal
+    if selection.candidate.backend == "openmp_cpu":
         return "cpu", star_mask_dog_compiled_cpu
     raise RuntimeError(f"unknown star_mask_dog backend candidate: {selection.candidate}")
 
@@ -622,22 +656,26 @@ def star_mask_dog(
         open_ksize=open_ksize,
         dilate_ksize=dilate_ksize,
     )
-    if backend_name != "cuda":
+    candidate = selection.candidate
+    if candidate is None or candidate.backend not in _ACCELERATOR_BACKENDS:
         return backend(image, **kernel_kwargs)
 
     try:
         return backend(image, **kernel_kwargs)
     except RuntimeError as exc:
-        fallback_selection = resolve_after_cuda_failure(
+        fallback_selection = resolve_after_accelerator_failure(
             "star_mask_dog",
+            candidate.backend,
             exc,
             load_module=_load_compiled_module_result,
             log=_debug_log,
         )
 
     fallback_name, fallback_backend = _star_mask_dog_backend(fallback_selection)
-    if fallback_name == "cuda":
-        raise RuntimeError("CUDA backend remained selected after runtime exclusion")
+    if fallback_name == backend_name:
+        raise RuntimeError(
+            f"{candidate.backend} backend remained selected after runtime exclusion"
+        )
     return fallback_backend(image, **kernel_kwargs)
 
 

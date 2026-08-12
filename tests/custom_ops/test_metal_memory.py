@@ -14,6 +14,35 @@ class TestMetalMemory(CustomOpsTestCase):
         metal_memory._reset_metal_reservations_for_tests()
         super().tearDown()
 
+    def test_star_mask_dog_estimator_matches_workspace_buffers(self) -> None:
+        # Mirrors star_mask_ops.mm: image, gray/tmp/blur_small/blur_large/dog,
+        # both Gaussian weight buffers, and the mask/scratch pair.
+        estimate = metal_memory.estimate_star_mask_dog(
+            height=32,
+            width=48,
+            channels=3,
+            dtype_bytes=2,
+            small_kernel_size=9,
+            large_kernel_size=73,
+        )
+        pixels = 32 * 48
+        expected = (
+            pixels * 3 * 2 + 5 * pixels * 4 + (9 + 73) * 4 + 2 * pixels
+        )
+        self.assertEqual(estimate.peak_device_bytes, expected)
+        self.assertEqual(estimate.logical_op, "star_mask_dog")
+
+    def test_star_mask_dog_estimator_rejects_nonpositive_kernel_sizes(self) -> None:
+        with self.assertRaises(ValueError):
+            metal_memory.estimate_star_mask_dog(
+                height=8,
+                width=8,
+                channels=1,
+                dtype_bytes=2,
+                small_kernel_size=0,
+                large_kernel_size=9,
+            )
+
     def test_star_shrink_estimator_matches_workspace_buffers(self) -> None:
         estimate = metal_memory.estimate_star_shrink_process(
             height=11,

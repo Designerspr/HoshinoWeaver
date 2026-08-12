@@ -205,29 +205,37 @@ if(HNW_ENABLE_METAL)
         )
     endif()
 
-    set(HNW_METAL_SHADER_SOURCE
+    # Every shader compiles to its own .air; metallib links them into the single
+    # library the runtime loads, so kernels can be split per logical op.
+    set(HNW_METAL_SHADER_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/ops/metal/star_shrink/star_shrink_process.metal"
-    )
-    set(HNW_METAL_AIR
-        "${CMAKE_CURRENT_BINARY_DIR}/metal/star_shrink_process.air"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ops/metal/star_shrink/star_mask.metal"
     )
     set(HNW_METAL_LIBRARY
         "${HNW_PACKAGE_OUTPUT_DIR}/_metal_kernels.metallib"
     )
-    add_custom_command(
-        OUTPUT "${HNW_METAL_AIR}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory
-                "${CMAKE_CURRENT_BINARY_DIR}/metal"
-        COMMAND "${HNW_XCRUN_EXECUTABLE}" -sdk macosx metal
-                -c "${HNW_METAL_SHADER_SOURCE}" -o "${HNW_METAL_AIR}"
-        DEPENDS "${HNW_METAL_SHADER_SOURCE}"
-        VERBATIM
-    )
+    set(HNW_METAL_AIR_FILES "")
+    foreach(HNW_METAL_SHADER IN LISTS HNW_METAL_SHADER_SOURCES)
+        get_filename_component(HNW_METAL_SHADER_NAME "${HNW_METAL_SHADER}" NAME_WE)
+        set(HNW_METAL_AIR
+            "${CMAKE_CURRENT_BINARY_DIR}/metal/${HNW_METAL_SHADER_NAME}.air"
+        )
+        add_custom_command(
+            OUTPUT "${HNW_METAL_AIR}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${CMAKE_CURRENT_BINARY_DIR}/metal"
+            COMMAND "${HNW_XCRUN_EXECUTABLE}" -sdk macosx metal
+                    -c "${HNW_METAL_SHADER}" -o "${HNW_METAL_AIR}"
+            DEPENDS "${HNW_METAL_SHADER}"
+            VERBATIM
+        )
+        list(APPEND HNW_METAL_AIR_FILES "${HNW_METAL_AIR}")
+    endforeach()
     add_custom_command(
         OUTPUT "${HNW_METAL_LIBRARY}"
         COMMAND "${HNW_XCRUN_EXECUTABLE}" -sdk macosx metallib
-                "${HNW_METAL_AIR}" -o "${HNW_METAL_LIBRARY}"
-        DEPENDS "${HNW_METAL_AIR}"
+                ${HNW_METAL_AIR_FILES} -o "${HNW_METAL_LIBRARY}"
+        DEPENDS ${HNW_METAL_AIR_FILES}
         VERBATIM
     )
     add_custom_target(hnw_metal_shaders ALL DEPENDS "${HNW_METAL_LIBRARY}")
@@ -238,6 +246,7 @@ if(HNW_ENABLE_METAL)
         common/metal_runtime.mm
         common/metal_host_io_workspace.mm
         ops/metal/star_shrink/star_shrink_process_ops.mm
+        ops/metal/star_shrink/star_mask_ops.mm
     )
     add_dependencies(_metal hnw_metal_shaders)
     target_include_directories(

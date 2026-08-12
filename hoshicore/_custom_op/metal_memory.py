@@ -78,8 +78,41 @@ def estimate_star_shrink_process(
     )
 
 
+def estimate_star_mask_dog(
+    *,
+    height: int,
+    width: int,
+    channels: int,
+    dtype_bytes: int,
+    small_kernel_size: int,
+    large_kernel_size: int,
+) -> MetalMemoryEstimate:
+    if min(height, width, channels, dtype_bytes) <= 0:
+        raise ValueError(
+            "star-mask-DoG Metal memory estimate requires positive dimensions"
+        )
+    if min(small_kernel_size, large_kernel_size) <= 0:
+        raise ValueError(
+            "star-mask-DoG Metal memory estimate requires positive kernel sizes"
+        )
+    pixels = height * width
+    image_bytes = pixels * channels * dtype_bytes
+    plane_float_bytes = pixels * 4
+    weight_bytes = (small_kernel_size + large_kernel_size) * 4
+    return MetalMemoryEstimate(
+        logical_op="star_mask_dog",
+        # gray, tmp, blur_small, blur_large, dog; mask and scratch are uint8.
+        peak_device_bytes=(
+            image_bytes + 5 * plane_float_bytes + weight_bytes + 2 * pixels
+        ),
+        confidence="exact",
+        reason="shared Metal image, blur, DoG, Gaussian weight, and mask buffers",
+    )
+
+
 _METAL_STATIC_MEMORY_ESTIMATORS = {
     "star_shrink_process": estimate_star_shrink_process,
+    "star_mask_dog": estimate_star_mask_dog,
 }
 
 

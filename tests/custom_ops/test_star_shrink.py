@@ -211,6 +211,151 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
         )
         native.assert_called_once()
 
+    def test_star_mask_dog_metal_uses_selected_module_and_admission(self) -> None:
+        image = np.arange(8 * 9 * 3, dtype=np.uint16).reshape(8, 9, 3)
+        expected = np.ones(image.shape[:2], dtype=np.uint8)
+        native = mock.Mock(return_value=expected)
+        module = mock.Mock(star_mask_dog_metal=native)
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_load_metal_module_result",
+                return_value=(module, None),
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "_run_admitted_metal",
+                side_effect=lambda estimate, kernel, *args: kernel(*args),
+            ) as admitted,
+        ):
+            got = star_shrink_ops.star_mask_dog_compiled_metal(image)
+
+        np.testing.assert_array_equal(got, expected)
+        admitted.assert_called_once()
+        native.assert_called_once()
+
+    def test_star_mask_dog_metal_estimate_receives_gaussian_kernel_sizes(self) -> None:
+        # The weight buffers are sized from sigma, so the estimator total cannot
+        # match the workspace high-water unless both sizes reach it.
+        image = np.zeros((8, 9, 3), dtype=np.uint16)
+        module = mock.Mock(star_mask_dog_metal=mock.Mock(return_value=image[..., 0]))
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_load_metal_module_result",
+                return_value=(module, None),
+            ),
+            mock.patch.object(
+                star_shrink_ops, "metal_memory_estimate"
+            ) as estimate,
+            mock.patch.object(
+                star_shrink_ops,
+                "_run_admitted_metal",
+                side_effect=lambda est, kernel, *args: kernel(*args),
+            ),
+        ):
+            star_shrink_ops.star_mask_dog_compiled_metal(
+                image, sigma_small=1.5, sigma_large=12.0
+            )
+
+        estimate.assert_called_once()
+        self.assertEqual(estimate.call_args.args[0], "star_mask_dog")
+        self.assertEqual(estimate.call_args.kwargs["small_kernel_size"], 2 * 5 + 1)
+        self.assertEqual(estimate.call_args.kwargs["large_kernel_size"], 2 * 36 + 1)
+
+    def test_star_mask_dog_metal_candidate_selects_the_metal_entry_point(self) -> None:
+        candidate = backend_registry.BackendCandidate(
+            "star_mask_dog",
+            "metal_host_io",
+            "star_mask_dog_metal",
+            module_key="metal",
+            build_flag="metal",
+            memory_model="static_estimator",
+        )
+        selection = backend_registry.BackendSelection(candidate, True, None)
+
+        backend_name, backend = star_shrink_ops._star_mask_dog_backend(selection)
+
+        self.assertEqual(backend_name, "metal")
+        self.assertIs(backend, star_shrink_ops.star_mask_dog_compiled_metal)
+
+    @staticmethod
+    def _star_mask_dog_metal_selections() -> tuple[
+        backend_registry.BackendSelection, backend_registry.BackendSelection
+    ]:
+        metal_candidate = backend_registry.BackendCandidate(
+            "star_mask_dog",
+            "metal_host_io",
+            "star_mask_dog_metal",
+            module_key="metal",
+            build_flag="metal",
+            memory_model="static_estimator",
+        )
+        cpu_candidate = backend_registry.BackendCandidate(
+            "star_mask_dog",
+            "openmp_cpu",
+            "star_mask_dog_cpu",
+        )
+        return (
+            backend_registry.BackendSelection(metal_candidate, object(), None),
+            backend_registry.BackendSelection(cpu_candidate, object(), None),
+        )
+
+    def test_star_mask_dog_metal_resource_exhaustion_falls_back_to_cpu(self) -> None:
+        image = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)
+        metal_selection, cpu_selection = self._star_mask_dog_metal_selections()
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_select_star_mask_dog_backend",
+                return_value=metal_selection,
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "star_mask_dog_compiled_metal",
+                side_effect=CustomOpResourceExhaustedError("admission denied"),
+            ),
+            mock.patch.object(
+                backend_registry,
+                "resolve_after_resource_exhausted",
+                return_value=cpu_selection,
+            ) as resolve,
+            mock.patch.object(
+                star_shrink_ops,
+                "star_mask_dog_compiled_cpu",
+                wraps=star_shrink_ops.star_mask_dog_numpy,
+            ) as cpu_backend,
+        ):
+            got = star_mask_dog(image)
+
+        resolve.assert_called_once()
+        cpu_backend.assert_called_once()
+        np.testing.assert_array_equal(got, star_shrink_ops.star_mask_dog_numpy(image))
+
+    def test_star_mask_dog_unknown_metal_error_propagates(self) -> None:
+        image = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)
+        metal_selection, _ = self._star_mask_dog_metal_selections()
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_select_star_mask_dog_backend",
+                return_value=metal_selection,
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "star_mask_dog_compiled_metal",
+                side_effect=RuntimeError("metal kernel exploded"),
+            ),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            star_mask_dog(image)
+
+        self.assertIn("metal kernel exploded", str(raised.exception))
+
     def test_star_shrink_process_can_force_numpy_fallback(self) -> None:
         image = np.arange(6 * 7 * 3, dtype=np.uint8).reshape(6, 7, 3)
         mask = np.zeros(image.shape[:2], dtype=np.uint8)

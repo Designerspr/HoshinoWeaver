@@ -206,20 +206,29 @@ class TestBackendRegistry(CustomOpsTestCase):
             for candidate in candidates
             if candidate.backend == "metal_host_io"
         )
-        self.assertEqual(len(metal_candidates), 1)
-        candidate = metal_candidates[0]
+        # Pins which ops have a Metal kernel, so widening coverage is deliberate.
         self.assertEqual(
-            candidate.memory_model,
-            metal_memory_model_kind(candidate.logical_op),
+            sorted(candidate.logical_op for candidate in metal_candidates),
+            ["star_mask_dog", "star_shrink_process"],
         )
-        estimate = metal_memory_estimate(
-            candidate.logical_op,
-            height=32,
-            width=48,
-            channels=3,
-            dtype_bytes=2,
-        )
-        self.assertGreater(estimate.peak_device_bytes, 0)
+        extra_estimate_args = {
+            "star_mask_dog": {"small_kernel_size": 9, "large_kernel_size": 73},
+        }
+        for candidate in metal_candidates:
+            with self.subTest(logical_op=candidate.logical_op):
+                self.assertEqual(
+                    candidate.memory_model,
+                    metal_memory_model_kind(candidate.logical_op),
+                )
+                estimate = metal_memory_estimate(
+                    candidate.logical_op,
+                    height=32,
+                    width=48,
+                    channels=3,
+                    dtype_bytes=2,
+                    **extra_estimate_args.get(candidate.logical_op, {}),
+                )
+                self.assertGreater(estimate.peak_device_bytes, 0)
 
     def test_registered_cuda_non_chunk_models_are_consumable(self) -> None:
         sample_args = {

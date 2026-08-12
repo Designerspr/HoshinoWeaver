@@ -176,6 +176,16 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
         build_flag="cuda",
         memory_model="static_estimator",
     ),
+    BackendCandidate(
+        "star_mask_dog",
+        "metal_host_io",
+        "star_mask_dog_metal",
+        priority=9,
+        fallback="openmp_cpu",
+        module_key="metal",
+        build_flag="metal",
+        memory_model="static_estimator",
+    ),
     BackendCandidate("star_mask_dog", "openmp_cpu", "star_mask_dog_cpu"),
     BackendCandidate(
         "star_shrink_dog_process",
