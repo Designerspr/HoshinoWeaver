@@ -1,6 +1,7 @@
 #include "star_shrink_process_ops.h"
 
 #include "common/compat.h"
+#include "common/metal_dispatch.h"
 #include "common/metal_error.h"
 #include "common/metal_host_io_workspace.h"
 
@@ -18,6 +19,8 @@
 #include <type_traits>
 
 namespace {
+
+constexpr const char* kContext = "star_shrink_process_metal";
 
 struct StarShrinkParams {
     uint32_t height;
@@ -87,42 +90,6 @@ void validate_common(const py::array& image, const py::array& mask, const int sh
     }
 }
 
-void dispatch_1d(id<MTLComputeCommandEncoder> encoder, id<MTLComputePipelineState> pipeline,
-                 const uint32_t count) {
-    const NSUInteger width = std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup);
-    [encoder dispatchThreads:MTLSizeMake(count, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-}
-
-id<MTLComputeCommandEncoder> begin_encoder(id<MTLCommandBuffer> command_buffer,
-                                           id<MTLComputePipelineState> pipeline) {
-    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-    if (encoder == nil) {
-        throw std::runtime_error("star_shrink_process_metal: failed to create command encoder");
-    }
-    [encoder setComputePipelineState:pipeline];
-    return encoder;
-}
-
-void throw_if_command_failed(id<MTLCommandBuffer> command_buffer) {
-    if (command_buffer.status != MTLCommandBufferStatusError) {
-        return;
-    }
-    NSError* error = command_buffer.error;
-    const std::string message = error == nil || error.localizedDescription.UTF8String == nullptr
-                                    ? "unknown Metal command-buffer error"
-                                    : std::string(error.localizedDescription.UTF8String);
-    if ([error.domain isEqualToString:MTLCommandBufferErrorDomain] &&
-        error.code == MTLCommandBufferErrorOutOfMemory) {
-        throw hnw::MetalResourceExhaustedError("star_shrink_process_metal: " + message);
-    }
-    if ([error.domain isEqualToString:MTLCommandBufferErrorDomain] &&
-        error.code == MTLCommandBufferErrorDeviceRemoved) {
-        throw hnw::MetalRuntimeUnavailableError("star_shrink_process_metal: " + message);
-    }
-    throw std::runtime_error("star_shrink_process_metal command failed: " + message);
-}
-
 template <typename T>
 void launch_star_shrink_process_metal(const T* image_host, const uint8_t* mask_host, T* out_host,
                                       const int height, const int width, const int channels,
@@ -175,22 +142,20 @@ void launch_star_shrink_process_metal(const T* image_host, const uint8_t* mask_h
             };
             const char* suffix = std::is_same_v<T, uint8_t> ? "u8" : "u16";
 
-            id<MTLCommandBuffer> command_buffer = [workspace.command_queue() commandBuffer];
-            if (command_buffer == nil) {
-                throw hnw::MetalRuntimeUnavailableError(
-                    "star_shrink_process_metal: failed to create command buffer");
-            }
+            id<MTLCommandBuffer> command_buffer =
+                hnw::metal::new_command_buffer(workspace.command_queue(), kContext);
 
             {
                 const std::string name = std::string("star_shrink_bgr_to_lab_") + suffix;
                 id<MTLComputePipelineState> pipeline = workspace.pipeline(name.c_str());
-                id<MTLComputeCommandEncoder> encoder = begin_encoder(command_buffer, pipeline);
+                id<MTLComputeCommandEncoder> encoder =
+                    hnw::metal::begin_encoder(command_buffer, pipeline, kContext);
                 [encoder setBuffer:image offset:0 atIndex:0];
                 [encoder setBuffer:luma offset:0 atIndex:1];
                 [encoder setBuffer:lab_a offset:0 atIndex:2];
                 [encoder setBuffer:lab_b offset:0 atIndex:3];
                 [encoder setBytes:&params length:sizeof(params) atIndex:4];
-                dispatch_1d(encoder, pipeline, plane_size);
+                hnw::metal::dispatch_1d(encoder, pipeline, plane_size);
                 [encoder endEncoding];
             }
 
@@ -200,66 +165,70 @@ void launch_star_shrink_process_metal(const T* image_host, const uint8_t* mask_h
                 workspace.pipeline("star_shrink_erode_luma");
             for (int iteration = 0; iteration < shrink_times; ++iteration) {
                 id<MTLComputeCommandEncoder> encoder =
-                    begin_encoder(command_buffer, erode_pipeline);
+                    hnw::metal::begin_encoder(command_buffer, erode_pipeline, kContext);
                 [encoder setBuffer:current offset:0 atIndex:0];
                 [encoder setBuffer:next offset:0 atIndex:1];
                 [encoder setBytes:&params length:sizeof(params) atIndex:2];
-                dispatch_1d(encoder, erode_pipeline, plane_size);
+                hnw::metal::dispatch_1d(encoder, erode_pipeline, plane_size);
                 [encoder endEncoding];
                 std::swap(current, next);
             }
 
             {
                 id<MTLComputePipelineState> pipeline = workspace.pipeline("star_shrink_lab_to_bgr");
-                id<MTLComputeCommandEncoder> encoder = begin_encoder(command_buffer, pipeline);
+                id<MTLComputeCommandEncoder> encoder =
+                    hnw::metal::begin_encoder(command_buffer, pipeline, kContext);
                 [encoder setBuffer:current offset:0 atIndex:0];
                 [encoder setBuffer:lab_a offset:0 atIndex:1];
                 [encoder setBuffer:lab_b offset:0 atIndex:2];
                 [encoder setBuffer:shrunk offset:0 atIndex:3];
                 [encoder setBytes:&params length:sizeof(params) atIndex:4];
-                dispatch_1d(encoder, pipeline, plane_size);
+                hnw::metal::dispatch_1d(encoder, pipeline, plane_size);
                 [encoder endEncoding];
             }
 
             {
                 const std::string name = std::string("star_shrink_horizontal_blur_") + suffix;
                 id<MTLComputePipelineState> pipeline = workspace.pipeline(name.c_str());
-                id<MTLComputeCommandEncoder> encoder = begin_encoder(command_buffer, pipeline);
+                id<MTLComputeCommandEncoder> encoder =
+                    hnw::metal::begin_encoder(command_buffer, pipeline, kContext);
                 [encoder setBuffer:image offset:0 atIndex:0];
                 [encoder setBuffer:blur_tmp offset:0 atIndex:1];
                 [encoder setBytes:&params length:sizeof(params) atIndex:2];
-                dispatch_1d(encoder, pipeline, total);
+                hnw::metal::dispatch_1d(encoder, pipeline, total);
                 [encoder endEncoding];
             }
 
             {
                 id<MTLComputePipelineState> pipeline =
                     workspace.pipeline("star_shrink_vertical_blur");
-                id<MTLComputeCommandEncoder> encoder = begin_encoder(command_buffer, pipeline);
+                id<MTLComputeCommandEncoder> encoder =
+                    hnw::metal::begin_encoder(command_buffer, pipeline, kContext);
                 [encoder setBuffer:blur_tmp offset:0 atIndex:0];
                 [encoder setBuffer:blurred offset:0 atIndex:1];
                 [encoder setBytes:&params length:sizeof(params) atIndex:2];
-                dispatch_1d(encoder, pipeline, total);
+                hnw::metal::dispatch_1d(encoder, pipeline, total);
                 [encoder endEncoding];
             }
 
             {
                 const std::string name = std::string("star_shrink_final_mask_") + suffix;
                 id<MTLComputePipelineState> pipeline = workspace.pipeline(name.c_str());
-                id<MTLComputeCommandEncoder> encoder = begin_encoder(command_buffer, pipeline);
+                id<MTLComputeCommandEncoder> encoder =
+                    hnw::metal::begin_encoder(command_buffer, pipeline, kContext);
                 [encoder setBuffer:image offset:0 atIndex:0];
                 [encoder setBuffer:mask offset:0 atIndex:1];
                 [encoder setBuffer:shrunk offset:0 atIndex:2];
                 [encoder setBuffer:blurred offset:0 atIndex:3];
                 [encoder setBuffer:output offset:0 atIndex:4];
                 [encoder setBytes:&params length:sizeof(params) atIndex:5];
-                dispatch_1d(encoder, pipeline, total);
+                hnw::metal::dispatch_1d(encoder, pipeline, total);
                 [encoder endEncoding];
             }
 
             [command_buffer commit];
             [command_buffer waitUntilCompleted];
-            throw_if_command_failed(command_buffer);
+            hnw::metal::throw_if_command_failed(command_buffer, kContext);
             std::memcpy(out_host, output.contents, image_bytes);
             workspace.finish_operation();
         } catch (...) {
