@@ -53,10 +53,15 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build libturbojpeg0-dev
+          sudo apt-get install -y cmake ninja-build libturbojpeg0-dev clang
 
       - name: Build C++ custom ops
         run: python csrc/build_ops.py --compiler gcc
+
+      # Catches Objective-C++ typos here instead of on the macOS runner, which is
+      # otherwise the first compiler these files see.
+      - name: Parse the Metal Objective-C++ sources
+        run: python csrc/check_objc_syntax.py
 
       - name: Run tests (compiled backend)
         env:
