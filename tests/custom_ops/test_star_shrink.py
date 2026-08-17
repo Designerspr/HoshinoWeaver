@@ -449,6 +449,47 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
         composed_shrink.assert_called_once()
         self.assertEqual(got.shape, image.shape)
 
+    def test_fused_dog_falls_back_when_another_accelerator_remains(self) -> None:
+        # On macOS the Metal candidate survives excluding CUDA, so re-resolution
+        # legitimately returns a native selection. That must still reach the
+        # composed path, whose halves re-select their own backends.
+        image = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)
+        cuda_selection = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "star_shrink_dog_process",
+                "cuda_host_io",
+                "star_shrink_dog_process_cuda",
+                fallback=None,
+                build_flag="cuda",
+            ),
+            object(),
+        )
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_select_star_shrink_dog_process_backend",
+                return_value=cuda_selection,
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_dog_process_compiled_cuda",
+                side_effect=CustomOpResourceExhaustedError("admission denied"),
+            ),
+            mock.patch.object(
+                backend_registry,
+                "resolve_after_resource_exhausted",
+                return_value=self._fused_dog_metal_selection(),
+            ),
+            mock.patch.object(
+                star_shrink_ops, "star_mask_dog", wraps=star_shrink_ops.star_mask_dog
+            ) as composed_mask,
+        ):
+            got = star_shrink_dog_process(image)
+
+        composed_mask.assert_called_once()
+        self.assertEqual(got.shape, image.shape)
+
     def test_fused_dog_unknown_metal_error_propagates(self) -> None:
         # Bespoke fallback, so the unknown-error contract needs its own lock.
         image = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)

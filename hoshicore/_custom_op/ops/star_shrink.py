@@ -859,17 +859,17 @@ def star_shrink_dog_process(
                     deringing_ksize=deringing_ksize,
                 )
             except RuntimeError as exc:
-                fallback_selection = resolve_after_accelerator_failure(
+                # Called for its classification: an unknown error re-raises here,
+                # a typed one falls through to the composed path below. Whatever
+                # candidate it resolves is ignored -- the composed path is this
+                # op's fallback, and its halves re-select their own backends.
+                resolve_after_accelerator_failure(
                     "star_shrink_dog_process",
                     candidate.backend,
                     exc,
                     load_module=_load_compiled_module_result,
                     log=_debug_log,
                 )
-                if fallback_selection.native:
-                    raise RuntimeError(
-                        "star_shrink_dog_process selected an unsupported native fallback"
-                    )
     elif selection.reason:
         _debug_log(f"DoG shrink fused backend unavailable, reason: {selection.reason}")
 
