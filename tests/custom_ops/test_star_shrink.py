@@ -356,6 +356,122 @@ class TestStarShrinkCustomOps(CustomOpsTestCase):
 
         self.assertIn("metal kernel exploded", str(raised.exception))
 
+    @staticmethod
+    def _fused_dog_metal_selection() -> backend_registry.BackendSelection:
+        return backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "star_shrink_dog_process",
+                "metal_host_io",
+                "star_shrink_dog_process_metal",
+                fallback=None,
+                module_key="metal",
+                build_flag="metal",
+                memory_model="static_estimator",
+            ),
+            object(),
+        )
+
+    def test_fused_dog_metal_uses_selected_module_and_admission(self) -> None:
+        image = np.arange(8 * 9 * 3, dtype=np.uint16).reshape(8, 9, 3)
+        native = mock.Mock(return_value=image.copy())
+        module = mock.Mock(star_shrink_dog_process_metal=native)
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_load_metal_module_result",
+                return_value=(module, None),
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "_run_admitted_metal",
+                side_effect=lambda estimate, kernel, *args: kernel(*args),
+            ) as admitted,
+        ):
+            got = star_shrink_ops.star_shrink_dog_process_compiled_metal(image)
+
+        np.testing.assert_array_equal(got, image)
+        admitted.assert_called_once()
+        self.assertEqual(
+            admitted.call_args.args[0].logical_op, "star_shrink_dog_process"
+        )
+        native.assert_called_once()
+
+    def test_fused_dog_metal_selects_the_metal_entry_point(self) -> None:
+        self.assertIs(
+            star_shrink_ops._fused_dog_accelerator_entry_point("metal_host_io"),
+            star_shrink_ops.star_shrink_dog_process_compiled_metal,
+        )
+        self.assertIs(
+            star_shrink_ops._fused_dog_accelerator_entry_point("cuda_host_io"),
+            star_shrink_ops.star_shrink_dog_process_compiled_cuda,
+        )
+        self.assertIsNone(
+            star_shrink_ops._fused_dog_accelerator_entry_point("openmp_cpu")
+        )
+
+    def test_fused_dog_metal_failure_falls_back_to_the_composed_path(self) -> None:
+        # This op has no registry fallback, so a typed Metal failure must fall
+        # through to star_mask_dog + star_shrink_process rather than propagate.
+        image = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)
+        numpy_selection = backend_registry.BackendSelection(None, None)
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_select_star_shrink_dog_process_backend",
+                return_value=self._fused_dog_metal_selection(),
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_dog_process_compiled_metal",
+                side_effect=CustomOpResourceExhaustedError("admission denied"),
+            ) as fused,
+            mock.patch.object(
+                backend_registry,
+                "resolve_after_resource_exhausted",
+                return_value=numpy_selection,
+            ),
+            mock.patch.object(
+                star_shrink_ops, "star_mask_dog", wraps=star_shrink_ops.star_mask_dog
+            ) as composed_mask,
+            mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_process",
+                wraps=star_shrink_ops.star_shrink_process,
+            ) as composed_shrink,
+        ):
+            got = star_shrink_dog_process(image)
+
+        fused.assert_called_once()
+        # Both halves of the composed path must run, not just detection.
+        composed_mask.assert_called_once()
+        composed_shrink.assert_called_once()
+        self.assertEqual(got.shape, image.shape)
+
+    def test_fused_dog_unknown_metal_error_propagates(self) -> None:
+        # Bespoke fallback, so the unknown-error contract needs its own lock.
+        image = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)
+
+        with (
+            mock.patch.object(
+                star_shrink_ops,
+                "_select_star_shrink_dog_process_backend",
+                return_value=self._fused_dog_metal_selection(),
+            ),
+            mock.patch.object(
+                star_shrink_ops,
+                "star_shrink_dog_process_compiled_metal",
+                side_effect=RuntimeError("fused metal kernel exploded"),
+            ),
+            mock.patch.object(star_shrink_ops, "star_mask_dog") as composed_mask,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            star_shrink_dog_process(image)
+
+        self.assertIn("fused metal kernel exploded", str(raised.exception))
+        composed_mask.assert_not_called()
+
     def test_star_shrink_process_can_force_numpy_fallback(self) -> None:
         image = np.arange(6 * 7 * 3, dtype=np.uint8).reshape(6, 7, 3)
         mask = np.zeros(image.shape[:2], dtype=np.uint8)

@@ -172,6 +172,86 @@ def _dog_paired_timing() -> dict[str, object]:
     }
 
 
+def _verify_fused_dog_shrink() -> dict[str, object]:
+    """Check the fused Metal op against the composed OpenMP path.
+
+    The fusion keeps the mask on the GPU, so its only observable contract is
+    that the result matches detecting and shrinking separately. atol=1 covers
+    the uint8/uint16 rounding both paths perform independently.
+    """
+    sigma_small, sigma_large = 1.5, 12.0
+    detect = (sigma_small, sigma_large, 3.0, 3, 0)
+    shrink = (3, "CIRCLE", 1, 1.0, 5)
+    rng = np.random.default_rng(20260814)
+    checked = []
+    peak = 0
+    for name, shape, dtype, background, peak_value in (
+        ("u16_rgb", (96, 112, 3), np.uint16, 40000, 65535),
+        ("u8_gray", (88, 104), np.uint8, 200, 255),
+    ):
+        image = rng.integers(0, background, size=shape, dtype=dtype)
+        image[20:26, 30:36] = peak_value
+        fused = star_shrink_ops.star_shrink_dog_process_compiled_metal(
+            image, *detect, *shrink)
+        mask = _C.star_mask_dog_cpu(image, *detect)
+        composed = star_shrink_ops.star_shrink_process_compiled(image, mask, *shrink)
+        np.testing.assert_allclose(fused, composed, rtol=0, atol=1)
+        peak = _assert_high_water(
+            image,
+            "star_shrink_dog_process",
+            **_dog_kernel_sizes(sigma_small, sigma_large),
+        )
+        checked.append(name)
+    return {
+        "cases": checked,
+        "logical_peak": peak,
+        "timing": _fused_dog_paired_timing(),
+    }
+
+
+def _fused_dog_paired_timing() -> dict[str, object]:
+    """Report fused Metal against both composed paths at megapixel scale.
+
+    The fused candidate defaults above OpenMP, so it needs its own numbers, not
+    just its components': composed-Metal isolates what the fusion itself saves,
+    composed-OpenMP is what a Mac runs today. Report only, no thresholds.
+    """
+    sigma_small, sigma_large = 1.5, 12.0
+    detect = (sigma_small, sigma_large, 3.0, 3, 0)
+    shrink = (3, "CIRCLE", 1, 1.0, 5)
+    rng = np.random.default_rng(20260815)
+    image = rng.integers(200, 40000, size=_DOG_TIMED_SHAPE, dtype=np.uint16)
+    image[64:70, 96:102] = 65535
+
+    def composed(detect_fn, shrink_fn):
+        def run(img):
+            return shrink_fn(img, detect_fn(img, *detect), *shrink)
+        return run
+
+    composed_metal = composed(
+        star_shrink_ops.star_mask_dog_compiled_metal,
+        star_shrink_ops.star_shrink_process_compiled_metal,
+    )
+    composed_openmp = composed(
+        star_shrink_ops.star_mask_dog_compiled_cpu,
+        star_shrink_ops.star_shrink_process_compiled,
+    )
+    fused_seconds = _best_seconds(
+        star_shrink_ops.star_shrink_dog_process_compiled_metal, image, *detect, *shrink)
+    composed_metal_seconds = _best_seconds(composed_metal, image)
+    composed_openmp_seconds = _best_seconds(composed_openmp, image)
+    return {
+        "shape": list(_DOG_TIMED_SHAPE),
+        "fused_metal_seconds": round(fused_seconds, 4),
+        "composed_metal_seconds": round(composed_metal_seconds, 4),
+        "composed_openmp_seconds": round(composed_openmp_seconds, 4),
+        "fusion_speedup_vs_composed_metal": round(
+            composed_metal_seconds / fused_seconds, 3),
+        "speedup_vs_composed_openmp": round(composed_openmp_seconds / fused_seconds, 3),
+        "note": "smoke-level only; virtualized runner, not a priority decision",
+    }
+
+
 def main() -> None:
     info = dict(_metal.metal_device_info())
     if not info.get("available"):
@@ -215,6 +295,7 @@ def main() -> None:
     logical_peak = _assert_high_water(last_image)
     dog = _verify_star_mask_dog()
     dog["timing"] = _dog_paired_timing()
+    fused = _verify_fused_dog_shrink()
     timing = _paired_timing()
     print(
         "HNW_METAL_RUNTIME_OK "
@@ -225,6 +306,7 @@ def main() -> None:
                 "working_set": info.get("recommended_max_working_set_bytes"),
                 "logical_peak": logical_peak,
                 "dog": dog,
+                "fused_dog_shrink": fused,
                 "cases": checked_cases,
                 "timing": timing,
             },
