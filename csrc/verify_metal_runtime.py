@@ -209,16 +209,18 @@ def _verify_fused_dog_shrink() -> dict[str, object]:
     return {
         "cases": checked,
         "logical_peak": peak,
-        "timing": _fused_dog_paired_timing(),
-        "timing_full_frame": _fused_timing_at_frame_scale(),
+        "timing": _fused_timing_at_frame_scale(),
     }
 
 
 def _fused_timing_at_frame_scale() -> dict[str, object]:
-    """Same comparison at a real 26MP frame, or why it was skipped.
+    """Time the fusion at a real 26MP frame, or report why it was skipped.
 
-    A denial here is a legitimate answer about the fused workspace, not a build
-    failure, so it is reported rather than raised: timing must never gate CI.
+    Only this scale is measured: run-to-run spread on a virtualized runner is
+    around 10%, which swamped the sub-megapixel margin -- the same 1.3MP case
+    once read 0.969x and once 1.076x. 26MP separates the paths by enough to mean
+    something. A denial is a legitimate answer about the fused workspace, not a
+    build failure, so it is reported rather than raised: timing never gates CI.
     """
     try:
         return _fused_dog_paired_timing(_FULL_FRAME_SHAPE)
@@ -226,7 +228,7 @@ def _fused_timing_at_frame_scale() -> dict[str, object]:
         return {"shape": list(_FULL_FRAME_SHAPE), "skipped": f"admission denied: {exc}"}
 
 
-def _fused_dog_paired_timing(shape: tuple[int, ...] = _DOG_TIMED_SHAPE) -> dict[str, object]:
+def _fused_dog_paired_timing(shape: tuple[int, ...]) -> dict[str, object]:
     """Report fused Metal against both composed paths.
 
     The fused candidate defaults above OpenMP, so it needs its own numbers, not

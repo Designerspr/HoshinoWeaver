@@ -135,11 +135,12 @@ def estimate_star_shrink_dog_process(
     weight_bytes = (small_kernel_size + large_kernel_size) * 4
     return MetalMemoryEstimate(
         logical_op="star_shrink_dog_process",
-        # image + output; 9 plane floats (gray, tmp, blur_small, blur_large, dog,
-        # luma, luma_tmp, lab_a, lab_b); mask + scratch; shrunk, box_tmp, blurred.
+        # image + output; 5 plane floats (gray, tmp, blur_small, blur_large, dog)
+        # with the shrink stage aliasing the first four; mask + scratch; shrunk,
+        # box_tmp, blurred.
         peak_device_bytes=(
             2 * image_bytes
-            + 9 * plane_float_bytes
+            + 5 * plane_float_bytes
             + weight_bytes
             + 2 * pixels
             + 3 * total_float_bytes

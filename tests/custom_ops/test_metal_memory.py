@@ -46,7 +46,7 @@ class TestMetalMemory(CustomOpsTestCase):
         total = pixels * 3
         expected = (
             2 * total * 2
-            + 9 * pixels * 4
+            + 5 * pixels * 4
             + (9 + 73) * 4
             + 2 * pixels
             + 3 * total * 4

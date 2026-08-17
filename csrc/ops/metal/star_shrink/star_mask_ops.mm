@@ -313,13 +313,15 @@ void launch_star_shrink_dog_process_metal(const T* image_host, T* out_host, cons
                 workspace.buffer(large_weight_bytes, "star_shrink_dog_metal large_weights");
             id<MTLBuffer> mask = workspace.buffer(mask_bytes, "star_shrink_dog_metal mask");
             id<MTLBuffer> scratch = workspace.buffer(mask_bytes, "star_shrink_dog_metal scratch");
-            id<MTLBuffer> luma = workspace.buffer(plane_float_bytes, "star_shrink_dog_metal luma");
-            id<MTLBuffer> luma_tmp =
-                workspace.buffer(plane_float_bytes, "star_shrink_dog_metal luma_tmp");
-            id<MTLBuffer> lab_a =
-                workspace.buffer(plane_float_bytes, "star_shrink_dog_metal lab_a");
-            id<MTLBuffer> lab_b =
-                workspace.buffer(plane_float_bytes, "star_shrink_dog_metal lab_b");
+            // Detection's plane buffers are dead once the threshold kernel has
+            // consumed dog, and the shrink stage needs exactly four, so alias
+            // instead of allocating: 26MP saves about 415 MB on a pipeline that
+            // is bandwidth-bound. Safe because separate compute encoders in one
+            // command buffer run in order, so threshold precedes bgr_to_lab.
+            id<MTLBuffer> luma = gray;
+            id<MTLBuffer> luma_tmp = tmp;
+            id<MTLBuffer> lab_a = blur_small;
+            id<MTLBuffer> lab_b = blur_large;
             id<MTLBuffer> shrunk =
                 workspace.buffer(total_float_bytes, "star_shrink_dog_metal shrunk");
             id<MTLBuffer> box_tmp =
