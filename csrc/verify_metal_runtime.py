@@ -8,6 +8,7 @@ import time
 
 import numpy as np
 
+from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op import _C
 from hoshicore._custom_op import _metal
 from hoshicore._custom_op.metal_memory import metal_memory_estimate
@@ -22,6 +23,9 @@ _TIMING_REPEATS = 3
 # production, and both dimensions exceed the 73-tap large Gaussian so interior
 # taps dominate. This timing informs the star_mask_dog priority decision.
 _DOG_TIMED_SHAPE = (1024, 1280, 3)
+# A real 26MP frame. Fits the runner's working set (about 2.1 GiB fused against
+# 4.4 GiB usable) and is the scale at which fusion either pays off or does not.
+_FULL_FRAME_SHAPE = (4160, 6240, 3)
 
 
 def _assert_high_water(image: np.ndarray, logical_op: str = "star_shrink_process",
@@ -206,21 +210,38 @@ def _verify_fused_dog_shrink() -> dict[str, object]:
         "cases": checked,
         "logical_peak": peak,
         "timing": _fused_dog_paired_timing(),
+        "timing_full_frame": _fused_timing_at_frame_scale(),
     }
 
 
-def _fused_dog_paired_timing() -> dict[str, object]:
-    """Report fused Metal against both composed paths at megapixel scale.
+def _fused_timing_at_frame_scale() -> dict[str, object]:
+    """Same comparison at a real 26MP frame, or why it was skipped.
+
+    A denial here is a legitimate answer about the fused workspace, not a build
+    failure, so it is reported rather than raised: timing must never gate CI.
+    """
+    try:
+        return _fused_dog_paired_timing(_FULL_FRAME_SHAPE)
+    except CustomOpResourceExhaustedError as exc:
+        return {"shape": list(_FULL_FRAME_SHAPE), "skipped": f"admission denied: {exc}"}
+
+
+def _fused_dog_paired_timing(shape: tuple[int, ...] = _DOG_TIMED_SHAPE) -> dict[str, object]:
+    """Report fused Metal against both composed paths.
 
     The fused candidate defaults above OpenMP, so it needs its own numbers, not
     just its components': composed-Metal isolates what the fusion itself saves,
     composed-OpenMP is what a Mac runs today. Report only, no thresholds.
+
+    Whether fusion pays depends on scale: its savings (one image upload and the
+    mask round trip) grow linearly with the frame, but so does the work, while
+    its workspace holds every stage's buffers at once. Hence the 26MP case.
     """
     sigma_small, sigma_large = 1.5, 12.0
     detect = (sigma_small, sigma_large, 3.0, 3, 0)
     shrink = (3, "CIRCLE", 1, 1.0, 5)
     rng = np.random.default_rng(20260815)
-    image = rng.integers(200, 40000, size=_DOG_TIMED_SHAPE, dtype=np.uint16)
+    image = rng.integers(200, 40000, size=shape, dtype=np.uint16)
     image[64:70, 96:102] = 65535
 
     def composed(detect_fn, shrink_fn):
@@ -241,7 +262,7 @@ def _fused_dog_paired_timing() -> dict[str, object]:
     composed_metal_seconds = _best_seconds(composed_metal, image)
     composed_openmp_seconds = _best_seconds(composed_openmp, image)
     return {
-        "shape": list(_DOG_TIMED_SHAPE),
+        "shape": list(shape),
         "fused_metal_seconds": round(fused_seconds, 4),
         "composed_metal_seconds": round(composed_metal_seconds, 4),
         "composed_openmp_seconds": round(composed_openmp_seconds, 4),
