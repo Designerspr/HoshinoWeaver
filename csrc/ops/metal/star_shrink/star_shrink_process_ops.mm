@@ -4,6 +4,7 @@
 #include "common/metal_dispatch.h"
 #include "common/metal_error.h"
 #include "common/metal_host_io_workspace.h"
+#include "star_shrink_metal_params.h"
 
 #include <pybind11/numpy.h>
 
@@ -20,33 +21,11 @@
 
 namespace {
 
+using hnw::metal::star_shrink::parse_shrink_shape;
+using hnw::metal::star_shrink::ShrinkParams;
+using hnw::metal::star_shrink::validate_shrink_params;
+
 constexpr const char* kContext = "star_shrink_process_metal";
-
-struct StarShrinkParams {
-    uint32_t height;
-    uint32_t width;
-    uint32_t channels;
-    uint32_t shrink_ksize;
-    uint32_t shrink_shape;
-    uint32_t deringing_ksize;
-    float shrink_ratio;
-};
-
-static_assert(sizeof(StarShrinkParams) == 28,
-              "Metal host parameters must match the MSL struct layout");
-
-int parse_shape(const std::string& shape) {
-    if (shape == "RECT") {
-        return 0;
-    }
-    if (shape == "CROSS") {
-        return 1;
-    }
-    if (shape == "CIRCLE") {
-        return 2;
-    }
-    throw std::invalid_argument("star_shrink_process_metal: unknown shrink_shape");
-}
 
 void validate_common(const py::array& image, const py::array& mask, const int shrink_ksize,
                      const int shrink_times, const float shrink_ratio, const int deringing_ksize) {
@@ -74,20 +53,7 @@ void validate_common(const py::array& image, const py::array& mask, const int sh
     if (total > std::numeric_limits<uint32_t>::max()) {
         throw std::invalid_argument("star_shrink_process_metal: image is too large");
     }
-    if (shrink_ksize <= 0 || shrink_ksize % 2 == 0) {
-        throw std::invalid_argument(
-            "star_shrink_process_metal: shrink_ksize must be a positive odd value");
-    }
-    if (shrink_times <= 0) {
-        throw std::invalid_argument("star_shrink_process_metal: shrink_times must be positive");
-    }
-    if (!(shrink_ratio > 0.0f && shrink_ratio <= 1.0f)) {
-        throw std::invalid_argument("star_shrink_process_metal: shrink_ratio must be in (0, 1]");
-    }
-    if (deringing_ksize <= 0 || deringing_ksize % 2 == 0) {
-        throw std::invalid_argument(
-            "star_shrink_process_metal: deringing_ksize must be a positive odd value");
-    }
+    validate_shrink_params(shrink_ksize, shrink_times, shrink_ratio, deringing_ksize, kContext);
 }
 
 template <typename T>
@@ -131,7 +97,7 @@ void launch_star_shrink_process_metal(const T* image_host, const uint8_t* mask_h
             std::memcpy(image.contents, image_host, image_bytes);
             std::memcpy(mask.contents, mask_host, mask_bytes);
 
-            const StarShrinkParams params{
+            const ShrinkParams params{
                 static_cast<uint32_t>(height),
                 static_cast<uint32_t>(width),
                 static_cast<uint32_t>(channels),
@@ -248,7 +214,7 @@ py::array_t<T> star_shrink_process_metal_impl(
     const int height = static_cast<int>(image.shape(0));
     const int width = static_cast<int>(image.shape(1));
     const int channels = image.ndim() == 3 ? 3 : 1;
-    const int shape = parse_shape(shrink_shape);
+    const int shape = parse_shrink_shape(shrink_shape, kContext);
     py::array_t<T> output(image.request().shape);
     {
         py::gil_scoped_release release;

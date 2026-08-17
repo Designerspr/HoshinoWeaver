@@ -14,7 +14,7 @@ from hoshicore._custom_op._dispatch import fallback_preference as _fallback_pref
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op._dispatch import load_metal_module as _load_metal_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
-from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
+from hoshicore._custom_op.backend_registry import resolve_after_accelerator_failure
 from hoshicore._custom_op.backend_registry import run_with_accelerator_fallback
 from hoshicore._custom_op.backend_registry import select_backend as _select_backend
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
@@ -737,6 +737,55 @@ def star_shrink_dog_process_compiled_cuda(
     )
 
 
+def star_shrink_dog_process_compiled_metal(
+    image: np.ndarray,
+    sigma_small: float = 1.5,
+    sigma_large: float = 12.0,
+    threshold_ratio: int | float = 3,
+    open_ksize: int = 3,
+    dilate_ksize: int = 0,
+    shrink_ksize: int = 3,
+    shrink_shape: str = "CIRCLE",
+    shrink_times: int = 1,
+    shrink_ratio: float | None = 1.0,
+    deringing_ksize: int = 51,
+) -> np.ndarray:
+    module, module_error = _load_metal_module_result()
+    if module is None or not hasattr(module, "star_shrink_dog_process_metal"):
+        raise RuntimeError(module_error or "Metal custom op backend is unavailable")
+    image_arr = _validate_dog_image(image, "star_shrink_dog_process")
+    small_kernel_size = _dog_kernel_size(sigma_small, "star_shrink_dog_process")
+    large_kernel_size = _dog_kernel_size(sigma_large, "star_shrink_dog_process")
+    shrink_size, shape, times, ratio, dering_size = _validate_process_params(
+        shrink_ksize,
+        shrink_shape,
+        shrink_times,
+        shrink_ratio,
+        deringing_ksize,
+    )
+    estimate = metal_memory_estimate(
+        "star_shrink_dog_process",
+        **_star_shrink_estimate_args(image_arr),
+        small_kernel_size=small_kernel_size,
+        large_kernel_size=large_kernel_size,
+    )
+    return _run_admitted_metal(
+        estimate,
+        module.star_shrink_dog_process_metal,
+        image_arr,
+        float(sigma_small),
+        float(sigma_large),
+        float(threshold_ratio),
+        int(open_ksize),
+        int(dilate_ksize),
+        shrink_size,
+        shape,
+        times,
+        ratio,
+        dering_size,
+    )
+
+
 @lru_cache(maxsize=2)
 def _select_star_shrink_dog_process_backend(preference: str) -> BackendSelection:
     return _select_backend(
@@ -744,6 +793,18 @@ def _select_star_shrink_dog_process_backend(preference: str) -> BackendSelection
         preference,
         load_module=_load_compiled_module_result,
     )
+
+
+def _fused_dog_accelerator_entry_point(
+    backend: str,
+) -> Callable[..., np.ndarray] | None:
+    # Resolved per call, not via a module-level mapping: a frozen dict would
+    # capture the entry points at import time and defeat monkeypatching.
+    if backend == "cuda_host_io":
+        return star_shrink_dog_process_compiled_cuda
+    if backend == "metal_host_io":
+        return star_shrink_dog_process_compiled_metal
+    return None
 
 
 def star_shrink_dog_process(
@@ -776,10 +837,15 @@ def star_shrink_dog_process(
         )
 
     selection = _select_star_shrink_dog_process_backend(_fallback_preference())
-    if selection.native and selection.candidate is not None:
-        if selection.candidate.backend == "cuda_host_io":
+    candidate = selection.candidate
+    if selection.native and candidate is not None:
+        # The registry cannot express this op's fallback, which is the composed
+        # star_mask_dog + star_shrink_process path below; a typed accelerator
+        # failure therefore falls through instead of re-resolving a candidate.
+        fused = _fused_dog_accelerator_entry_point(candidate.backend)
+        if fused is not None:
             try:
-                return star_shrink_dog_process_compiled_cuda(
+                return fused(
                     image,
                     sigma_small=sigma_small,
                     sigma_large=sigma_large,
@@ -793,8 +859,9 @@ def star_shrink_dog_process(
                     deringing_ksize=deringing_ksize,
                 )
             except RuntimeError as exc:
-                fallback_selection = resolve_after_cuda_failure(
+                fallback_selection = resolve_after_accelerator_failure(
                     "star_shrink_dog_process",
+                    candidate.backend,
                     exc,
                     load_module=_load_compiled_module_result,
                     log=_debug_log,

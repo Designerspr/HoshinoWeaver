@@ -189,6 +189,17 @@ _CANDIDATES: tuple[BackendCandidate, ...] = (
     BackendCandidate("star_mask_dog", "openmp_cpu", "star_mask_dog_cpu"),
     BackendCandidate(
         "star_shrink_dog_process",
+        "metal_host_io",
+        "star_shrink_dog_process_metal",
+        priority=9,
+        # Same as CUDA: the real fallback is the composed path in the wrapper.
+        fallback=None,
+        module_key="metal",
+        build_flag="metal",
+        memory_model="static_estimator",
+    ),
+    BackendCandidate(
+        "star_shrink_dog_process",
         "cuda_host_io",
         "star_shrink_dog_process_cuda",
         priority=10,

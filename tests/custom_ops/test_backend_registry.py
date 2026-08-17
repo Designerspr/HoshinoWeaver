@@ -209,10 +209,14 @@ class TestBackendRegistry(CustomOpsTestCase):
         # Pins which ops have a Metal kernel, so widening coverage is deliberate.
         self.assertEqual(
             sorted(candidate.logical_op for candidate in metal_candidates),
-            ["star_mask_dog", "star_shrink_process"],
+            ["star_mask_dog", "star_shrink_dog_process", "star_shrink_process"],
         )
         extra_estimate_args = {
             "star_mask_dog": {"small_kernel_size": 9, "large_kernel_size": 73},
+            "star_shrink_dog_process": {
+                "small_kernel_size": 9,
+                "large_kernel_size": 73,
+            },
         }
         for candidate in metal_candidates:
             with self.subTest(logical_op=candidate.logical_op):

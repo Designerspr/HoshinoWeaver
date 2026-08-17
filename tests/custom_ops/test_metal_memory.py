@@ -32,6 +32,28 @@ class TestMetalMemory(CustomOpsTestCase):
         self.assertEqual(estimate.peak_device_bytes, expected)
         self.assertEqual(estimate.logical_op, "star_mask_dog")
 
+    def test_fused_dog_estimator_matches_workspace_buffers(self) -> None:
+        # Mirrors launch_star_shrink_dog_process_metal in star_mask_ops.mm.
+        estimate = metal_memory.estimate_star_shrink_dog_process(
+            height=32,
+            width=48,
+            channels=3,
+            dtype_bytes=2,
+            small_kernel_size=9,
+            large_kernel_size=73,
+        )
+        pixels = 32 * 48
+        total = pixels * 3
+        expected = (
+            2 * total * 2
+            + 9 * pixels * 4
+            + (9 + 73) * 4
+            + 2 * pixels
+            + 3 * total * 4
+        )
+        self.assertEqual(estimate.peak_device_bytes, expected)
+        self.assertEqual(estimate.logical_op, "star_shrink_dog_process")
+
     def test_star_mask_dog_estimator_rejects_nonpositive_kernel_sizes(self) -> None:
         with self.assertRaises(ValueError):
             metal_memory.estimate_star_mask_dog(
