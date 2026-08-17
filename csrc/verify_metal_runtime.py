@@ -18,8 +18,10 @@ from hoshicore._custom_op.ops import star_shrink as star_shrink_ops
 _TIMED_SHAPE = (1152, 1536, 3)
 _TIMED_PARAMS = (3, "CIRCLE", 1, 1.0, 5)
 _TIMING_REPEATS = 3
-# Both dimensions exceed the 73-tap large Gaussian so interior taps dominate.
-_DOG_TIMED_SHAPE = (256, 320, 3)
+# Megapixel-scale so fixed dispatch/sync overheads are amortized as in
+# production, and both dimensions exceed the 73-tap large Gaussian so interior
+# taps dominate. This timing informs the star_mask_dog priority decision.
+_DOG_TIMED_SHAPE = (1024, 1280, 3)
 
 
 def _assert_high_water(image: np.ndarray, logical_op: str = "star_shrink_process",
