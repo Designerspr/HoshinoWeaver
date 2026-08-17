@@ -740,6 +740,48 @@ def resolve_after_accelerator_failure(
     return selection
 
 
+def run_with_accelerator_fallback(
+    logical_op: str,
+    selection: BackendSelection,
+    map_backend: Callable[[BackendSelection], tuple[str, Callable[..., Any]]],
+    call: Callable[[Callable[..., Any]], Any],
+    *,
+    load_module: ModuleLoader = load_compiled_module,
+    log: Callable[[str], None] | None = None,
+) -> Any:
+    """Run the selected backend, retrying once on the registry fallback.
+
+    Owns the wrapper-side accelerator contract in one place: non-accelerator
+    selections run plainly (errors propagate), typed accelerator failures
+    re-resolve and retry the mapped fallback exactly once, and anything else
+    propagates. ``call(backend)`` performs the actual invocation so per-op
+    argument shapes stay with the op.
+    """
+    _, backend = map_backend(selection)
+    candidate = selection.candidate
+    if candidate is None or candidate.backend not in ACCELERATOR_BACKENDS:
+        return call(backend)
+
+    try:
+        return call(backend)
+    except RuntimeError as exc:
+        fallback_selection = resolve_after_accelerator_failure(
+            logical_op,
+            candidate.backend,
+            exc,
+            load_module=load_module,
+            log=log,
+        )
+
+    fallback_candidate = fallback_selection.candidate
+    if fallback_candidate is not None and fallback_candidate.backend == candidate.backend:
+        raise RuntimeError(
+            f"{candidate.backend} backend remained selected after runtime exclusion"
+        )
+    _, fallback_backend = map_backend(fallback_selection)
+    return call(fallback_backend)
+
+
 def native_backend_available(
     logical_op: str,
     preference: str = "auto",

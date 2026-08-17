@@ -13,10 +13,9 @@ from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op._dispatch import load_metal_module as _load_metal_module_result
-from hoshicore._custom_op.backend_registry import ACCELERATOR_BACKENDS as _ACCELERATOR_BACKENDS
 from hoshicore._custom_op.backend_registry import BackendSelection
-from hoshicore._custom_op.backend_registry import resolve_after_accelerator_failure
 from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
+from hoshicore._custom_op.backend_registry import run_with_accelerator_fallback
 from hoshicore._custom_op.backend_registry import select_backend as _select_backend
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
 from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
@@ -343,7 +342,6 @@ def star_shrink_process(
     selection = _select_star_shrink_process_backend(_fallback_preference())
     if selection.reason:
         _debug_log(f"compiled backend unavailable, reason: {selection.reason}")
-    backend_name, backend = _star_shrink_process_backend(selection)
     kernel_args = (
         image,
         star_mask,
@@ -353,29 +351,14 @@ def star_shrink_process(
         shrink_ratio,
         deringing_ksize,
     )
-    candidate = selection.candidate
-    if candidate is None or candidate.backend not in _ACCELERATOR_BACKENDS:
-        return backend(*kernel_args)
-
-    try:
-        return backend(*kernel_args)
-    except RuntimeError as exc:
-        fallback_selection = resolve_after_accelerator_failure(
-            "star_shrink_process",
-            candidate.backend,
-            exc,
-            load_module=_load_compiled_module_result,
-            log=_debug_log,
-        )
-
-    fallback_name, fallback_backend = _star_shrink_process_backend(
-        fallback_selection
+    return run_with_accelerator_fallback(
+        "star_shrink_process",
+        selection,
+        _star_shrink_process_backend,
+        lambda entry: entry(*kernel_args),
+        load_module=_load_compiled_module_result,
+        log=_debug_log,
     )
-    if fallback_name == backend_name:
-        raise RuntimeError(
-            f"{backend_name} backend remained selected after runtime exclusion"
-        )
-    return fallback_backend(*kernel_args)
 
 
 def star_shrink_detect_mask_numpy(
@@ -648,7 +631,6 @@ def star_mask_dog(
     selection = _select_star_mask_dog_backend(_fallback_preference())
     if selection.reason:
         _debug_log(f"DoG mask compiled backend unavailable, reason: {selection.reason}")
-    backend_name, backend = _star_mask_dog_backend(selection)
     kernel_kwargs = dict(
         sigma_small=sigma_small,
         sigma_large=sigma_large,
@@ -656,27 +638,14 @@ def star_mask_dog(
         open_ksize=open_ksize,
         dilate_ksize=dilate_ksize,
     )
-    candidate = selection.candidate
-    if candidate is None or candidate.backend not in _ACCELERATOR_BACKENDS:
-        return backend(image, **kernel_kwargs)
-
-    try:
-        return backend(image, **kernel_kwargs)
-    except RuntimeError as exc:
-        fallback_selection = resolve_after_accelerator_failure(
-            "star_mask_dog",
-            candidate.backend,
-            exc,
-            load_module=_load_compiled_module_result,
-            log=_debug_log,
-        )
-
-    fallback_name, fallback_backend = _star_mask_dog_backend(fallback_selection)
-    if fallback_name == backend_name:
-        raise RuntimeError(
-            f"{candidate.backend} backend remained selected after runtime exclusion"
-        )
-    return fallback_backend(image, **kernel_kwargs)
+    return run_with_accelerator_fallback(
+        "star_mask_dog",
+        selection,
+        _star_mask_dog_backend,
+        lambda entry: entry(image, **kernel_kwargs),
+        load_module=_load_compiled_module_result,
+        log=_debug_log,
+    )
 
 
 def star_shrink_dog_process_numpy(

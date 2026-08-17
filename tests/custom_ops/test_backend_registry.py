@@ -485,6 +485,77 @@ class TestBackendRegistry(CustomOpsTestCase):
         self.assertEqual(selection.backend, "openmp_cpu")
         self.assertEqual(selection.candidate.kernel_name, "camera_model_remap_cpu")
 
+    @staticmethod
+    def _fallback_helper_selections():
+        metal = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "star_mask_dog", "metal_host_io", "star_mask_dog_metal",
+                module_key="metal", build_flag="metal",
+            ),
+            object(),
+        )
+        cpu = backend_registry.BackendSelection(
+            backend_registry.BackendCandidate(
+                "star_mask_dog", "openmp_cpu", "star_mask_dog_cpu",
+            ),
+            object(),
+        )
+        return metal, cpu
+
+    def test_fallback_helper_propagates_non_accelerator_errors(self) -> None:
+        _, cpu = self._fallback_helper_selections()
+
+        def map_backend(selection):
+            return "cpu", mock.Mock(side_effect=RuntimeError("cpu kernel failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "cpu kernel failed"):
+            backend_registry.run_with_accelerator_fallback(
+                "star_mask_dog", cpu, map_backend, lambda fn: fn()
+            )
+
+    def test_fallback_helper_retries_the_mapped_fallback_once(self) -> None:
+        metal, cpu = self._fallback_helper_selections()
+        metal_entry = mock.Mock(
+            side_effect=CustomOpResourceExhaustedError("admission denied"))
+        cpu_entry = mock.Mock(return_value="cpu result")
+
+        def map_backend(selection):
+            if selection.candidate.backend == "metal_host_io":
+                return "metal", metal_entry
+            return "cpu", cpu_entry
+
+        with mock.patch.object(
+            backend_registry,
+            "resolve_after_resource_exhausted",
+            return_value=cpu,
+        ):
+            got = backend_registry.run_with_accelerator_fallback(
+                "star_mask_dog", metal, map_backend, lambda fn: fn()
+            )
+
+        self.assertEqual(got, "cpu result")
+        metal_entry.assert_called_once()
+        cpu_entry.assert_called_once()
+
+    def test_fallback_helper_rejects_a_same_backend_fallback(self) -> None:
+        metal, _ = self._fallback_helper_selections()
+
+        def map_backend(selection):
+            return "metal", mock.Mock(
+                side_effect=CustomOpResourceExhaustedError("admission denied"))
+
+        with (
+            mock.patch.object(
+                backend_registry,
+                "resolve_after_resource_exhausted",
+                return_value=metal,
+            ),
+            self.assertRaisesRegex(RuntimeError, "remained selected"),
+        ):
+            backend_registry.run_with_accelerator_fallback(
+                "star_mask_dog", metal, map_backend, lambda fn: fn()
+            )
+
     def test_backend_registry_can_exclude_failed_runtime_backend(self) -> None:
         class Module:
             def camera_model_remap(self):

@@ -13,7 +13,7 @@ from hoshicore._custom_op._dispatch import fallback_preference as _fallback_pref
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
-from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
+from hoshicore._custom_op.backend_registry import run_with_accelerator_fallback
 from hoshicore._custom_op.backend_registry import resolve_backend as _resolve_backend
 from hoshicore._custom_op.cuda_memory import cuda_chunk_memory_model
 from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
@@ -437,26 +437,13 @@ def sigma_clip_fused_chunk(
         (accepted_sum, accepted_sq, accepted_n) as float64 arrays
     """
     selection = _select_sigma_clip_fused_chunk_backend(_fallback_preference())
-    backend_name, backend = _sigma_clip_fused_chunk_backend(selection)
-    if backend_name != "cuda":
-        return backend(
+    return run_with_accelerator_fallback(
+        "sigma_clip_fused_chunk",
+        selection,
+        _sigma_clip_fused_chunk_backend,
+        lambda entry: entry(
             stack, rej_high, rej_low, max_iter, mask,
-            skip_zero_rgb, channels)
-    try:
-        return backend(
-            stack, rej_high, rej_low, max_iter, mask,
-            skip_zero_rgb, channels)
-    except RuntimeError as exc:
-        fallback_selection = resolve_after_cuda_failure(
-            "sigma_clip_fused_chunk",
-            exc,
-            load_module=_load_compiled_module_result,
-            log=_debug_log,
-        )
-    fallback_name, fallback_backend = _sigma_clip_fused_chunk_backend(
-        fallback_selection)
-    if fallback_name == "cuda":
-        raise RuntimeError("CUDA backend remained selected after runtime exclusion")
-    return fallback_backend(
-        stack, rej_high, rej_low, max_iter, mask,
-        skip_zero_rgb, channels)
+            skip_zero_rgb, channels),
+        load_module=_load_compiled_module_result,
+        log=_debug_log,
+    )
