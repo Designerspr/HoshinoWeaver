@@ -3,6 +3,7 @@
 *.pyd
 *.dll
 *.so
+*.pdb
 *.csv
 logs/
 build/
