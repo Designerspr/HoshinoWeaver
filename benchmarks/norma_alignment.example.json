@@ -1,0 +1,39 @@
+{
+  "defaults": {
+    "matching_path": "asterism",
+    "guided_refine": false,
+    "same_camera": true,
+    "bootstrap_scales": [0.7, 1.0, 1.3],
+    "remap_map_scale": 0.5
+  },
+  "cases": [
+    {
+      "id": "fisheye-example",
+      "reference": "images/reference.tif",
+      "source": "images/source.tif",
+      "mask": "images/sky-mask.png",
+      "labels": ["fisheye"],
+      "alignment": {
+        "lens_type": "fisheye",
+        "focal_length_mm": 15.0,
+        "crop_factor": 1.0
+      },
+      "evaluation": {
+        "tile_size": 512,
+        "tile_stride": 512,
+        "min_tile_mask_ratio": 0.95,
+        "min_phase_response": 0.05
+      },
+      "expected": {
+        "success": true,
+        "min_final_pairs": 20,
+        "min_coverage_ratio": 0.1,
+        "min_outer_pairs": 2,
+        "max_p90_px": 2.0,
+        "max_residual_shift_p90_px": 1.0,
+        "min_evaluated_tiles": 2,
+        "min_evaluated_tile_coverage": 0.1
+      }
+    }
+  ]
+}
