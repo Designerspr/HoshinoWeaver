@@ -41,7 +41,7 @@ configs:
   align_method: { type: str, default: "homography" }
   camera_setup_mode: { type: str, default: "auto" }
   same_camera: { type: bool, default: true }
-  matching_path: { type: str, default: "pywt_bootstrap_median_guided" }
+  matching_path: { type: str, default: "histogram" }
   distortion: { type: list, default: null }
   lens_type: { type: str, default: null }       # null | "fisheye"
   ref_lens_type: { type: str, default: null }

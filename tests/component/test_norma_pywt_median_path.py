@@ -10,9 +10,9 @@ from hoshicore.component.norma.frame_align import (
     AlignmentCameraCandidate,
     AlignmentError,
     DEFAULT_MATCHING_PATH,
-    MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED,
-    MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED,
-    solve_pywt_bootstrap_median_guided,
+    MATCHING_PATH_ASTERISM,
+    MATCHING_PATH_HISTOGRAM,
+    solve_pywt_alignment,
 )
 from hoshicore.component.norma.matching import MatchResult
 from hoshicore.component.norma.optimization import CameraOptimizationPolicy
@@ -114,7 +114,7 @@ def test_dual_path_keeps_bootstrap_and_dense_index_spaces_separate(
     )
 
     image = np.zeros((120, 200), dtype=np.float64)
-    result = solve_pywt_bootstrap_median_guided(
+    result = solve_pywt_alignment(
         image,
         image,
         _candidate(camera),
@@ -162,7 +162,7 @@ def test_dual_path_without_guided_refine_skips_median_detection(monkeypatch):
     )
 
     image = np.zeros((120, 200), dtype=np.float64)
-    result = solve_pywt_bootstrap_median_guided(
+    result = solve_pywt_alignment(
         image,
         image,
         _candidate(camera),
@@ -202,7 +202,7 @@ def test_dual_path_selects_asterism_bootstrap_matcher(monkeypatch):
     )
 
     image = np.zeros((120, 200), dtype=np.float64)
-    solve_pywt_bootstrap_median_guided(
+    solve_pywt_alignment(
         image,
         image,
         _candidate(camera),
@@ -230,7 +230,7 @@ def test_dual_path_bootstrap_failure_does_not_fall_back_to_median(monkeypatch):
 
     image = np.zeros((120, 200), dtype=np.float64)
     with pytest.raises(AlignmentError, match="Insufficient stars"):
-        solve_pywt_bootstrap_median_guided(
+        solve_pywt_alignment(
             image,
             image,
             _candidate(camera),
@@ -268,7 +268,7 @@ def test_dual_path_guided_failure_falls_back_to_pywt_result(monkeypatch):
     )
 
     image = np.zeros((120, 200), dtype=np.float64)
-    result = solve_pywt_bootstrap_median_guided(
+    result = solve_pywt_alignment(
         image,
         image,
         _candidate(camera),
@@ -301,10 +301,10 @@ def test_debug_and_benchmark_matching_path_cli_defaults_and_overrides(
         "--reference", "ref.tif",
         "--source", "src.tif",
         "--output", "out.tif",
-        "--matching-path", MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED,
+        "--matching-path", MATCHING_PATH_HISTOGRAM,
     ])
     assert (debug.parse_args().matching_path
-            == MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED)
+            == MATCHING_PATH_HISTOGRAM)
 
     monkeypatch.setattr(sys, "argv", [
         "benchmark_norma_alignment.py", "dataset.json"
@@ -313,10 +313,10 @@ def test_debug_and_benchmark_matching_path_cli_defaults_and_overrides(
 
     monkeypatch.setattr(sys, "argv", [
         "benchmark_norma_alignment.py", "dataset.json",
-        "--matching-path", MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED,
+        "--matching-path", MATCHING_PATH_HISTOGRAM,
     ])
     assert (benchmark.parse_args().matching_path
-            == MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED)
+            == MATCHING_PATH_HISTOGRAM)
 
     monkeypatch.setattr(sys, "argv", [
         "debug_fisheye_two_frame_align.py",
@@ -324,10 +324,10 @@ def test_debug_and_benchmark_matching_path_cli_defaults_and_overrides(
         "--source", "src.tif",
         "--output", "out.tif",
         "--matching-path",
-        MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED,
+        MATCHING_PATH_ASTERISM,
     ])
     assert (debug.parse_args().matching_path
-            == MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED)
+            == MATCHING_PATH_ASTERISM)
 
 
 def test_benchmark_exports_first_and_final_rotation_summaries():

@@ -30,19 +30,18 @@ class AlignmentError(Exception):
 
 
 DEFAULT_BOOTSTRAP_SCALES = (0.7, 1.0, 1.3)
-MATCHING_PATH_MEDIAN_GLOBAL = "median_global"
-MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED = "pywt_bootstrap_median_guided"
-MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED = (
-    "pywt_asterism_bootstrap_median_guided")
-DEFAULT_MATCHING_PATH = MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED
+MATCHING_PATH_MEDIAN = "median"
+MATCHING_PATH_HISTOGRAM = "histogram"
+MATCHING_PATH_ASTERISM = "asterism"
+DEFAULT_MATCHING_PATH = MATCHING_PATH_HISTOGRAM
 MATCHING_PATHS = (
-    MATCHING_PATH_MEDIAN_GLOBAL,
-    MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED,
-    MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED,
+    MATCHING_PATH_MEDIAN,
+    MATCHING_PATH_HISTOGRAM,
+    MATCHING_PATH_ASTERISM,
 )
-PYWT_MEDIAN_MATCHING_PATHS = (
-    MATCHING_PATH_PYWT_BOOTSTRAP_MEDIAN_GUIDED,
-    MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED,
+BOOTSTRAP_MATCHING_PATHS = (
+    MATCHING_PATH_HISTOGRAM,
+    MATCHING_PATH_ASTERISM,
 )
 
 
@@ -592,7 +591,7 @@ def _select_initial_alignment_candidate(
     return best_ref_geo, best_src_geo, best_ref_candidate, best_src_candidate, best_match
 
 
-def solve_pywt_bootstrap_median_guided(
+def solve_pywt_alignment(
     ref_gray: np.ndarray,
     src_gray: np.ndarray,
     ref_candidate: AlignmentCameraCandidate,
@@ -859,9 +858,9 @@ def align_frame_camera_model(
         )
         return frame.copy()
 
-    if matching_path in PYWT_MEDIAN_MATCHING_PATHS:
+    if matching_path in BOOTSTRAP_MATCHING_PATHS:
         try:
-            dual = solve_pywt_bootstrap_median_guided(
+            dual = solve_pywt_alignment(
                 ref_geo.image_gray,
                 to_gray_f64(frame),
                 ref_candidate,
@@ -873,7 +872,7 @@ def align_frame_camera_model(
                 ref_mask=ref_geo.mask,
                 use_asterism_bootstrap=(
                     matching_path
-                    == MATCHING_PATH_PYWT_ASTERISM_BOOTSTRAP_MEDIAN_GUIDED),
+                    == MATCHING_PATH_ASTERISM),
                 ref_bootstrap_stars=ref_geo.pywt_detected_stars,
                 ref_dense_stars=ref_geo.detected_stars,
                 src_dense_stars=src_geo.detected_stars,
