@@ -59,6 +59,7 @@ class StarAlignmentOp(FilterBaseOp):
         "fallback_focal_equiv_mm": {"type": "float", "default": 20.0},
         "bootstrap_scales": {"type": "list", "default": None},
         "remap_map_scale": {"type": "float", "default": 0.5},
+        "guided_refine": {"type": "bool", "default": False},
         "optimize_focal": {"type": "bool", "default": None},
         "optimize_distortion": {"type": "bool", "default": None},
         "optimize_principal_point": {"type": "bool", "default": None},
@@ -119,6 +120,7 @@ class StarAlignmentOp(FilterBaseOp):
         else:
             bootstrap_scales_tuple = tuple(float(x) for x in bootstrap_scales)
         remap_map_scale = float(configs.get('remap_map_scale', 0.5))
+        guided_refine = bool(configs.get('guided_refine', False))
         policy_kwargs = dict(
             fallback_focal_equiv_mm=float(fallback_focal_equiv_mm),
             optimize_focal=configs.get('optimize_focal'),
@@ -199,6 +201,7 @@ class StarAlignmentOp(FilterBaseOp):
                         frame_arr, ref_geo, ref_arr,
                         ref_candidate, src_candidate, same_camera,
                         bootstrap_scales_tuple, remap_map_scale,
+                        guided_refine=guided_refine,
                         matching_path=matching_path)
                 else:
                     aligned_arr = await self._run_cpu(

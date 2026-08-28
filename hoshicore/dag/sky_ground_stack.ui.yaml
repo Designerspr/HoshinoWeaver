@@ -92,6 +92,8 @@ configs:
       - { value: "fisheye", label: "鱼眼镜头" }
   matching_path:
     hidden: true
+  guided_refine:
+    hidden: true
   ref_lens_type:
     label: "参考帧镜头类型"
     description: "显式指定参考帧投影模型；留空时尝试从参考帧 EXIF 推断。"
