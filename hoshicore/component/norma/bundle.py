@@ -24,7 +24,7 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
 from .detection import DetectedStars
-from .frame_align import (AlignmentCameraCandidate,
+from .frame_align import (DEFAULT_BOOTSTRAP_SCALES, AlignmentCameraCandidate,
                           solve_star_alignment)
 from .optimization import CameraOptimizationPolicy
 from .types import (BaseCameraModel, CameraModel, Distortion, FisheyeCameraModel,
@@ -88,6 +88,11 @@ class _BundleEdge:
     second_pts: NDArray[np.float64]
     initial_rotation: NDArray[np.float64]
     error: Optional[str] = None
+    selected_scale: float = 1.0
+
+
+_SCALE_PROBE_EDGE_COUNT = 3
+_ROTATION_ONLY_POLICY = CameraOptimizationPolicy(False, False, False, 0)
 
 
 def _camera_parameter_count(policy: CameraOptimizationPolicy) -> int:
@@ -244,28 +249,98 @@ def _camera_observability(jacobian: NDArray[np.float64], camera_width: int) -> O
 
 
 def _make_edge(first: BundleFrame, second: BundleFrame,
-               random_seed: int | None) -> _BundleEdge:
-    """Build one graph edge without making pair failure fatal to the sequence."""
+               random_seed: int | None,
+               bootstrap_scales: Sequence[float] = DEFAULT_BOOTSTRAP_SCALES,
+               ) -> _BundleEdge:
+    """Match one edge and refine only its initial relative rotation."""
     try:
+        ref_candidate = dataclasses.replace(
+            first.candidate, optimization_policy=_ROTATION_ONLY_POLICY)
+        src_candidate = dataclasses.replace(
+            second.candidate, optimization_policy=_ROTATION_ONLY_POLICY)
         alignment, match = solve_star_alignment(
             first.stars,
             second.stars,
-            first.candidate,
-            second.candidate,
+            ref_candidate,
+            src_candidate,
+            bootstrap_scales=tuple(bootstrap_scales),
             same_camera=True,
             use_asterism_bootstrap=True,
             random_seed=random_seed,
         )
         if len(match.pair_idx) < 6:
             raise ValueError(f"only {len(match.pair_idx)} matched stars")
-        return _BundleEdge(first.index, second.index, match.ref_pts, match.src_pts,
-                           np.asarray(alignment.rotation_ref_to_src,
-                                      dtype=np.float64))
+        base_focal = first.candidate.camera.intrinsics.focal_length_mm
+        selected_scale = alignment.ref_camera.intrinsics.focal_length_mm / base_focal
+        return _BundleEdge(
+            first.index, second.index, match.ref_pts, match.src_pts,
+            np.asarray(alignment.rotation_ref_to_src, dtype=np.float64),
+            selected_scale=float(selected_scale))
     except Exception as exc:
         return _BundleEdge(first.index, second.index,
                            np.empty((0, 2), dtype=np.float64),
                            np.empty((0, 2), dtype=np.float64),
                            np.eye(3), str(exc))
+
+
+def _ordered_scales(votes: dict[float, int]) -> tuple[float, ...]:
+    """Try the most reliable sequence scale first; prefer 1.0 on ties."""
+    original_order = {scale: index for index, scale in enumerate(votes)}
+    return tuple(sorted(
+        votes,
+        key=lambda scale: (-votes[scale], abs(scale - 1.0),
+                           original_order[scale]),
+    ))
+
+
+def _vote_for_scale(votes: dict[float, int], selected: float) -> None:
+    nearest = min(votes, key=lambda scale: abs(scale - selected))
+    votes[nearest] += 1
+
+
+def _sequence_scales(frames: Sequence[BundleFrame]) -> tuple[float, ...]:
+    """Keep reliable perspective EXIF/provided sequences at scale 1.0."""
+    reliable_perspective = all(
+        not isinstance(frame.candidate.camera, FisheyeCameraModel)
+        and frame.candidate.init_source in ("exif", "provided")
+        for frame in frames)
+    return ((1.0,) if reliable_perspective else
+            tuple(float(scale) for scale in DEFAULT_BOOTSTRAP_SCALES))
+
+
+def _build_edges(frames: Sequence[BundleFrame], offsets: Sequence[int],
+                 random_seed: int | None) -> list[_BundleEdge]:
+    """Build edges with a short full-search probe, then preferred-scale reuse.
+
+    A successful single-scale solve already passed the matcher's rotation
+    quality checks. It is accepted without a vote because the other scales
+    were not compared. Failed preferred-scale solves evaluate every remaining
+    scale and vote for the best successful fallback.
+    """
+    votes = {scale: 0 for scale in _sequence_scales(frames)}
+    successful_probes = 0
+    edges = []
+    for pos, first in enumerate(frames):
+        for offset in offsets:
+            if pos + offset >= len(frames):
+                continue
+            second = frames[pos + offset]
+            ordered_scales = _ordered_scales(votes)
+            if successful_probes < _SCALE_PROBE_EDGE_COUNT:
+                edge = _make_edge(first, second, random_seed, ordered_scales)
+                if edge.error is None:
+                    _vote_for_scale(votes, edge.selected_scale)
+                    successful_probes += 1
+            else:
+                edge = _make_edge(first, second, random_seed,
+                                  ordered_scales[:1])
+                if edge.error is not None and len(ordered_scales) > 1:
+                    edge = _make_edge(first, second, random_seed,
+                                      ordered_scales[1:])
+                    if edge.error is None:
+                        _vote_for_scale(votes, edge.selected_scale)
+            edges.append(edge)
+    return edges
 
 
 def build_bundle_plan(frames: Sequence[BundleFrame], reference_frame_index: int,
@@ -303,11 +378,7 @@ def build_bundle_plan(frames: Sequence[BundleFrame], reference_frame_index: int,
     if not offsets:
         raise ValueError("pair_offsets must contain at least one positive offset")
     ordered = sorted(frames, key=lambda item: item.index)
-    edges = []
-    for pos, first in enumerate(ordered):
-        for offset in offsets:
-            if pos + offset < len(ordered):
-                edges.append(_make_edge(first, ordered[pos + offset], random_seed))
+    edges = _build_edges(ordered, offsets, random_seed)
     accepted = [edge for edge in edges if edge.error is None]
 
     # Only the reference-connected component has a defined reference-relative
