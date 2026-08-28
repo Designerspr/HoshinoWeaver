@@ -2,10 +2,12 @@
 from .alignment import (AlignmentResult, guided_mutual_rematch,
                         match_star_pairs, match_star_pairs_asterism,
                         optimize_alignment, run_guided_refine_stage)
+from .bundle import (BAAlignmentPlan, BundleAdjustmentError, BundleFrame,
+                     FrameAlignment, FrameAlignmentStatus, build_bundle_plan)
 from .frame_align import (AlignmentCameraCandidate, AlignmentError,
                           CameraInitializationPolicy, align_frame_camera_model,
                           align_frame_homography, build_camera_candidate,
-                          build_camera)
+                          build_camera, solve_star_alignment)
 from .geometry_view import GeometryView, make_geometry, to_gray_f64
 from .intrinsics_from_exif import (intrinsics_from_exif,
                                    intrinsics_from_fisheye_estimate,

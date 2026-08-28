@@ -590,6 +590,70 @@ def _select_initial_alignment_candidate(
     return best_ref_geo, best_src_geo, best_ref_candidate, best_src_candidate, best_match
 
 
+def _match_stars(
+    ref_geo: GeometryView,
+    src_geo: GeometryView,
+    ref_candidate: AlignmentCameraCandidate,
+    src_candidate: AlignmentCameraCandidate,
+    bootstrap_scales: tuple[float, ...],
+    same_camera: bool,
+    use_asterism_bootstrap: bool,
+    random_seed: int | None,
+):
+    """Shared star-only matching and camera-candidate selection."""
+    _check_star_count(ref_geo, src_geo)
+    match_function = (match_star_pairs_asterism
+                      if use_asterism_bootstrap else match_star_pairs)
+    if random_seed is not None:
+        match_function = partial(match_function, random_seed=random_seed)
+    (ref_geo, src_geo, ref_candidate, src_candidate,
+     match) = _select_initial_alignment_candidate(
+         ref_geo,
+         src_geo,
+         ref_candidate,
+         src_candidate,
+         bootstrap_scales,
+         same_camera=same_camera,
+         match_function=match_function,
+     )
+    return ref_geo, src_geo, ref_candidate, src_candidate, match
+
+
+def solve_star_alignment(
+    ref_stars: DetectedStars,
+    src_stars: DetectedStars,
+    ref_candidate: AlignmentCameraCandidate,
+    src_candidate: AlignmentCameraCandidate,
+    *,
+    bootstrap_scales: tuple[float, ...] = DEFAULT_BOOTSTRAP_SCALES,
+    same_camera: bool = False,
+    use_asterism_bootstrap: bool = True,
+    random_seed: int | None = None,
+) -> tuple[AlignmentResult, MatchResult]:
+    """Align pre-detected stars without retaining source image pixels."""
+    ref_geo = GeometryView.from_detected_stars(ref_stars, ref_candidate.camera)
+    src_geo = GeometryView.from_detected_stars(src_stars, src_candidate.camera)
+    *_, selected_ref, selected_src, match = _match_stars(
+        ref_geo,
+        src_geo,
+        ref_candidate,
+        src_candidate,
+        bootstrap_scales,
+        same_camera,
+        use_asterism_bootstrap,
+        random_seed,
+    )
+    alignment = optimize_alignment(
+        match,
+        selected_ref.camera,
+        selected_src.camera,
+        same_camera=same_camera,
+        ref_policy=selected_ref.optimization_policy,
+        src_policy=selected_src.optimization_policy,
+    )
+    return alignment, match
+
+
 def solve_pywt_alignment(
     ref_gray: np.ndarray,
     src_gray: np.ndarray,
@@ -637,26 +701,18 @@ def solve_pywt_alignment(
     bootstrap_src_geo = GeometryView(
         src_gray, src_candidate.camera, mask=src_mask,
         detected_stars=src_bootstrap_stars)
-    _check_star_count(bootstrap_ref_geo, bootstrap_src_geo)
-
-    bootstrap_match_function = (
-        match_star_pairs_asterism
-        if use_asterism_bootstrap else match_star_pairs)
-    if random_seed is not None:
-        bootstrap_match_function = partial(
-            bootstrap_match_function, random_seed=random_seed)
-
     started = perf_counter()
     (bootstrap_ref_geo, bootstrap_src_geo, ref_candidate, src_candidate,
-     bootstrap_match) = _select_initial_alignment_candidate(
+     bootstrap_match) = _match_stars(
          bootstrap_ref_geo,
          bootstrap_src_geo,
          ref_candidate,
          src_candidate,
-          bootstrap_scales,
-          same_camera=same_camera,
-         match_function=bootstrap_match_function,
-      )
+         bootstrap_scales,
+         same_camera,
+         use_asterism_bootstrap,
+         random_seed,
+    )
     timings["bootstrap_and_matching"] = perf_counter() - started
 
     started = perf_counter()

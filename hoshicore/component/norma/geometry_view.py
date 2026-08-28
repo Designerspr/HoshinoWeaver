@@ -45,7 +45,7 @@ class GeometryView:
 
     def __init__(
         self,
-        image_gray: NDArray[np.float64],
+        image_gray: Optional[NDArray[np.float64]],
         camera: BaseCameraModel,
         mask: Optional[np.ndarray] = None,
         detected_stars: Optional[DetectedStars] = None,
@@ -56,14 +56,27 @@ class GeometryView:
         self._camera = camera
         self._detected_stars_seed = detected_stars
         self._median_threshold_ratio = median_threshold_ratio
-        self.img_shape = image_gray.shape
+        self.img_shape = (image_gray.shape if image_gray is not None else
+                          (camera.intrinsics.image_height_px,
+                           camera.intrinsics.image_width_px))
+        if image_gray is None and detected_stars is None:
+            raise ValueError("image-free geometry requires detected stars")
+
+    @classmethod
+    def from_detected_stars(
+        cls,
+        detected_stars: DetectedStars,
+        camera: BaseCameraModel,
+    ) -> "GeometryView":
+        """Build geometry without retaining an image-sized pixel array."""
+        return cls(None, camera, detected_stars=detected_stars)
 
     @property
     def camera(self) -> BaseCameraModel:
         return self._camera
 
     @property
-    def image_gray(self) -> NDArray[np.float64]:
+    def image_gray(self) -> Optional[NDArray[np.float64]]:
         return self._image_gray
 
     @property
@@ -74,6 +87,8 @@ class GeometryView:
     def detected_stars(self) -> DetectedStars:
         if self._detected_stars_seed is not None:
             return self._detected_stars_seed
+        if self._image_gray is None:
+            raise RuntimeError("star detection requires image pixels")
         return detect_star_points_median(
             self._image_gray,
             self._mask,
@@ -82,6 +97,8 @@ class GeometryView:
 
     @cached_property
     def pywt_detected_stars(self) -> DetectedStars:
+        if self._image_gray is None:
+            raise RuntimeError("star detection requires image pixels")
         return detect_star_points(self._image_gray, self._mask)
 
     @property

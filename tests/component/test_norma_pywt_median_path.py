@@ -8,6 +8,7 @@ from hoshicore.component.norma.detection import DetectedStars
 from hoshicore.component.norma.frame_align import (
     AlignmentCameraCandidate,
     AlignmentError,
+    solve_star_alignment,
     solve_pywt_alignment,
 )
 from hoshicore.component.norma.matching import MatchResult
@@ -217,6 +218,39 @@ def test_dual_path_selects_asterism_bootstrap_matcher(monkeypatch):
     )
 
     assert selected_matchers == [module.match_star_pairs_asterism]
+
+
+def test_detected_star_solver_is_image_free_and_uses_asterism(monkeypatch):
+    import hoshicore.component.norma.frame_align as module
+
+    camera = _camera()
+    seen = {}
+
+    def fake_select(ref_geo, src_geo, ref_candidate, src_candidate,
+                    bootstrap_scales, same_camera=False,
+                    match_function=None):
+        seen["images"] = (ref_geo.image_gray, src_geo.image_gray)
+        seen["matcher"] = match_function
+        return (ref_geo, src_geo, ref_candidate, src_candidate,
+                _match(ref_geo, src_geo, 8))
+
+    monkeypatch.setattr(module, "_select_initial_alignment_candidate",
+                        fake_select)
+    monkeypatch.setattr(
+        module,
+        "optimize_alignment",
+        lambda match, ref_camera, src_camera, **kwargs:
+        AlignmentResult(np.eye(3), ref_camera, src_camera),
+    )
+
+    alignment, match = solve_star_alignment(
+        _stars(24), _stars(24), _candidate(camera), _candidate(camera),
+        bootstrap_scales=(1.0,), same_camera=True)
+
+    assert seen["images"] == (None, None)
+    assert seen["matcher"] is module.match_star_pairs_asterism
+    assert len(match.pair_idx) == 8
+    np.testing.assert_array_equal(alignment.rotation_ref_to_src, np.eye(3))
 
 
 def test_dual_path_bootstrap_failure_does_not_fall_back_to_median(monkeypatch):
