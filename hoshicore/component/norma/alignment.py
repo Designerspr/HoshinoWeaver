@@ -254,109 +254,6 @@ def guided_mutual_rematch(
     )
 
 
-def filter_guided_match_spatially(
-    match: MatchResult,
-    alignment: AlignmentResult,
-    image_shape: tuple[int, ...],
-    grid_cols: int = 24,
-    grid_rows: int = 16,
-    min_support: int = 8,
-    sigma: float = 3.5,
-    floor_px: float = 1.5,
-) -> tuple[MatchResult, dict[str, float | int]]:
-    """Reject only locally inconsistent guided residual vectors.
-
-    The first-stage projection defines a residual vector for every guided pair.
-    Each image cell votes for its component-wise median vector; sparse cells
-    borrow the surrounding 3x3 cells.  A robust local MAD threshold removes
-    points that strongly disagree with that local vote.  Non-zero, spatially
-    varying residual fields are deliberately retained so they can still drive
-    focal/distortion refinement.
-    """
-    count = len(match.pair_idx)
-    if count == 0:
-        return match, {"input_pairs": 0, "kept_pairs": 0, "rejected_pairs": 0}
-    if grid_cols <= 0 or grid_rows <= 0:
-        raise ValueError("guided spatial-filter grid dimensions must be positive")
-
-    rotation = np.asarray(alignment.rotation_ref_to_src, dtype=np.float64)
-    ref_rays = alignment.ref_camera.unproject(match.ref_pts)
-    predicted_src = alignment.src_camera.project((rotation @ ref_rays.T).T)
-    residual = np.asarray(match.src_pts - predicted_src, dtype=np.float64)
-    finite = np.all(np.isfinite(residual), axis=1)
-
-    height, width = image_shape[:2]
-    col = np.clip((match.ref_pts[:, 0] * grid_cols / max(width, 1)).astype(int),
-                  0, grid_cols - 1)
-    row = np.clip((match.ref_pts[:, 1] * grid_rows / max(height, 1)).astype(int),
-                  0, grid_rows - 1)
-    cell = row * grid_cols + col
-    members = [np.flatnonzero((cell == idx) & finite)
-               for idx in range(grid_rows * grid_cols)]
-
-    keep = np.zeros(count, dtype=bool)
-    thresholds: list[float] = []
-    supported_cells = 0
-    for cell_idx, own_idx in enumerate(members):
-        if len(own_idx) == 0:
-            continue
-        support_idx = own_idx
-        if len(support_idx) < min_support:
-            cell_row, cell_col = divmod(cell_idx, grid_cols)
-            neighbors = [
-                members[r * grid_cols + c]
-                for r in range(max(0, cell_row - 1),
-                               min(grid_rows, cell_row + 2))
-                for c in range(max(0, cell_col - 1),
-                               min(grid_cols, cell_col + 2))
-                if len(members[r * grid_cols + c])
-            ]
-            if neighbors:
-                support_idx = np.concatenate(neighbors)
-        if len(support_idx) < min_support:
-            # Insufficient evidence is not evidence of an outlier.
-            keep[own_idx] = True
-            continue
-
-        supported_cells += 1
-        local_vote = np.median(residual[support_idx], axis=0)
-        support_deviation = np.linalg.norm(
-            residual[support_idx] - local_vote, axis=1)
-        deviation_median = float(np.median(support_deviation))
-        mad = float(np.median(np.abs(support_deviation - deviation_median)))
-        threshold = max(float(floor_px),
-                        deviation_median + float(sigma) * 1.4826 * mad)
-        thresholds.append(threshold)
-        own_deviation = np.linalg.norm(residual[own_idx] - local_vote, axis=1)
-        keep[own_idx] = own_deviation <= threshold
-
-    kept_idx = np.flatnonzero(keep & finite)
-    filtered = MatchResult(
-        pair_idx=match.pair_idx[kept_idx],
-        ref_pts=match.ref_pts[kept_idx],
-        src_pts=match.src_pts[kept_idx],
-        rotation=match.rotation,
-        homography=match.homography,
-    )
-    stats: dict[str, float | int] = {
-        "input_pairs": count,
-        "kept_pairs": len(kept_idx),
-        "rejected_pairs": count - len(kept_idx),
-        "supported_cells": supported_cells,
-        "grid_cols": grid_cols,
-        "grid_rows": grid_rows,
-        "threshold_median_px": (float(np.median(thresholds))
-                                if thresholds else float("nan")),
-    }
-    logger.debug(
-        "Guided spatial filter: pairs={}->{} rejected={} grid={}x{} "
-        "supported_cells={} threshold_median={:.3f}px",
-        count, len(kept_idx), count - len(kept_idx), grid_cols, grid_rows,
-        supported_cells, stats["threshold_median_px"],
-    )
-    return filtered, stats
-
-
 def optimize_alignment(
     match: MatchResult,
     camera1: BaseCameraModel,
@@ -434,27 +331,70 @@ def optimize_alignment(
     return _build_flexible_result(res.x, ctx, camera1, camera2)
 
 
-def guided_refine_alignment(
+def _guided_rematch_residual_p90(
+    match: MatchResult,
+    alignment: AlignmentResult,
+) -> float:
+    """p90 residual of ``match``'s points projected under ``alignment``."""
+    rotation = np.asarray(alignment.rotation_ref_to_src, dtype=np.float64)
+    ref_vecs = alignment.ref_camera.unproject(match.ref_pts)
+    predicted_src = alignment.src_camera.project((rotation @ ref_vecs.T).T)
+    residual = np.linalg.norm(predicted_src - match.src_pts, axis=1)
+    finite = np.isfinite(residual)
+    if not np.any(finite):
+        return float("inf")
+    return float(np.percentile(residual[finite], 90))
+
+
+def run_guided_refine_stage(
     ref_geo: GeometryView,
     src_geo: GeometryView,
     alignment: AlignmentResult,
+    bootstrap_match: MatchResult,
     same_camera: bool = False,
     max_distance_px: float = 8.0,
     ref_policy: Optional[CameraOptimizationPolicy] = None,
     src_policy: Optional[CameraOptimizationPolicy] = None,
     focal_regularization_weight: float = 0.0,
-) -> tuple[AlignmentResult, MatchResult]:
-    """Run one optional local-rematch and camera re-optimization stage."""
-    guided_match = guided_mutual_rematch(
-        ref_geo,
-        src_geo,
-        alignment,
-        max_distance_px=max_distance_px,
-    )
-    if len(guided_match.pair_idx) < 6:
-        raise ValueError(
-            "guided refinement requires at least 6 mutual pairs, "
-            f"got {len(guided_match.pair_idx)}")
+) -> tuple[AlignmentResult, MatchResult, str]:
+    """Run one guided-rematch + re-optimization stage, accepted only if it helps.
+
+    If geometric mutual matching cannot produce enough pairs, this stage is
+    skipped and ``alignment``/``bootstrap_match`` are returned unchanged.
+
+    Critically, even a successfully computed guided match is not accepted
+    unconditionally: this evaluates residuals on the guided match's own
+    points under both ``alignment`` (pre-refine) and the newly optimized
+    result (post-refine), and only accepts the refinement if it does not
+    make the p90 residual worse. Isolated benchmarking found the dense
+    guided-rematch + joint-optimization stage frequently *degrades* results
+    relative to the bootstrap-stage fit alone -- in extreme cases the
+    optimizer diverges to a physically nonsensical focal length or
+    distortion (e.g. ``k1`` far outside any real lens) -- so accepting
+    every optimizer result unconditionally is unsafe. When rejected, this
+    returns ``alignment``/``bootstrap_match`` unchanged with status
+    ``"rejected_no_improvement"``.
+
+    Returns ``(result_alignment, result_match, status)`` where ``status`` is
+    one of ``"applied"``, ``"skipped_match_unavailable"``, or
+    ``"rejected_no_improvement"``.
+    """
+    try:
+        guided_match = guided_mutual_rematch(
+            ref_geo,
+            src_geo,
+            alignment,
+            max_distance_px=max_distance_px,
+        )
+        if len(guided_match.pair_idx) < 6:
+            raise ValueError(
+                "guided refinement requires at least 6 mutual pairs, "
+                f"got {len(guided_match.pair_idx)}")
+    except ValueError as exc:
+        logger.debug(
+            "Guided refine stage: match unavailable, keeping "
+            "pre-refine alignment: {}", exc)
+        return alignment, bootstrap_match, "skipped_match_unavailable"
 
     refined = optimize_alignment(
         guided_match,
@@ -465,7 +405,20 @@ def guided_refine_alignment(
         src_policy=src_policy,
         focal_regularization_weight=focal_regularization_weight,
     )
-    return refined, guided_match
+
+    p90_before = _guided_rematch_residual_p90(guided_match, alignment)
+    p90_after = _guided_rematch_residual_p90(guided_match, refined)
+    logger.debug(
+        "Guided refine stage: pairs={} p90_before={:.3f} "
+        "p90_after={:.3f}", len(guided_match.pair_idx), p90_before,
+        p90_after)
+    if not np.isfinite(p90_after) or p90_after > p90_before:
+        logger.debug(
+            "Guided refine stage: rejected (no improvement), keeping "
+            "pre-refine alignment")
+        return alignment, bootstrap_match, "rejected_no_improvement"
+
+    return refined, guided_match, "applied"
 
 
 def _camera_projection_type(camera: BaseCameraModel) -> str:

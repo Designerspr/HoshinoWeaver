@@ -1,8 +1,7 @@
 """Norma: star-point alignment for astrophotography."""
-from .alignment import (AlignmentResult, filter_guided_match_spatially,
-                        guided_mutual_rematch,
-                        guided_refine_alignment, match_star_pairs,
-                        match_star_pairs_asterism, optimize_alignment)
+from .alignment import (AlignmentResult, guided_mutual_rematch,
+                        match_star_pairs, match_star_pairs_asterism,
+                        optimize_alignment, run_guided_refine_stage)
 from .frame_align import (AlignmentCameraCandidate, AlignmentError,
                           CameraInitializationPolicy, align_frame_camera_model,
                           align_frame_homography, build_camera_candidate,

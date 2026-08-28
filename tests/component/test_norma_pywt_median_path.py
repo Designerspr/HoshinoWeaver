@@ -70,6 +70,7 @@ def _candidate(camera: CameraModel) -> AlignmentCameraCandidate:
 def test_dual_path_keeps_bootstrap_and_dense_index_spaces_separate(
         monkeypatch):
     import hoshicore.component.norma.frame_align as module
+    import hoshicore.component.norma.alignment as alignment_module
 
     camera = _camera()
     pywt_calls = []
@@ -100,12 +101,19 @@ def test_dual_path_keeps_bootstrap_and_dense_index_spaces_separate(
         optimize_matches.append(match)
         return AlignmentResult(np.eye(3), ref_camera, src_camera)
 
+    def fake_residual_p90(match, alignment):
+        return 0.0
+
     monkeypatch.setattr(module, "detect_star_points", fake_pywt)
     monkeypatch.setattr(module, "detect_star_points_median", fake_median)
     monkeypatch.setattr(module, "_select_initial_alignment_candidate",
                         fake_select)
-    monkeypatch.setattr(module, "guided_mutual_rematch", fake_guided)
+    monkeypatch.setattr(alignment_module, "guided_mutual_rematch",
+                        fake_guided)
     monkeypatch.setattr(module, "optimize_alignment", fake_optimize)
+    monkeypatch.setattr(alignment_module, "optimize_alignment", fake_optimize)
+    monkeypatch.setattr(alignment_module, "_guided_rematch_residual_p90",
+                        fake_residual_p90)
     monkeypatch.setattr(
         module.GeometryView,
         "features",
@@ -242,6 +250,7 @@ def test_dual_path_bootstrap_failure_does_not_fall_back_to_median(monkeypatch):
 
 def test_dual_path_guided_failure_falls_back_to_pywt_result(monkeypatch):
     import hoshicore.component.norma.frame_align as module
+    import hoshicore.component.norma.alignment as alignment_module
 
     camera = _camera()
     monkeypatch.setattr(module, "detect_star_points",
@@ -261,7 +270,7 @@ def test_dual_path_guided_failure_falls_back_to_pywt_result(monkeypatch):
     monkeypatch.setattr(module, "optimize_alignment",
                         lambda *args, **kwargs: bootstrap_alignment)
     monkeypatch.setattr(
-        module,
+        alignment_module,
         "guided_mutual_rematch",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             RuntimeError("guided failed")),

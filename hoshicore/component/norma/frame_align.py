@@ -9,10 +9,9 @@ import cv2
 import numpy as np
 from loguru import logger
 
-from .alignment import (AlignmentResult, filter_guided_match_spatially,
-                         guided_mutual_rematch,
-                         guided_refine_alignment, match_star_pairs,
-                         match_star_pairs_asterism, optimize_alignment)
+from .alignment import (AlignmentResult, match_star_pairs,
+                         match_star_pairs_asterism, optimize_alignment,
+                         run_guided_refine_stage)
 from .detection import (DetectedStars, detect_star_points,
                         detect_star_points_median)
 from .matching import MatchResult, RotationDiagnostics, evaluate_rotation
@@ -92,7 +91,6 @@ class PywtMedianSolveResult:
     final_alignment: AlignmentResult
     guided_status: str
     guided_error: Optional[str]
-    guided_filter_stats: Optional[dict[str, float | int]]
     timings: dict[str, float]
 
 
@@ -601,7 +599,6 @@ def solve_pywt_alignment(
     same_camera: bool = False,
     guided_refine: bool = True,
     guided_refine_radius_px: float = 8.0,
-    guided_spatial_filter: bool = False,
     median_threshold_ratio: float = 1.0,
     ref_mask: Optional[np.ndarray] = None,
     src_mask: Optional[np.ndarray] = None,
@@ -679,7 +676,6 @@ def solve_pywt_alignment(
     dense_src_geo: Optional[GeometryView] = None
     guided_status = "disabled"
     guided_error: Optional[str] = None
-    guided_filter_stats: Optional[dict[str, float | int]] = None
 
     if guided_refine:
         try:
@@ -717,36 +713,17 @@ def solve_pywt_alignment(
             _check_star_count(dense_ref_geo, dense_src_geo)
 
             started = perf_counter()
-            guided_match = guided_mutual_rematch(
+            final_alignment, final_match, guided_status = run_guided_refine_stage(
                 dense_ref_geo,
                 dense_src_geo,
                 bootstrap_alignment,
-                max_distance_px=guided_refine_radius_px,
-            )
-            if guided_spatial_filter:
-                guided_match, guided_filter_stats = filter_guided_match_spatially(
-                    guided_match,
-                    bootstrap_alignment,
-                    dense_ref_geo.img_shape,
-                )
-            timings["guided_rematch"] = perf_counter() - started
-            if len(guided_match.pair_idx) < 6:
-                raise ValueError(
-                    "guided refinement requires at least 6 mutual pairs, "
-                    f"got {len(guided_match.pair_idx)}")
-
-            started = perf_counter()
-            final_alignment = optimize_alignment(
-                guided_match,
-                bootstrap_alignment.ref_camera,
-                bootstrap_alignment.src_camera,
+                bootstrap_match=bootstrap_match,
                 same_camera=same_camera,
+                max_distance_px=guided_refine_radius_px,
                 ref_policy=ref_candidate.optimization_policy,
                 src_policy=src_candidate.optimization_policy,
             )
-            timings["guided_optimization"] = perf_counter() - started
-            final_match = guided_match
-            guided_status = "applied"
+            timings["guided_rematch"] = perf_counter() - started
         except Exception as exc:
             guided_status = "failed_fallback"
             guided_error = str(exc)
@@ -769,7 +746,6 @@ def solve_pywt_alignment(
         final_alignment=final_alignment,
         guided_status=guided_status,
         guided_error=guided_error,
-        guided_filter_stats=guided_filter_stats,
         timings=timings,
     )
 
@@ -928,19 +904,20 @@ def align_frame_camera_model(
         if guided_refine:
             initial_pair_count = len(match.pair_idx)
             try:
-                result, guided_match = guided_refine_alignment(
+                result, match, guided_stage_status = run_guided_refine_stage(
                     ref_geo,
                     src_geo,
                     result,
+                    bootstrap_match=match,
                     same_camera=same_camera,
                     max_distance_px=guided_refine_radius_px,
                     ref_policy=ref_candidate.optimization_policy,
                     src_policy=src_candidate.optimization_policy,
                 )
-                match = guided_match
                 logger.debug(
-                    "align_frame_camera_model: guided refinement accepted "
+                    "align_frame_camera_model: guided refinement status={} "
                     "initial_pairs={} guided_pairs={} radius_px={:.3f}",
+                    guided_stage_status,
                     initial_pair_count,
                     len(match.pair_idx),
                     guided_refine_radius_px,

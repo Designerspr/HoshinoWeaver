@@ -4,11 +4,9 @@ import numpy as np
 
 from hoshicore.component.norma.alignment import (
     AlignmentResult,
-    filter_guided_match_spatially,
     guided_mutual_rematch,
-    guided_refine_alignment,
+    run_guided_refine_stage,
 )
-from hoshicore.component.norma.matching import MatchResult
 from hoshicore.component.norma.detection import DetectedStars
 from hoshicore.component.norma.geometry_view import GeometryView
 from hoshicore.component.norma.optimization import CameraOptimizationPolicy
@@ -77,54 +75,18 @@ def test_guided_refinement_recovers_native_point_pairs_and_rotation():
         optimize_principal_point=False,
         n_dist=0,
     )
-    refined, refined_match = guided_refine_alignment(
+    refined, refined_match, status = run_guided_refine_stage(
         ref_geo,
         src_geo,
         initial,
+        bootstrap_match=guided_match,
         same_camera=True,
         max_distance_px=3.0,
         ref_policy=fixed_camera_policy,
         src_policy=fixed_camera_policy,
     )
 
+    assert status == "applied"
     assert len(refined_match.pair_idx) == len(ref_positions)
     np.testing.assert_allclose(
         refined.rotation_ref_to_src, true_rotation, atol=1e-9)
-
-
-def test_spatial_filter_rejects_local_residual_outliers_not_smooth_correction():
-    intrinsics = Intrinsics(
-        focal_length_mm=20.0,
-        sensor_width_mm=36.0,
-        sensor_height_mm=24.0,
-        image_width_px=600,
-        image_height_px=400,
-    )
-    camera = CameraModel(intrinsics=intrinsics)
-    xx, yy = np.meshgrid(np.linspace(30, 570, 20), np.linspace(30, 370, 12))
-    ref = np.column_stack((xx.ravel(), yy.ravel()))
-    smooth = np.column_stack((
-        2.0 + 0.002 * (ref[:, 0] - 300.0),
-        -1.0 + 0.001 * (ref[:, 1] - 200.0),
-    ))
-    src = ref + smooth
-    outliers = np.arange(0, len(ref), 30)
-    src[outliers] += np.array([12.0, -9.0])
-    pair_idx = np.column_stack((np.arange(len(ref)), np.arange(len(ref)))).astype(
-        np.int32)
-    match = MatchResult(
-        pair_idx=pair_idx,
-        ref_pts=ref,
-        src_pts=src,
-        rotation=np.eye(3),
-        homography=np.eye(3),
-    )
-    initial = AlignmentResult(np.eye(3), camera, camera)
-
-    filtered, stats = filter_guided_match_spatially(
-        match, initial, (400, 600), grid_cols=6, grid_rows=4)
-
-    kept = set(filtered.pair_idx[:, 0].tolist())
-    assert kept.isdisjoint(outliers.tolist())
-    assert len(filtered.pair_idx) == len(ref) - len(outliers)
-    assert stats["rejected_pairs"] == len(outliers)
