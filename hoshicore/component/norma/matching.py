@@ -1002,6 +1002,7 @@ def fine_tune_rotation(
     vectors2: NDArray[np.float64],
     init_pair_idx: NDArray[np.int32],
     config: RotationValidationConfig = FISHEYE_ROTATION_VALIDATION,
+    random_seed: int | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.int32]]:
     """Refine matching using RANSAC on unit-vector rotation consistency."""
     unique_pair_idx = np.unique(init_pair_idx, axis=0).astype(np.int32,
@@ -1021,7 +1022,7 @@ def fine_tune_rotation(
         unique_pair_count, sample_size, max_iterations,
         np.rad2deg(ROTATION_RANSAC_ANGLE_THRESHOLD_RAD))
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(random_seed)
     best_candidate: RotationCandidate | None = None
     refine_failure_count = 0
     last_refine_error: str | None = None

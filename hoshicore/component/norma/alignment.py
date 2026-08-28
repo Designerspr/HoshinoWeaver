@@ -64,6 +64,7 @@ def match_star_pairs(
     rotation_validation_config:
     RotationValidationConfig = FISHEYE_ROTATION_VALIDATION,
     coverage_repair_context: CoverageRepairContext = DEFAULT_COVERAGE_REPAIR,
+    random_seed: int | None = None,
 ) -> MatchResult:
     """Match stars between two GeometryView instances.
 
@@ -91,7 +92,8 @@ def match_star_pairs(
     initial_pair_count = len(pair_idx)
     rotation, pair_idx = fine_tune_rotation(
         ref_geo.positions, src_geo.positions, ref_geo.unit_vectors,
-        src_geo.unit_vectors, pair_idx, rotation_validation_config)
+        src_geo.unit_vectors, pair_idx, rotation_validation_config,
+        random_seed=random_seed)
     homography = rotation_derived_homography(ref_geo.camera,
                                                   src_geo.camera,
                                                   rotation)
@@ -112,6 +114,7 @@ def match_star_pairs_asterism(
     rotation_validation_config:
     RotationValidationConfig = FISHEYE_ROTATION_VALIDATION,
     asterism_config: AsterismMatchingConfig = AsterismMatchingConfig(),
+    random_seed: int | None = None,
 ) -> MatchResult:
     """Match sparse stars using local spherical-triangle voting."""
     pair_idx = find_asterism_initial_match(
@@ -134,6 +137,7 @@ def match_star_pairs_asterism(
         src_geo.unit_vectors,
         pair_idx,
         rotation_validation_config,
+        random_seed=random_seed,
     )
     return MatchResult(
         pair_idx=pair_idx,

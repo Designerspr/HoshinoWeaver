@@ -1,6 +1,7 @@
 """单帧对齐：封装两条路径的纯函数 API。
 """
 import dataclasses
+from functools import partial
 from time import perf_counter
 from typing import Callable, Optional
 
@@ -609,6 +610,7 @@ def solve_pywt_alignment(
     src_bootstrap_stars: Optional[DetectedStars] = None,
     ref_dense_stars: Optional[DetectedStars] = None,
     src_dense_stars: Optional[DetectedStars] = None,
+    random_seed: int | None = None,
 ) -> PywtMedianSolveResult:
     """Solve with sparse pywt bootstrap and optional dense median refinement.
 
@@ -640,6 +642,13 @@ def solve_pywt_alignment(
         detected_stars=src_bootstrap_stars)
     _check_star_count(bootstrap_ref_geo, bootstrap_src_geo)
 
+    bootstrap_match_function = (
+        match_star_pairs_asterism
+        if use_asterism_bootstrap else match_star_pairs)
+    if random_seed is not None:
+        bootstrap_match_function = partial(
+            bootstrap_match_function, random_seed=random_seed)
+
     started = perf_counter()
     (bootstrap_ref_geo, bootstrap_src_geo, ref_candidate, src_candidate,
      bootstrap_match) = _select_initial_alignment_candidate(
@@ -649,8 +658,7 @@ def solve_pywt_alignment(
          src_candidate,
           bootstrap_scales,
           same_camera=same_camera,
-          match_function=(match_star_pairs_asterism
-                          if use_asterism_bootstrap else match_star_pairs),
+         match_function=bootstrap_match_function,
       )
     timings["bootstrap_and_matching"] = perf_counter() - started
 

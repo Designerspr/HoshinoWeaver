@@ -200,7 +200,7 @@ def test_guided_mutual_match_rejects_one_way_nearest_neighbor():
     )
 
 
-def test_fine_tune_rotation_accepts_consistent_pairs_with_duplicates():
+def test_fine_tune_rotation_is_reproducible_with_seed():
     vectors1 = np.array([
         [0.0, 0.0, 1.0],
         [0.1, 0.0, 0.995],
@@ -235,11 +235,15 @@ def test_fine_tune_rotation_accepts_consistent_pairs_with_duplicates():
         [0, 0],
     ], dtype=np.int32)
 
-    R_est, pair_idx = fine_tune_rotation(
-        pts, pts, vectors1, vectors2, init_pair_idx)
+    first_rotation, first_pairs = fine_tune_rotation(
+        pts, pts, vectors1, vectors2, init_pair_idx, random_seed=42)
+    second_rotation, second_pairs = fine_tune_rotation(
+        pts, pts, vectors1, vectors2, init_pair_idx, random_seed=42)
 
-    assert len(np.unique(pair_idx, axis=0)) >= 6
-    np.testing.assert_allclose(R_est, R, atol=1e-10)
+    np.testing.assert_array_equal(second_pairs, first_pairs)
+    np.testing.assert_array_equal(second_rotation, first_rotation)
+    assert len(np.unique(first_pairs, axis=0)) >= 6
+    np.testing.assert_allclose(first_rotation, R, atol=1e-10)
 
 
 def test_fine_tune_rotation_rejects_when_unique_pairs_below_minimum():
