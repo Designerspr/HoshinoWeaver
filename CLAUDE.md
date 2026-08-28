@@ -13,6 +13,23 @@ When adding or modifying any feature, check whether the following need updating:
 - `CLAUDE.md` — if architecture, base classes, or invariants changed
 - Inline docstrings / YAML comments in affected files
 
+### Production, Benchmark, and Debug Boundaries
+
+- `hoshicore/` contains production implementations. Algorithm behavior tests
+  should exercise these modules directly.
+- `bench/` contains the existing kernel microbenchmarks. `benchmarks/` contains
+  the tracked Norma alignment benchmark component; keep local datasets under
+  `benchmarks/local/` and out of version control.
+- Root-level `debug_*.py`, notebooks, and local reference files are independent
+  development diagnostics. They are not stable project APIs and must not be
+  imported by the tracked test suite.
+- Tests may depend only on tracked production code, tracked test helpers, or a
+  tracked benchmark component. A fresh checkout must not require local debug
+  scripts or private benchmark datasets to collect and run tests.
+- Keep debug scripts thin. Test reusable behavior in its production module;
+  do not add shared wrappers or framework abstractions solely to test a debug
+  command-line interface.
+
 ## Agent Tooling Notes
 
 - This repository uses UTF-8 source files. Do not assume Windows PowerShell 5.1 will display UTF-8 correctly.

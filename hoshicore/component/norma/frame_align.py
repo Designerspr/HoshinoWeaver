@@ -597,7 +597,7 @@ def solve_pywt_alignment(
     src_candidate: AlignmentCameraCandidate,
     bootstrap_scales: tuple[float, ...] = DEFAULT_BOOTSTRAP_SCALES,
     same_camera: bool = False,
-    guided_refine: bool = True,
+    guided_refine: bool = False,
     guided_refine_radius_px: float = 8.0,
     median_threshold_ratio: float = 1.0,
     ref_mask: Optional[np.ndarray] = None,
@@ -813,7 +813,7 @@ def align_frame_camera_model(
     same_camera: bool = True,
     bootstrap_scales: tuple[float, ...] = DEFAULT_BOOTSTRAP_SCALES,
     remap_map_scale: float = 0.5,
-    guided_refine: bool = True,
+    guided_refine: bool = False,
     guided_refine_radius_px: float = 8.0,
     matching_path: str = DEFAULT_MATCHING_PATH,
 ) -> np.ndarray:
