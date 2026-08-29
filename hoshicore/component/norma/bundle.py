@@ -1,7 +1,7 @@
 """Sequence bundle adjustment for a same-camera star-field capture.
 
-The public result deliberately contains geometry only.  Image-domain checks
-belong to :class:`BAIntegrationOp`, which already has to execute the remap.
+The public result deliberately contains geometry only. Applying that geometry
+to image streams belongs to downstream ops such as ``BundleReferenceRemapOp``.
 
 The solve has four stages:
 

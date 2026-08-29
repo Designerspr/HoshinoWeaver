@@ -314,11 +314,11 @@ def compute_stabilization_warps(
 
 ## 5. 已实现的序列 BA 节点边界（v1）
 
-v1 将几何 BA 与图像 remap 验证拆成两个节点：
+v1 将几何 BA 与参考帧 remap 拆成两个节点：
 
 ```text
-第一轮 data + exifs → BAAlignmentOp → BAAlignmentPlan
-第二轮 data + exifs + BAAlignmentPlan → BAIntegrationOp → 对齐帧 + IntegrationReport
+第一轮 data + exifs → BundleAdjustmentOp → BAAlignmentPlan
+第二轮 data + exifs + BAAlignmentPlan → BundleReferenceRemapOp → 对齐帧 + BundleRemapReport
 ```
 
 - `BAAlignmentPlan` 只携带共享相机、相对指定
@@ -332,9 +332,8 @@ v1 将几何 BA 与图像 remap 验证拆成两个节点：
 - 未连入参考分量的帧不会进入 BA，并明确标为 `excluded`。BA 不解析
   时间戳，也不为无图像约束的帧插值或外推姿态；如果以后需要，这属于 BA 之外的
   序列恢复策略。
-- `BAIntegrationOp` 已经需要 remap，因此在有效重叠掩膜中计算局部 ZNCC、归一化
-  L1、支持率和坏 tile 比例。`validation_action=off|report|exclude` 仅影响该节点的
-  输出，不回写或二次优化 BA 计划。
+- `BundleReferenceRemapOp` 按输入顺序将已求解帧映射到全局参考帧，参考帧本身
+  原样输出；plan 中明确排除的帧不会输出，并记录在 `BundleRemapReport` 中。
 
 由于计划在读完整个序列后才产生，第二阶段必须从相同的文件列表重新加载图像（或由
 上层提供可重放缓存）；不能让一个仍在等待计划的 integration 节点消费同一条原始流。

@@ -3,11 +3,12 @@ from types import SimpleNamespace
 
 import numpy as np
 
-import hoshicore.ops.alignment_ops as alignment_ops
+import hoshicore.ops.bundle_ops as bundle_ops
 from hoshicore.component.norma.bundle import (BAAlignmentPlan, FrameAlignment,
                                                FrameAlignmentStatus)
-from hoshicore.ops.alignment_ops import (BAAlignmentOp, BAIntegrationOp,
-                                         IntegrationReport)
+from hoshicore.ops.bundle_ops import (BundleAdjustmentOp,
+                                      BundleReferenceRemapOp,
+                                      BundleRemapReport)
 
 
 class _Camera:
@@ -55,8 +56,8 @@ def _frame(index, status=FrameAlignmentStatus.SOLVED, rotation=None,
     )
 
 
-def test_ba_alignment_uses_reference_camera_for_every_frame(monkeypatch):
-    op = BAAlignmentOp("bundle")
+def test_bundle_adjustment_uses_reference_camera_for_every_frame(monkeypatch):
+    op = BundleAdjustmentOp("bundle")
     op.length = 3
     op.inputs["exifs"] = SimpleNamespace(active=True)
     images = [np.zeros((8, 12), dtype=np.uint16) for _ in range(3)]
@@ -96,10 +97,10 @@ def test_ba_alignment_uses_reference_camera_for_every_frame(monkeypatch):
     monkeypatch.setattr(op, "_run_cpu", run_cpu)
     monkeypatch.setattr(op, "_broadcast_outputs", broadcast)
     monkeypatch.setattr(
-        alignment_ops.StarDetectionCache, "from_image",
+        bundle_ops.StarDetectionCache, "from_image",
         staticmethod(lambda image: SimpleNamespace(pywt_stars=object())))
-    monkeypatch.setattr(alignment_ops, "build_camera_candidate", build_candidate)
-    monkeypatch.setattr(alignment_ops, "build_bundle_plan", build_plan)
+    monkeypatch.setattr(bundle_ops, "build_camera_candidate", build_candidate)
+    monkeypatch.setattr(bundle_ops, "build_bundle_plan", build_plan)
 
     asyncio.run(op._async_execute({
         "reference_frame_index": 1,
@@ -122,8 +123,8 @@ def test_ba_alignment_uses_reference_camera_for_every_frame(monkeypatch):
     assert captured["output"] == {"alignment_plan": "plan"}
 
 
-def test_ba_integration_streams_in_input_order_and_skips_excluded(monkeypatch):
-    op = BAIntegrationOp("integrate")
+def test_bundle_reference_remap_streams_in_order_and_skips_excluded(monkeypatch):
+    op = BundleReferenceRemapOp("remap")
     op.length = 4
     op.inputs["exifs"] = SimpleNamespace(active=True)
     images = [np.full((8, 12), index, dtype=np.uint16)
@@ -177,15 +178,15 @@ def test_ba_integration_streams_in_input_order_and_skips_excluded(monkeypatch):
     assert all(call[1] == (12, 8) and call[3] == 0.25
                for call in remap_calls)
 
-    report = broadcasts[-1]["integration_report"]
-    assert isinstance(report, IntegrationReport)
+    report = broadcasts[-1]["remap_report"]
+    assert isinstance(report, BundleRemapReport)
     assert [item.index for item in report.frames] == [0, 1, 2, 3]
     assert [item.emitted for item in report.frames] == [True, False, True, True]
     assert report.frames[1].reason == "disconnected"
 
 
-def test_ba_integration_rejects_solved_frame_without_pose(monkeypatch):
-    op = BAIntegrationOp("integrate")
+def test_bundle_reference_remap_rejects_solved_frame_without_pose(monkeypatch):
+    op = BundleReferenceRemapOp("remap")
     op.length = 1
     op.inputs["exifs"] = SimpleNamespace(active=False)
     image = np.zeros((8, 12), dtype=np.uint16)
@@ -210,8 +211,8 @@ def test_ba_integration_rejects_solved_frame_without_pose(monkeypatch):
         }))
 
 
-def test_ba_integration_validates_second_load_geometry(monkeypatch):
-    op = BAIntegrationOp("integrate")
+def test_bundle_reference_remap_validates_second_load_geometry(monkeypatch):
+    op = BundleReferenceRemapOp("remap")
     op.length = 1
     op.inputs["exifs"] = SimpleNamespace(active=False)
 
@@ -230,6 +231,6 @@ def test_ba_integration_validates_second_load_geometry(monkeypatch):
         }))
 
 
-def test_ba_integration_resource_estimate_is_sequence_constant():
-    assert BAIntegrationOp.estimate_resources({}, 1024, 3) == (2048, 0)
-    assert BAIntegrationOp.estimate_resources({}, 1024, 300) == (2048, 0)
+def test_bundle_reference_remap_resource_estimate_is_sequence_constant():
+    assert BundleReferenceRemapOp.estimate_resources({}, 1024, 3) == (2048, 0)
+    assert BundleReferenceRemapOp.estimate_resources({}, 1024, 300) == (2048, 0)
