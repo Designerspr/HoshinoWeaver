@@ -21,8 +21,6 @@ route_configs:
       rej_high: { type: float, default: 3.0 }
       rej_low:  { type: float, default: 3.0 }
       max_iter: { type: int, default: 5 }
-    median:
-      chunk_rows: { type: int, default: 32 }
     huber_mean:
       huber_c: { type: float, default: 1.345 }
     max_mix:
@@ -40,8 +38,8 @@ configs:
   focal_length_mm:          { type: float, default: null }
   crop_factor:              { type: float, default: 1.0 }
   fallback_focal_equiv_mm:  { type: float, default: 20.0 }
-  optimize_focal:           { type: bool, default: null }
-  optimize_distortion:      { type: bool, default: null }
+  optimize_focal:           { type: bool, default: true }
+  optimize_distortion:      { type: bool, default: true }
   optimize_principal_point: { type: bool, default: null }
   pair_offsets:             { type: list, default: [1, 2, 4] }
   random_seed:              { type: int, default: 0 }

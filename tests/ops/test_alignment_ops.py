@@ -93,12 +93,17 @@ def _frame(index, status=FrameAlignmentStatus.SOLVED, rotation=None,
     )
 
 
-def test_bundle_adjustment_uses_reference_camera_for_every_frame(monkeypatch):
+@pytest.mark.parametrize(("configured_reference", "expected_reference"), [
+    (1, 1),
+    (None, 2),
+])
+def test_bundle_adjustment_uses_reference_camera_for_every_frame(
+        monkeypatch, configured_reference, expected_reference):
     op = BundleAdjustmentOp("bundle")
-    op.length = 3
+    op.length = 4
     op.inputs["exifs"] = SimpleNamespace(active=True)
-    images = [np.zeros((8, 12), dtype=np.uint16) for _ in range(3)]
-    exifs = [SimpleNamespace(exif={"frame": index}) for index in range(3)]
+    images = [np.zeros((8, 12), dtype=np.uint16) for _ in range(4)]
+    exifs = [SimpleNamespace(exif={"frame": index}) for index in range(4)]
     position = 0
 
     async def ready(value):
@@ -139,21 +144,23 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(monkeypatch):
     monkeypatch.setattr(bundle_ops, "build_camera_candidate", build_candidate)
     monkeypatch.setattr(bundle_ops, "build_bundle_plan", build_plan)
 
-    asyncio.run(op._async_execute({
-        "reference_frame_index": 1,
+    configs = {
         "method": "distortion",
         "focal_length_mm": 14.0,
         "crop_factor": 1.0,
         "fallback_focal_equiv_mm": 20.0,
         "pair_offsets": [1, 2],
         "random_seed": 7,
-    }))
+    }
+    if configured_reference is not None:
+        configs["reference_frame_index"] = configured_reference
+    asyncio.run(op._async_execute(configs))
 
     assert len(candidate_calls) == 1
-    assert candidate_calls[0][0] == {"frame": 1}
+    assert candidate_calls[0][0] == {"frame": expected_reference}
     assert all(frame.candidate is shared_candidate for frame in captured["frames"])
     assert captured["kwargs"] == {
-        "reference_frame_index": 1,
+        "reference_frame_index": expected_reference,
         "pair_offsets": (1, 2),
         "random_seed": 7,
     }

@@ -239,7 +239,7 @@ class BundleAdjustmentOp(BaseOp):
         "exifs": {"type": "sequence", "required": False},
     }
     CONFIGS: dict[str, Any] = {
-        "reference_frame_index": {"type": "int", "required": True},
+        "reference_frame_index": {"type": "int", "default": None},
         "method": {"type": "str", "default": "distortion"},
         "lens_type": {"type": "str", "default": None},
         "distortion": {"type": "list", "default": None},
@@ -273,10 +273,8 @@ class BundleAdjustmentOp(BaseOp):
         focal_equiv = (float(focal_length) * float(configs.get("crop_factor") or 1.0)
                        if focal_length is not None else None)
         fallback = float(configs.get("fallback_focal_equiv_mm", 20.0))
-        reference_index = int(configs["reference_frame_index"])
+        configured_reference = configs.get("reference_frame_index")
         observations = []
-        shared_candidate = None
-        reference_shape = None
         for index in self._input_range():
             data = self._async_convert_inputs()
             try:
@@ -290,34 +288,43 @@ class BundleAdjustmentOp(BaseOp):
                 except StreamExhausted as exc:
                     raise ValueError("data/exifs sequences have different lengths") from exc
             array = image.data if isinstance(image, FloatImage) else image
-            if index == reference_index:
-                tags = exif_obj.exif if exif_obj is not None else None
-                lens_type = configs.get("lens_type") or lens_type_from_exif(tags)
-                policy = CameraInitializationPolicy(
-                    lens_type=lens_type,
-                    fallback_focal_equiv_mm=fallback,
-                    optimize_focal=configs.get("optimize_focal"),
-                    optimize_distortion=configs.get("optimize_distortion"),
-                    optimize_principal_point=configs.get("optimize_principal_point"),
-                )
-                shared_candidate = build_camera_candidate(
-                    tags, array.shape, "distortion", configs.get("distortion"),
-                    focal_equiv, policy)
-                reference_shape = array.shape[:2]
+            tags = exif_obj.exif if exif_obj is not None else None
             detection = await self._run_cpu(
                 StarDetectionCache.from_image, array)
             stars = await self._run_cpu(lambda: detection.pywt_stars)
-            observations.append((index, stars, array.shape[:2]))
+            observations.append((index, stars, array.shape, tags))
             self.tracker.update(self.name)
-        if shared_candidate is None:
+        if not observations:
+            raise BundleAdjustmentError("cannot bundle-adjust an empty sequence")
+        reference_index = (
+            observations[len(observations) // 2][0]
+            if configured_reference is None else int(configured_reference))
+        reference_observation = next(
+            (item for item in observations if item[0] == reference_index), None)
+        if reference_observation is None:
             raise BundleAdjustmentError(
                 "reference_frame_index must identify one collected frame")
-        if any(shape != reference_shape for _, _, shape in observations):
+        _, _, reference_array_shape, reference_tags = reference_observation
+        lens_type = (configs.get("lens_type")
+                     or lens_type_from_exif(reference_tags))
+        policy = CameraInitializationPolicy(
+            lens_type=lens_type,
+            fallback_focal_equiv_mm=fallback,
+            optimize_focal=configs.get("optimize_focal"),
+            optimize_distortion=configs.get("optimize_distortion"),
+            optimize_principal_point=configs.get("optimize_principal_point"),
+        )
+        shared_candidate = build_camera_candidate(
+            reference_tags, reference_array_shape, "distortion",
+            configs.get("distortion"), focal_equiv, policy)
+        reference_shape = reference_array_shape[:2]
+        if any(shape[:2] != reference_shape
+               for _, _, shape, _ in observations):
             raise BundleAdjustmentError(
                 "sequence BA requires a single image geometry")
         frames = [BundleFrame(index=index, stars=stars,
                               candidate=shared_candidate)
-                  for index, stars, _ in observations]
+                  for index, stars, _, _ in observations]
         try:
             plan = await self._run_cpu(
                 build_bundle_plan, frames,
