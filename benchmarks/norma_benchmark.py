@@ -15,6 +15,7 @@ from hoshicore.component.image_io import load_img, save_img
 from hoshicore.component.norma import (
     CameraInitializationPolicy,
     FisheyeCameraModel,
+    StarDetectionCache,
     build_camera_candidate,
     lens_type_from_exif,
     to_gray_f64,
@@ -24,7 +25,7 @@ from hoshicore.component.norma.frame_align import (
     DEFAULT_BOOTSTRAP_SCALES,
     DEFAULT_MATCHING_PATH,
     MATCHING_PATH_ASTERISM,
-    solve_pywt_alignment,
+    solve_staged_alignment,
 )
 from hoshicore.component.norma.matching import evaluate_rotation
 
@@ -312,9 +313,29 @@ def run_case(case: dict[str, Any], defaults: dict[str, Any], base_dir: Path,
             config["same_camera"] = False
         camera_init_seconds = time.perf_counter() - t0
 
-        solved = solve_pywt_alignment(
-            to_gray_f64(reference),
-            to_gray_f64(source),
+        t0 = time.perf_counter()
+        ref_detection = StarDetectionCache.from_image(
+            reference,
+            median_threshold_ratio=float(
+                config.get("median_threshold_ratio", 1.0)))
+        src_detection = StarDetectionCache.from_image(
+            source,
+            median_threshold_ratio=float(
+                config.get("median_threshold_ratio", 1.0)))
+        ref_bootstrap_stars = ref_detection.pywt_stars
+        src_bootstrap_stars = src_detection.pywt_stars
+        bootstrap_detection_seconds = time.perf_counter() - t0
+        ref_refine_stars = src_refine_stars = None
+        refine_detection_seconds = None
+        if bool(config["guided_refine"]):
+            t0 = time.perf_counter()
+            ref_refine_stars = ref_detection.median_stars
+            src_refine_stars = src_detection.median_stars
+            refine_detection_seconds = time.perf_counter() - t0
+
+        solved = solve_staged_alignment(
+            ref_bootstrap_stars,
+            src_bootstrap_stars,
             ref_candidate,
             src_candidate,
             bootstrap_scales=tuple(float(value) for value in
@@ -323,23 +344,23 @@ def run_case(case: dict[str, Any], defaults: dict[str, Any], base_dir: Path,
             guided_refine=bool(config["guided_refine"]),
             guided_refine_radius_px=float(
                 config.get("guided_refine_radius_px", 8.0)),
-            median_threshold_ratio=float(
-                config.get("median_threshold_ratio", 1.0)),
             use_asterism_bootstrap=(
                 config["matching_path"] == MATCHING_PATH_ASTERISM),
+            ref_refine_stars=ref_refine_stars,
+            src_refine_stars=src_refine_stars,
             random_seed=random_seed,
         )
 
         final_match = solved.final_match
         final_alignment = solved.final_alignment
-        if (solved.guided_status == "applied"
-                and solved.dense_ref_geo is not None
-                and solved.dense_src_geo is not None):
-            ref_geo = solved.dense_ref_geo
-            src_geo = solved.dense_src_geo
+        if (solved.refine_status == "applied"
+                and solved.refine_ref is not None
+                and solved.refine_src is not None):
+            ref_geo = solved.refine_ref
+            src_geo = solved.refine_src
         else:
-            ref_geo = solved.bootstrap_ref_geo
-            src_geo = solved.bootstrap_src_geo
+            ref_geo = solved.bootstrap_ref
+            src_geo = solved.bootstrap_src
         diagnostics = evaluate_rotation(
             ref_geo.positions,
             src_geo.positions,
@@ -423,7 +444,7 @@ def run_case(case: dict[str, Any], defaults: dict[str, Any], base_dir: Path,
         result.update({
             "success": True,
             "matching_path": config["matching_path"],
-            "guided_status": solved.guided_status,
+            "refine_status": solved.refine_status,
             "star_counts": {
                 "reference": int(len(ref_geo.positions)),
                 "source": int(len(src_geo.positions)),
@@ -444,6 +465,8 @@ def run_case(case: dict[str, Any], defaults: dict[str, Any], base_dir: Path,
             "timing_seconds": {
                 "load": load_seconds,
                 "camera_init": camera_init_seconds,
+                "bootstrap_detection": bootstrap_detection_seconds,
+                "refine_detection": refine_detection_seconds,
                 **solved.timings,
                 "remap": remap_seconds,
                 "remap_evaluation": evaluation_seconds,

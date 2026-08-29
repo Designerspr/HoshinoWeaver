@@ -8,7 +8,7 @@ import numpy as np
 from loguru import logger
 
 from ..component.data_container import FloatImage
-from ..component.norma.geometry_view import GeometryView, make_geometry
+from ..component.norma.geometry_view import GeometryView, StarDetectionCache
 from ..component.norma.alignment import match_star_pairs
 from ..component.norma.frame_align import build_camera
 from ..component.norma.types import CameraModel
@@ -110,9 +110,8 @@ class SatelliteCleanOp(BaseOp):
                         focal_equiv_mm=focal_equiv_mm,
                         fallback_focal_equiv_mm=fallback_focal_equiv_mm,
                     )
-                    geo = await self._run_cpu(make_geometry, frame_arr, mask,
-                                              camera,
-                                              fallback_focal_equiv_mm)
+                    geo = await self._run_cpu(
+                        self._detect_geometry, frame_arr, mask, camera)
                 except Exception as e:
                     logger.warning(
                         f"{self.name}: star extraction failed, frame will not be aligned ({e})")
@@ -169,6 +168,12 @@ class SatelliteCleanOp(BaseOp):
         finally:
             if tot_num is not None:
                 self.tracker.close_bar(self.name)
+
+    @staticmethod
+    def _detect_geometry(frame: np.ndarray, mask: Optional[np.ndarray],
+                         camera: CameraModel) -> GeometryView:
+        detections = StarDetectionCache.from_image(frame, mask)
+        return GeometryView(detections.median_stars, camera)
 
     @staticmethod
     def _build_frame_camera(

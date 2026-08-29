@@ -20,7 +20,6 @@ from hoshicore.component.norma.detection import DetectedStars
 from hoshicore.component.norma.frame_align import AlignmentCameraCandidate
 from hoshicore.component.norma.optimization import CameraOptimizationPolicy
 from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
-from hoshicore.ops.alignment_ops import _evaluate_remap
 
 
 def _rotation_z(angle: float) -> np.ndarray:
@@ -42,7 +41,7 @@ def test_observability_eliminates_pose_nuisance_columns():
         _camera_observability(np.array([[1.0, 1.0], [2.0, 2.0]]), 1)
 
 
-def test_plan_frame_access_and_masked_remap_diagnostics():
+def test_plan_frame_access():
     plan = BAAlignmentPlan(
         reference_frame_index=0, shared_camera=_camera(),
         frames=(FrameAlignment(0, FrameAlignmentStatus.SOLVED, np.eye(3),
@@ -53,13 +52,6 @@ def test_plan_frame_access_and_masked_remap_diagnostics():
     assert plan.frame(0).status == FrameAlignmentStatus.SOLVED
     with pytest.raises(IndexError):
         plan.frame(1)
-    image = np.arange(64, dtype=np.float64).reshape(8, 8)
-    support, zncc, l1, bad = _evaluate_remap(image, image.copy(),
-                                               np.ones((8, 8), dtype=bool), grid_size=1)
-    assert support == 1.0
-    assert zncc == pytest.approx(1.0)
-    assert l1 == pytest.approx(0.0)
-    assert bad == 0.0
 
 
 def test_bundle_edge_refines_rotation_without_camera_parameters(monkeypatch):

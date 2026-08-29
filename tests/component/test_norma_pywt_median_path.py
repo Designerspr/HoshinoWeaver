@@ -1,5 +1,7 @@
 """Tests for the experimental pywt-bootstrap/median-guided path."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -8,8 +10,10 @@ from hoshicore.component.norma.detection import DetectedStars
 from hoshicore.component.norma.frame_align import (
     AlignmentCameraCandidate,
     AlignmentError,
+    MATCHING_PATH_ASTERISM,
+    align_frame_camera_model,
     solve_star_alignment,
-    solve_pywt_alignment,
+    solve_staged_alignment,
 )
 from hoshicore.component.norma.matching import MatchResult
 from hoshicore.component.norma.optimization import CameraOptimizationPolicy
@@ -70,17 +74,7 @@ def test_dual_path_keeps_bootstrap_and_dense_index_spaces_separate(
     import hoshicore.component.norma.alignment as alignment_module
 
     camera = _camera()
-    pywt_calls = []
-    median_calls = []
     optimize_matches = []
-
-    def fake_pywt(image, mask=None):
-        pywt_calls.append(image)
-        return _stars(24, offset=float(len(pywt_calls)))
-
-    def fake_median(image, mask=None, threshold_ratio=1.0):
-        median_calls.append((image, threshold_ratio))
-        return _stars(32, offset=float(len(median_calls)))
 
     def fake_select(ref_geo, src_geo, ref_candidate, src_candidate,
                     bootstrap_scales, same_camera=False, **kwargs):
@@ -101,8 +95,6 @@ def test_dual_path_keeps_bootstrap_and_dense_index_spaces_separate(
     def fake_residual_p90(match, alignment):
         return 0.0
 
-    monkeypatch.setattr(module, "detect_star_points", fake_pywt)
-    monkeypatch.setattr(module, "detect_star_points_median", fake_median)
     monkeypatch.setattr(module, "_select_initial_alignment_candidate",
                         fake_select)
     monkeypatch.setattr(alignment_module, "guided_mutual_rematch",
@@ -118,39 +110,30 @@ def test_dual_path_keeps_bootstrap_and_dense_index_spaces_separate(
             AssertionError("dual-path solver must not read features directly"))),
     )
 
-    image = np.zeros((120, 200), dtype=np.float64)
-    result = solve_pywt_alignment(
-        image,
-        image,
+    result = solve_staged_alignment(
+        _stars(24, offset=1.0),
+        _stars(24, offset=2.0),
         _candidate(camera),
         _candidate(camera),
         bootstrap_scales=(1.0,),
         guided_refine=True,
+        ref_refine_stars=_stars(32, offset=1.0),
+        src_refine_stars=_stars(32, offset=2.0),
     )
 
-    assert len(pywt_calls) == 2
-    assert len(median_calls) == 2
     assert len(optimize_matches) == 2
-    assert result.guided_status == "applied"
-    assert len(result.bootstrap_ref_geo.positions) == 24
-    assert len(result.dense_ref_geo.positions) == 32
+    assert result.refine_status == "applied"
+    assert len(result.bootstrap_ref.positions) == 24
+    assert len(result.refine_ref.positions) == 32
     assert int(np.max(result.bootstrap_match.pair_idx)) < 24
     assert int(np.max(result.final_match.pair_idx)) >= 24
 
 
-def test_dual_path_without_guided_refine_skips_median_detection(monkeypatch):
+def test_staged_solver_without_refine_keeps_refine_geometry_absent(monkeypatch):
     import hoshicore.component.norma.frame_align as module
 
     camera = _camera()
 
-    monkeypatch.setattr(module, "detect_star_points",
-                        lambda image, mask=None: _stars(24))
-    monkeypatch.setattr(
-        module,
-        "detect_star_points_median",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("median detection must be skipped")),
-    )
     monkeypatch.setattr(
         module,
         "_select_initial_alignment_candidate",
@@ -166,20 +149,65 @@ def test_dual_path_without_guided_refine_skips_median_detection(monkeypatch):
         AlignmentResult(np.eye(3), ref_camera, src_camera),
     )
 
-    image = np.zeros((120, 200), dtype=np.float64)
-    result = solve_pywt_alignment(
-        image,
-        image,
+    result = solve_staged_alignment(
+        _stars(24),
+        _stars(24),
         _candidate(camera),
         _candidate(camera),
         bootstrap_scales=(1.0,),
         guided_refine=False,
     )
 
-    assert result.guided_status == "disabled"
-    assert result.dense_ref_geo is None
-    assert result.dense_src_geo is None
+    assert result.refine_status == "disabled"
+    assert result.refine_ref is None
+    assert result.refine_src is None
     assert result.final_match is result.bootstrap_match
+
+
+def test_asterism_entry_does_not_access_median_when_refine_is_disabled(
+        monkeypatch):
+    import hoshicore.component.norma.frame_align as module
+    from hoshicore.component.norma.geometry_view import GeometryView
+
+    camera = _camera()
+    ref_stars = _stars(24)
+    src_stars = _stars(24, offset=1.0)
+    ref_geo = GeometryView(ref_stars, camera)
+    match = _match(ref_geo, GeometryView(src_stars, camera), 8)
+
+    class SourceDetection:
+        pywt_stars = src_stars
+
+        @property
+        def median_stars(self):
+            raise AssertionError("median stars must remain lazy")
+
+    monkeypatch.setattr(
+        module.StarDetectionCache, "from_image",
+        staticmethod(lambda image: SourceDetection()))
+
+    seen = {}
+
+    def solve(ref_bootstrap_stars, src_bootstrap_stars, ref_candidate,
+              src_candidate, **kwargs):
+        seen["kwargs"] = kwargs
+        return SimpleNamespace(
+            final_alignment=AlignmentResult(np.eye(3), camera, camera),
+            final_match=match,
+            bootstrap_match=match,
+            refine_status="disabled",
+        )
+
+    monkeypatch.setattr(module, "solve_staged_alignment", solve)
+    image = np.zeros((120, 200), dtype=np.float64)
+    aligned = align_frame_camera_model(
+        image, ref_geo, image, _candidate(camera), _candidate(camera),
+        same_camera=False, bootstrap_scales=(1.0,), remap_map_scale=1.0,
+        guided_refine=False, matching_path=MATCHING_PATH_ASTERISM)
+
+    assert aligned.shape == image.shape
+    assert seen["kwargs"]["ref_refine_stars"] is None
+    assert seen["kwargs"]["src_refine_stars"] is None
 
 
 def test_dual_path_selects_asterism_bootstrap_matcher(monkeypatch):
@@ -187,8 +215,6 @@ def test_dual_path_selects_asterism_bootstrap_matcher(monkeypatch):
 
     camera = _camera()
     selected_matchers = []
-    monkeypatch.setattr(module, "detect_star_points",
-                        lambda image, mask=None: _stars(24))
 
     def fake_select(ref_geo, src_geo, ref_candidate, src_candidate,
                     bootstrap_scales, same_camera=False,
@@ -206,10 +232,9 @@ def test_dual_path_selects_asterism_bootstrap_matcher(monkeypatch):
         AlignmentResult(np.eye(3), ref_camera, src_camera),
     )
 
-    image = np.zeros((120, 200), dtype=np.float64)
-    solve_pywt_alignment(
-        image,
-        image,
+    solve_staged_alignment(
+        _stars(24),
+        _stars(24),
         _candidate(camera),
         _candidate(camera),
         bootstrap_scales=(1.0,),
@@ -229,7 +254,8 @@ def test_detected_star_solver_is_image_free_and_uses_asterism(monkeypatch):
     def fake_select(ref_geo, src_geo, ref_candidate, src_candidate,
                     bootstrap_scales, same_camera=False,
                     match_function=None):
-        seen["images"] = (ref_geo.image_gray, src_geo.image_gray)
+        seen["has_images"] = (
+            hasattr(ref_geo, "image_gray"), hasattr(src_geo, "image_gray"))
         seen["matcher"] = match_function
         return (ref_geo, src_geo, ref_candidate, src_candidate,
                 _match(ref_geo, src_geo, 8))
@@ -247,7 +273,7 @@ def test_detected_star_solver_is_image_free_and_uses_asterism(monkeypatch):
         _stars(24), _stars(24), _candidate(camera), _candidate(camera),
         bootstrap_scales=(1.0,), same_camera=True)
 
-    assert seen["images"] == (None, None)
+    assert seen["has_images"] == (False, False)
     assert seen["matcher"] is module.match_star_pairs_asterism
     assert len(match.pair_idx) == 8
     np.testing.assert_array_equal(alignment.rotation_ref_to_src, np.eye(3))
@@ -257,24 +283,16 @@ def test_dual_path_bootstrap_failure_does_not_fall_back_to_median(monkeypatch):
     import hoshicore.component.norma.frame_align as module
 
     camera = _camera()
-    monkeypatch.setattr(module, "detect_star_points",
-                        lambda image, mask=None: _stars(4))
-    monkeypatch.setattr(
-        module,
-        "detect_star_points_median",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("median fallback must not run")),
-    )
-
-    image = np.zeros((120, 200), dtype=np.float64)
     with pytest.raises(AlignmentError, match="Insufficient stars"):
-        solve_pywt_alignment(
-            image,
-            image,
+        solve_staged_alignment(
+            _stars(4),
+            _stars(4),
             _candidate(camera),
             _candidate(camera),
             bootstrap_scales=(1.0,),
             guided_refine=True,
+            ref_refine_stars=_stars(32),
+            src_refine_stars=_stars(32),
         )
 
 
@@ -283,11 +301,6 @@ def test_dual_path_guided_failure_falls_back_to_pywt_result(monkeypatch):
     import hoshicore.component.norma.alignment as alignment_module
 
     camera = _camera()
-    monkeypatch.setattr(module, "detect_star_points",
-                        lambda image, mask=None: _stars(24))
-    monkeypatch.setattr(
-        module, "detect_star_points_median",
-        lambda image, mask=None, threshold_ratio=1.0: _stars(32))
     monkeypatch.setattr(
         module,
         "_select_initial_alignment_candidate",
@@ -306,17 +319,18 @@ def test_dual_path_guided_failure_falls_back_to_pywt_result(monkeypatch):
             RuntimeError("guided failed")),
     )
 
-    image = np.zeros((120, 200), dtype=np.float64)
-    result = solve_pywt_alignment(
-        image,
-        image,
+    result = solve_staged_alignment(
+        _stars(24),
+        _stars(24),
         _candidate(camera),
         _candidate(camera),
         bootstrap_scales=(1.0,),
         guided_refine=True,
+        ref_refine_stars=_stars(32),
+        src_refine_stars=_stars(32),
     )
 
-    assert result.guided_status == "failed_fallback"
-    assert result.guided_error == "guided failed"
+    assert result.refine_status == "failed_fallback"
+    assert result.refine_error == "guided failed"
     assert result.final_alignment is bootstrap_alignment
     assert result.final_match is result.bootstrap_match

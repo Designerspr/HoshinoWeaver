@@ -12,11 +12,10 @@ from loguru import logger
 from .alignment import (AlignmentResult, match_star_pairs,
                          match_star_pairs_asterism, optimize_alignment,
                          run_guided_refine_stage)
-from .detection import (DetectedStars, detect_star_points,
-                        detect_star_points_median)
+from .detection import DetectedStars
 from .matching import MatchResult, RotationDiagnostics, evaluate_rotation
 from .optimization import CameraOptimizationPolicy
-from .geometry_view import GeometryView, make_geometry, to_gray_f64
+from .geometry_view import GeometryView, StarDetectionCache
 from .intrinsics_from_exif import (intrinsics_from_exif,
                                    intrinsics_from_focal_equiv,
                                    intrinsics_from_fisheye_estimate)
@@ -76,21 +75,18 @@ class AlignmentCameraCandidate:
 
 
 @dataclasses.dataclass(frozen=True)
-class PywtMedianSolveResult:
-    """Intermediate and final state of the two-detector alignment path."""
+class StagedSolveResult:
+    """Bootstrap result plus an optional independently detected refine stage."""
 
-    bootstrap_ref_geo: GeometryView
-    bootstrap_src_geo: GeometryView
-    dense_ref_geo: Optional[GeometryView]
-    dense_src_geo: Optional[GeometryView]
-    ref_candidate: AlignmentCameraCandidate
-    src_candidate: AlignmentCameraCandidate
+    bootstrap_ref: GeometryView
+    bootstrap_src: GeometryView
+    refine_ref: Optional[GeometryView]
+    refine_src: Optional[GeometryView]
     bootstrap_match: MatchResult
-    bootstrap_alignment: AlignmentResult
     final_match: MatchResult
     final_alignment: AlignmentResult
-    guided_status: str
-    guided_error: Optional[str]
+    refine_status: str
+    refine_error: Optional[str]
     timings: dict[str, float]
 
 
@@ -486,81 +482,81 @@ def _select_initial_alignment_candidate(
     )
 
     for cand_ref, cand_src in candidate_pairs:
-            cand_ref_geo = ref_geo.with_camera(cand_ref.camera)
-            cand_src_geo = src_geo.with_camera(cand_src.camera)
+        cand_ref_geo = ref_geo.with_camera(cand_ref.camera)
+        cand_src_geo = src_geo.with_camera(cand_src.camera)
 
-            try:
-                cand_match = match_function(cand_ref_geo, cand_src_geo)
-            except Exception as exc:
-                logger.debug(
-                    "Camera candidate failed: ref_scale={:.3f} src_scale={:.3f} "
-                    "ref_projection={} src_projection={} failed={}",
-                    cand_ref.scale,
-                    cand_src.scale,
-                    "fisheye"
-                    if isinstance(cand_ref.camera,
-                                  FisheyeCameraModel) else "perspective",
-                    "fisheye"
-                    if isinstance(cand_src.camera, FisheyeCameraModel) else
-                    "perspective",
-                    exc,
-                )
-                continue
-
-            inner, mid, outer = _count_match_radial_bins(
-                cand_ref_geo, cand_match.pair_idx)
-            sectors = _count_match_active_sectors(cand_ref_geo,
-                                                  cand_match.pair_idx)
-            diagnostics = evaluate_rotation(
-                cand_ref_geo.positions,
-                cand_src_geo.positions,
-                cand_match.pair_idx,
-                cand_ref_geo.unit_vectors,
-                cand_src_geo.unit_vectors,
-                cand_match.rotation,
-            )
-            score, score_parts = _bootstrap_candidate_score(
-                diagnostics,
-                len(cand_match.pair_idx),
-                outer,
-                sectors,
-                cand_ref.scale,
-                cand_src.scale,
-            )
+        try:
+            cand_match = match_function(cand_ref_geo, cand_src_geo)
+        except Exception as exc:
             logger.debug(
-                "Camera candidate: ref_scale={:.3f} src_scale={:.3f} "
-                "ref_focal={:.6f}mm src_focal={:.6f}mm matches={} radial={}/{}/{} sectors={}/8 "
-                "median_angle={:.4f}deg p90_angle={:.4f}deg coverage_ratio={:.4f} "
-                "score={:.6f} score_parts={}",
+                "Camera candidate failed: ref_scale={:.3f} src_scale={:.3f} "
+                "ref_projection={} src_projection={} failed={}",
                 cand_ref.scale,
                 cand_src.scale,
-                cand_ref.camera.intrinsics.focal_length_mm,
-                cand_src.camera.intrinsics.focal_length_mm,
-                len(cand_match.pair_idx),
+                "fisheye"
+                if isinstance(cand_ref.camera,
+                              FisheyeCameraModel) else "perspective",
+                "fisheye"
+                if isinstance(cand_src.camera, FisheyeCameraModel) else
+                "perspective",
+                exc,
+            )
+            continue
+
+        inner, mid, outer = _count_match_radial_bins(
+            cand_ref_geo, cand_match.pair_idx)
+        sectors = _count_match_active_sectors(cand_ref_geo,
+                                              cand_match.pair_idx)
+        diagnostics = evaluate_rotation(
+            cand_ref_geo.positions,
+            cand_src_geo.positions,
+            cand_match.pair_idx,
+            cand_ref_geo.unit_vectors,
+            cand_src_geo.unit_vectors,
+            cand_match.rotation,
+        )
+        score, score_parts = _bootstrap_candidate_score(
+            diagnostics,
+            len(cand_match.pair_idx),
+            outer,
+            sectors,
+            cand_ref.scale,
+            cand_src.scale,
+        )
+        logger.debug(
+            "Camera candidate: ref_scale={:.3f} src_scale={:.3f} "
+            "ref_focal={:.6f}mm src_focal={:.6f}mm matches={} radial={}/{}/{} sectors={}/8 "
+            "median_angle={:.4f}deg p90_angle={:.4f}deg coverage_ratio={:.4f} "
+            "score={:.6f} score_parts={}",
+            cand_ref.scale,
+            cand_src.scale,
+            cand_ref.camera.intrinsics.focal_length_mm,
+            cand_src.camera.intrinsics.focal_length_mm,
+            len(cand_match.pair_idx),
+            inner,
+            mid,
+            outer,
+            sectors,
+            np.rad2deg(diagnostics.median_angle_error_rad),
+            np.rad2deg(diagnostics.p90_angle_error_rad),
+            diagnostics.coverage_ratio,
+            score,
+            score_parts,
+        )
+
+        if best_score is None or score > best_score:
+            best_score = score
+            best_payload = (
+                cand_ref_geo,
+                cand_src_geo,
+                cand_ref,
+                cand_src,
+                cand_match,
                 inner,
                 mid,
                 outer,
                 sectors,
-                np.rad2deg(diagnostics.median_angle_error_rad),
-                np.rad2deg(diagnostics.p90_angle_error_rad),
-                diagnostics.coverage_ratio,
-                score,
-                score_parts,
             )
-
-            if best_score is None or score > best_score:
-                best_score = score
-                best_payload = (
-                    cand_ref_geo,
-                    cand_src_geo,
-                    cand_ref,
-                    cand_src,
-                    cand_match,
-                    inner,
-                    mid,
-                    outer,
-                    sectors,
-                )
 
     if best_payload is None:
         raise AlignmentError(
@@ -631,8 +627,8 @@ def solve_star_alignment(
     random_seed: int | None = None,
 ) -> tuple[AlignmentResult, MatchResult]:
     """Align pre-detected stars without retaining source image pixels."""
-    ref_geo = GeometryView.from_detected_stars(ref_stars, ref_candidate.camera)
-    src_geo = GeometryView.from_detected_stars(src_stars, src_candidate.camera)
+    ref_geo = GeometryView(ref_stars, ref_candidate.camera)
+    src_geo = GeometryView(src_stars, src_candidate.camera)
     *_, selected_ref, selected_src, match = _match_stars(
         ref_geo,
         src_geo,
@@ -654,58 +650,34 @@ def solve_star_alignment(
     return alignment, match
 
 
-def solve_pywt_alignment(
-    ref_gray: np.ndarray,
-    src_gray: np.ndarray,
+def solve_staged_alignment(
+    ref_bootstrap_stars: DetectedStars,
+    src_bootstrap_stars: DetectedStars,
     ref_candidate: AlignmentCameraCandidate,
     src_candidate: AlignmentCameraCandidate,
     bootstrap_scales: tuple[float, ...] = DEFAULT_BOOTSTRAP_SCALES,
     same_camera: bool = False,
     guided_refine: bool = False,
     guided_refine_radius_px: float = 8.0,
-    median_threshold_ratio: float = 1.0,
-    ref_mask: Optional[np.ndarray] = None,
-    src_mask: Optional[np.ndarray] = None,
     use_asterism_bootstrap: bool = False,
-    ref_bootstrap_stars: Optional[DetectedStars] = None,
-    src_bootstrap_stars: Optional[DetectedStars] = None,
-    ref_dense_stars: Optional[DetectedStars] = None,
-    src_dense_stars: Optional[DetectedStars] = None,
+    ref_refine_stars: Optional[DetectedStars] = None,
+    src_refine_stars: Optional[DetectedStars] = None,
     random_seed: int | None = None,
-) -> PywtMedianSolveResult:
-    """Solve with sparse pywt bootstrap and optional dense median refinement.
+) -> StagedSolveResult:
+    """Solve from explicit bootstrap and optional refine star sets.
 
-    Bootstrap matching is performed only on the pywt geometries, using either
-    the legacy angular histogram descriptor or spherical asterism voting. The
-    median geometries stay in a separate index space and are rematched only by
-    bidirectional projected-position nearest neighbors.
+    Detection belongs to the caller. The two stages keep separate GeometryView
+    instances and therefore separate point/feature index spaces.
     """
     timings: dict[str, float] = {}
-
-    if ref_bootstrap_stars is None:
-        started = perf_counter()
-        ref_bootstrap_stars = detect_star_points(ref_gray, mask=ref_mask)
-        timings["pywt_ref_detection"] = perf_counter() - started
-    else:
-        timings["pywt_ref_detection"] = 0.0
-    if src_bootstrap_stars is None:
-        started = perf_counter()
-        src_bootstrap_stars = detect_star_points(src_gray, mask=src_mask)
-        timings["pywt_src_detection"] = perf_counter() - started
-    else:
-        timings["pywt_src_detection"] = 0.0
-
-    bootstrap_ref_geo = GeometryView(
-        ref_gray, ref_candidate.camera, mask=ref_mask,
-        detected_stars=ref_bootstrap_stars)
-    bootstrap_src_geo = GeometryView(
-        src_gray, src_candidate.camera, mask=src_mask,
-        detected_stars=src_bootstrap_stars)
+    bootstrap_ref = GeometryView(ref_bootstrap_stars, ref_candidate.camera)
+    bootstrap_src = GeometryView(src_bootstrap_stars, src_candidate.camera)
+    _check_star_count(bootstrap_ref, bootstrap_src)
     started = perf_counter()
-    (bootstrap_ref_geo, bootstrap_src_geo, ref_candidate, src_candidate,
+    (bootstrap_ref, bootstrap_src, ref_candidate, src_candidate,
      bootstrap_match) = _match_stars(
-         bootstrap_ref_geo,
-         bootstrap_src_geo,
+         bootstrap_ref,
+         bootstrap_src,
          ref_candidate,
          src_candidate,
          bootstrap_scales,
@@ -728,50 +700,26 @@ def solve_pywt_alignment(
 
     final_alignment = bootstrap_alignment
     final_match = bootstrap_match
-    dense_ref_geo: Optional[GeometryView] = None
-    dense_src_geo: Optional[GeometryView] = None
-    guided_status = "disabled"
-    guided_error: Optional[str] = None
+    refine_ref: Optional[GeometryView] = None
+    refine_src: Optional[GeometryView] = None
+    refine_status = "disabled"
+    refine_error: Optional[str] = None
 
     if guided_refine:
+        if ref_refine_stars is None or src_refine_stars is None:
+            raise ValueError(
+                "guided refinement requires explicit refine star sets")
         try:
-            if ref_dense_stars is None:
-                started = perf_counter()
-                ref_dense_stars = detect_star_points_median(
-                    ref_gray, mask=ref_mask,
-                    threshold_ratio=median_threshold_ratio)
-                timings["median_ref_detection"] = perf_counter() - started
-            else:
-                timings["median_ref_detection"] = 0.0
-            if src_dense_stars is None:
-                started = perf_counter()
-                src_dense_stars = detect_star_points_median(
-                    src_gray, mask=src_mask,
-                    threshold_ratio=median_threshold_ratio)
-                timings["median_src_detection"] = perf_counter() - started
-            else:
-                timings["median_src_detection"] = 0.0
-
-            dense_ref_geo = GeometryView(
-                ref_gray,
-                bootstrap_alignment.ref_camera,
-                mask=ref_mask,
-                detected_stars=ref_dense_stars,
-                median_threshold_ratio=median_threshold_ratio,
-            )
-            dense_src_geo = GeometryView(
-                src_gray,
-                bootstrap_alignment.src_camera,
-                mask=src_mask,
-                detected_stars=src_dense_stars,
-                median_threshold_ratio=median_threshold_ratio,
-            )
-            _check_star_count(dense_ref_geo, dense_src_geo)
+            refine_ref = GeometryView(
+                ref_refine_stars, bootstrap_alignment.ref_camera)
+            refine_src = GeometryView(
+                src_refine_stars, bootstrap_alignment.src_camera)
+            _check_star_count(refine_ref, refine_src)
 
             started = perf_counter()
-            final_alignment, final_match, guided_status = run_guided_refine_stage(
-                dense_ref_geo,
-                dense_src_geo,
+            final_alignment, final_match, refine_status = run_guided_refine_stage(
+                refine_ref,
+                refine_src,
                 bootstrap_alignment,
                 bootstrap_match=bootstrap_match,
                 same_camera=same_camera,
@@ -781,27 +729,23 @@ def solve_pywt_alignment(
             )
             timings["guided_rematch"] = perf_counter() - started
         except Exception as exc:
-            guided_status = "failed_fallback"
-            guided_error = str(exc)
+            refine_status = "failed_fallback"
+            refine_error = str(exc)
             logger.warning(
-                "Pywt/median guided refinement failed; keeping pywt "
-                "bootstrap result: {}",
+                "Guided refinement failed; keeping bootstrap result: {}",
                 exc,
             )
 
-    return PywtMedianSolveResult(
-        bootstrap_ref_geo=bootstrap_ref_geo,
-        bootstrap_src_geo=bootstrap_src_geo,
-        dense_ref_geo=dense_ref_geo,
-        dense_src_geo=dense_src_geo,
-        ref_candidate=ref_candidate,
-        src_candidate=src_candidate,
+    return StagedSolveResult(
+        bootstrap_ref=bootstrap_ref,
+        bootstrap_src=bootstrap_src,
+        refine_ref=refine_ref,
+        refine_src=refine_src,
         bootstrap_match=bootstrap_match,
-        bootstrap_alignment=bootstrap_alignment,
         final_match=final_match,
         final_alignment=final_alignment,
-        guided_status=guided_status,
-        guided_error=guided_error,
+        refine_status=refine_status,
+        refine_error=refine_error,
         timings=timings,
     )
 
@@ -825,9 +769,12 @@ def align_frame_homography(
     Raises:
         AlignmentError: 星点不足或匹配失败。
     """
-    src_geo = make_geometry(frame,
-                            camera=src_camera,
-                            fallback_focal_equiv_mm=fallback_focal_equiv_mm)
+    if src_camera is None:
+        src_camera = build_camera(
+            None, frame.shape, "homography",
+            fallback_focal_equiv_mm=fallback_focal_equiv_mm)
+    source_detection = StarDetectionCache.from_image(frame)
+    src_geo = GeometryView(source_detection.median_stars, src_camera)
     _check_star_count(ref_geo, src_geo)
     if _has_identical_star_geometry(ref_geo, src_geo):
         logger.debug(
@@ -872,6 +819,7 @@ def align_frame_camera_model(
     guided_refine: bool = False,
     guided_refine_radius_px: float = 8.0,
     matching_path: str = DEFAULT_MATCHING_PATH,
+    ref_refine_geo: Optional[GeometryView] = None,
 ) -> np.ndarray:
     """Camera-model alignment with explicit ref-to-src remap construction."""
     ref_camera = ref_candidate.camera
@@ -890,7 +838,11 @@ def align_frame_camera_model(
             f"Unknown matching_path {matching_path!r}; expected one of "
             f"{MATCHING_PATHS}")
 
-    src_geo = make_geometry(frame, camera=src_camera)
+    source_detection = StarDetectionCache.from_image(frame)
+    source_stars = (source_detection.pywt_stars
+                    if matching_path in BOOTSTRAP_MATCHING_PATHS
+                    else source_detection.median_stars)
+    src_geo = GeometryView(source_stars, src_camera)
     _check_star_count(ref_geo, src_geo)
     if same_camera and _has_identical_star_geometry(ref_geo, src_geo):
         logger.debug(
@@ -900,34 +852,35 @@ def align_frame_camera_model(
 
     if matching_path in BOOTSTRAP_MATCHING_PATHS:
         try:
-            dual = solve_pywt_alignment(
-                ref_geo.image_gray,
-                to_gray_f64(frame),
+            refine_ref_stars = (ref_refine_geo.stars
+                                if guided_refine and ref_refine_geo is not None
+                                else None)
+            refine_src_stars = (source_detection.median_stars
+                                if guided_refine else None)
+            staged = solve_staged_alignment(
+                ref_geo.stars,
+                src_geo.stars,
                 ref_candidate,
                 src_candidate,
                 bootstrap_scales=bootstrap_scales,
                 same_camera=same_camera,
                 guided_refine=guided_refine,
                 guided_refine_radius_px=guided_refine_radius_px,
-                ref_mask=ref_geo.mask,
                 use_asterism_bootstrap=(
                     matching_path
                     == MATCHING_PATH_ASTERISM),
-                ref_bootstrap_stars=ref_geo.pywt_detected_stars,
-                ref_dense_stars=ref_geo.detected_stars,
-                src_dense_stars=src_geo.detected_stars,
+                ref_refine_stars=refine_ref_stars,
+                src_refine_stars=refine_src_stars,
             )
-            result = dual.final_alignment
-            match = dual.final_match
-            ref_candidate = dual.ref_candidate
-            src_candidate = dual.src_candidate
+            result = staged.final_alignment
+            match = staged.final_match
             logger.debug(
                 "align_frame_camera_model: matching_path={} bootstrap_pairs={} "
-                "final_pairs={} guided_status={}",
+                "final_pairs={} refine_status={}",
                 matching_path,
-                len(dual.bootstrap_match.pair_idx),
+                len(staged.bootstrap_match.pair_idx),
                 len(match.pair_idx),
-                dual.guided_status,
+                staged.refine_status,
             )
         except Exception as exc:
             raise AlignmentError(

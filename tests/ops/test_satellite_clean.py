@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from hoshicore.ops.satellite_clean_op import SatelliteCleanOp, _FrameSlot
+from hoshicore.component.norma.detection import DetectedStars
 from hoshicore.component.norma.geometry_view import GeometryView
 from hoshicore.component.norma.types import CameraModel, Intrinsics
 
@@ -17,7 +18,8 @@ def _dummy_geo(shape):
             image_width_px=w,
             image_height_px=h,
         ))
-    return GeometryView(np.zeros((h, w), dtype=np.float64), camera)
+    return GeometryView(
+        DetectedStars(np.empty((0, 2)), np.empty(0)), camera)
 
 
 class TestCameraInitialization:
@@ -126,11 +128,11 @@ class TestHomographyFromRotation:
         from_intrinsics = Intrinsics(20.0, 36.0, 24.0, 600, 400)
         to_intrinsics = Intrinsics(35.0, 36.0, 24.0, 900, 600)
         from_geo = GeometryView(
-            np.zeros((400, 600), dtype=np.float64),
+            DetectedStars(np.empty((0, 2)), np.empty(0)),
             CameraModel(intrinsics=from_intrinsics),
         )
         to_geo = GeometryView(
-            np.zeros((600, 900), dtype=np.float64),
+            DetectedStars(np.empty((0, 2)), np.empty(0)),
             CameraModel(intrinsics=to_intrinsics),
         )
         angle = np.deg2rad(7.0)

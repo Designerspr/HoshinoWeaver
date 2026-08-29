@@ -1,7 +1,9 @@
 import asyncio
 import itertools
 import sys
-from typing import Any, Awaitable, Mapping, Optional, Sequence
+from collections.abc import Callable
+from typing import (Any, Awaitable, Mapping, Optional, ParamSpec, Sequence,
+                    TypeVar)
 
 import numpy as np
 
@@ -11,6 +13,10 @@ from ..component.progress import DummyTracker
 from ..component.queue import (BaseQueue, CancellationError, FileCacheQueue,
                                RichContextQueue, StreamExhausted)
 from ..component.utils import time_cost_warpper
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 class BaseOp(object):
@@ -216,7 +222,12 @@ class BaseOp(object):
         if tasks:
             await asyncio.gather(*tasks)
 
-    async def _run_cpu(self, fn, *args, **kwargs):
+    async def _run_cpu(
+        self,
+        fn: Callable[P, R],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
         """将 CPU 密集型同步函数卸载到线程池执行，释放事件循环。
 
         利用 numpy C 扩展释放 GIL 的特性，使 CPU 计算与 I/O 操作可以重叠执行。

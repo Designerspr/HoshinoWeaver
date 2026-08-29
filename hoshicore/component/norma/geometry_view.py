@@ -1,9 +1,4 @@
-"""GeometryView construction and cached star-geometry features.
-
-This module owns the image-to-geometry boundary:
-
-raw image -> grayscale -> detected stars -> camera unit rays -> match features
-"""
+"""Image detection caching and image-free star geometry."""
 from functools import cached_property
 from typing import Optional
 
@@ -12,16 +7,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .detection import DetectedStars, detect_star_points, detect_star_points_median
-from .intrinsics_from_exif import intrinsics_from_focal_equiv
 from .matching import adaptive_k, extract_point_features
-from .types import BaseCameraModel, CameraModel
+from .types import BaseCameraModel
 
 
-def to_gray_f64(arr: np.ndarray) -> np.ndarray:
-    """Convert an image array to float64 grayscale in the [0, 1] range."""
+def to_gray_f64(arr: np.ndarray) -> NDArray[np.float64]:
+    """Convert a project-convention BGR image to grayscale in ``[0, 1]``."""
     if arr.ndim == 3:
         gray = cv2.cvtColor(arr.astype(np.float32),
-                            cv2.COLOR_RGB2GRAY).astype(np.float64)
+                            cv2.COLOR_BGR2GRAY).astype(np.float64)
     else:
         gray = arr.astype(np.float64)
 
@@ -35,83 +29,64 @@ def to_gray_f64(arr: np.ndarray) -> np.ndarray:
     return gray
 
 
-class GeometryView:
-    """Cached geometry view of one image under one camera model.
+class StarDetectionCache:
+    """One grayscale image with separately cached detector results.
 
-    The detected stars are camera-independent and are reused by with_camera().
-    Unit vectors and local match features are camera-dependent and are cached
-    per GeometryView instance.
+    This object is intentionally image-backed. A long-lived reference cache
+    avoids repeating detection across source frames; source caches are normally
+    discarded after one alignment.
     """
 
-    def __init__(
-        self,
-        image_gray: Optional[NDArray[np.float64]],
-        camera: BaseCameraModel,
-        mask: Optional[np.ndarray] = None,
-        detected_stars: Optional[DetectedStars] = None,
-        median_threshold_ratio: float = 1.0,
-    ):
-        self._image_gray = image_gray
+    def __init__(self, gray: NDArray[np.float64], mask: Optional[np.ndarray] = None,
+                 median_threshold_ratio: float = 1.0):
+        self._gray = gray
         self._mask = mask
-        self._camera = camera
-        self._detected_stars_seed = detected_stars
         self._median_threshold_ratio = median_threshold_ratio
-        self.img_shape = (image_gray.shape if image_gray is not None else
-                          (camera.intrinsics.image_height_px,
-                           camera.intrinsics.image_width_px))
-        if image_gray is None and detected_stars is None:
-            raise ValueError("image-free geometry requires detected stars")
 
     @classmethod
-    def from_detected_stars(
-        cls,
-        detected_stars: DetectedStars,
-        camera: BaseCameraModel,
-    ) -> "GeometryView":
-        """Build geometry without retaining an image-sized pixel array."""
-        return cls(None, camera, detected_stars=detected_stars)
+    def from_image(cls, image: np.ndarray, mask: Optional[np.ndarray] = None,
+                   median_threshold_ratio: float = 1.0) -> "StarDetectionCache":
+        return cls(to_gray_f64(image), mask, median_threshold_ratio)
+
+    @cached_property
+    def pywt_stars(self) -> DetectedStars:
+        return detect_star_points(self._gray, self._mask)
+
+    @cached_property
+    def median_stars(self) -> DetectedStars:
+        return detect_star_points_median(
+            self._gray, self._mask,
+            threshold_ratio=self._median_threshold_ratio)
+
+
+class GeometryView:
+    """Camera geometry and features for exactly one detected star set."""
+
+    def __init__(self, stars: DetectedStars, camera: BaseCameraModel):
+        self._stars = stars
+        self._camera = camera
+        self.img_shape = (camera.intrinsics.image_height_px,
+                          camera.intrinsics.image_width_px)
+
+    @property
+    def stars(self) -> DetectedStars:
+        return self._stars
 
     @property
     def camera(self) -> BaseCameraModel:
         return self._camera
 
     @property
-    def image_gray(self) -> Optional[NDArray[np.float64]]:
-        return self._image_gray
-
-    @property
-    def mask(self) -> Optional[np.ndarray]:
-        return self._mask
-
-    @cached_property
-    def detected_stars(self) -> DetectedStars:
-        if self._detected_stars_seed is not None:
-            return self._detected_stars_seed
-        if self._image_gray is None:
-            raise RuntimeError("star detection requires image pixels")
-        return detect_star_points_median(
-            self._image_gray,
-            self._mask,
-            threshold_ratio=self._median_threshold_ratio,
-        )
-
-    @cached_property
-    def pywt_detected_stars(self) -> DetectedStars:
-        if self._image_gray is None:
-            raise RuntimeError("star detection requires image pixels")
-        return detect_star_points(self._image_gray, self._mask)
-
-    @property
     def positions(self) -> NDArray[np.float64]:
-        return self.detected_stars.positions
+        return self._stars.positions
 
     @property
     def volumes(self) -> NDArray[np.float64]:
-        return self.detected_stars.volumes
+        return self._stars.volumes
 
     @property
     def intensities(self) -> NDArray[np.float64] | None:
-        return self.detected_stars.intensities
+        return self._stars.intensities
 
     @cached_property
     def unit_vectors(self) -> NDArray[np.float64]:
@@ -123,33 +98,4 @@ class GeometryView:
         return extract_point_features(self.unit_vectors, self.volumes, k=k)
 
     def with_camera(self, camera: BaseCameraModel) -> "GeometryView":
-        """Create a new view with another camera while reusing star detection."""
-        return GeometryView(
-            self._image_gray,
-            camera,
-            mask=self._mask,
-            detected_stars=self.detected_stars,
-            median_threshold_ratio=self._median_threshold_ratio,
-        )
-
-
-def make_geometry(arr: np.ndarray,
-                  mask: Optional[np.ndarray] = None,
-                  camera: Optional[BaseCameraModel] = None,
-                  fallback_focal_equiv_mm: float = 20.0,
-                  median_threshold_ratio: float = 1.0) -> GeometryView:
-    """Build a GeometryView from a raw image array.
-
-    When camera is None, use a zero-distortion perspective fallback camera.
-    """
-    gray = to_gray_f64(arr)
-    if camera is None:
-        h, w = arr.shape[:2]
-        camera = CameraModel(intrinsics=intrinsics_from_focal_equiv(
-            fallback_focal_equiv_mm, w, h))
-    return GeometryView(
-        gray,
-        camera,
-        mask=mask,
-        median_threshold_ratio=median_threshold_ratio,
-    )
+        return GeometryView(self._stars, camera)

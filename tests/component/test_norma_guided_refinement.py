@@ -42,16 +42,11 @@ def test_guided_refinement_recovers_native_point_pairs_and_rotation():
         (true_rotation @ camera.unproject(ref_positions).T).T)
 
     volumes = np.ones(len(ref_positions), dtype=np.float64)
-    image_gray = np.zeros((400, 600), dtype=np.float64)
     ref_geo = GeometryView(
-        image_gray,
-        camera,
-        detected_stars=DetectedStars(ref_positions, volumes),
+        DetectedStars(ref_positions, volumes), camera,
     )
     src_geo = GeometryView(
-        image_gray,
-        camera,
-        detected_stars=DetectedStars(src_positions, volumes),
+        DetectedStars(src_positions, volumes), camera,
     )
 
     initial_rvec = np.deg2rad(np.array([0.10, -0.15, 0.07]))
