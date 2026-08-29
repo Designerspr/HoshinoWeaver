@@ -309,7 +309,8 @@ def _sequence_scales(frames: Sequence[BundleFrame]) -> tuple[float, ...]:
 
 
 def _build_edges(frames: Sequence[BundleFrame], offsets: Sequence[int],
-                 random_seed: int | None) -> list[_BundleEdge]:
+                 random_seed: int | None,
+                 ) -> tuple[list[_BundleEdge], float]:
     """Build edges with a short full-search probe, then preferred-scale reuse.
 
     A successful single-scale solve already passed the matcher's rotation
@@ -340,7 +341,7 @@ def _build_edges(frames: Sequence[BundleFrame], offsets: Sequence[int],
                     if edge.error is None:
                         _vote_for_scale(votes, edge.selected_scale)
             edges.append(edge)
-    return edges
+    return edges, _ordered_scales(votes)[0]
 
 
 def build_bundle_plan(frames: Sequence[BundleFrame], reference_frame_index: int,
@@ -378,7 +379,12 @@ def build_bundle_plan(frames: Sequence[BundleFrame], reference_frame_index: int,
     if not offsets:
         raise ValueError("pair_offsets must contain at least one positive offset")
     ordered = sorted(frames, key=lambda item: item.index)
-    edges = _build_edges(ordered, offsets, random_seed)
+    edges, sequence_scale = _build_edges(ordered, offsets, random_seed)
+    # Pair-scale voting estimates the projection scale needed to establish
+    # reliable rotations. Use the same consensus as the shared-camera BA
+    # starting point instead of discarding it after edge construction.
+    camera = camera.with_focal_length(
+        camera.intrinsics.focal_length_mm * sequence_scale)
     accepted = [edge for edge in edges if edge.error is None]
 
     # Only the reference-connected component has a defined reference-relative

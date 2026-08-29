@@ -113,8 +113,9 @@ def test_bundle_scale_votes_reuse_preferred_and_fall_back(monkeypatch):
                            np.eye(3), selected_scale=selected)
 
     monkeypatch.setattr(bundle_module, "_make_edge", fake_edge)
-    edges = _build_edges(frames, (1,), random_seed=0)
+    edges, sequence_scale = _build_edges(frames, (1,), random_seed=0)
     assert len(edges) == 5
+    assert sequence_scale == pytest.approx(0.7)
     assert calls == [
         (0, (1.0, 0.7, 1.3)),
         (1, (0.7, 1.0, 1.3)),
@@ -140,12 +141,14 @@ def test_bundle_exif_perspective_uses_only_unit_scale(monkeypatch):
                            np.empty((6, 2)), np.empty((6, 2)), np.eye(3))
 
     monkeypatch.setattr(bundle_module, "_make_edge", fake_edge)
-    _build_edges(frames, (1,), random_seed=0)
+    _, sequence_scale = _build_edges(frames, (1,), random_seed=0)
     assert calls == [(1.0,), (1.0,), (1.0,)]
+    assert sequence_scale == pytest.approx(1.0)
 
 
 def test_bundle_plan_jointly_recovers_relative_rotations(monkeypatch):
     camera = _camera()
+    edge_camera = camera.with_focal_length(26.0)
     policy = CameraOptimizationPolicy(False, False, False, 0)
     candidate = AlignmentCameraCandidate(camera, policy, "test")
     rotations = {0: np.eye(3), 1: _rotation_z(0.03), 2: _rotation_z(0.06)}
@@ -159,11 +162,11 @@ def test_bundle_plan_jointly_recovers_relative_rotations(monkeypatch):
             return _BundleEdge(first.index, second.index,
                                np.empty((0, 2)), np.empty((0, 2)),
                                np.eye(3), "unmatched")
-        first_pts = camera.project((rotations[first.index] @ rays.T).T)
-        second_pts = camera.project((rotations[second.index] @ rays.T).T)
+        first_pts = edge_camera.project((rotations[first.index] @ rays.T).T)
+        second_pts = edge_camera.project((rotations[second.index] @ rays.T).T)
         relative = rotations[second.index] @ rotations[first.index].T
         return _BundleEdge(first.index, second.index, first_pts, second_pts,
-                           relative)
+                           relative, selected_scale=1.3)
 
     monkeypatch.setattr(bundle_module, "_make_edge", fake_edge)
     stars = DetectedStars(np.empty((0, 2)), np.empty(0))
@@ -177,6 +180,7 @@ def test_bundle_plan_jointly_recovers_relative_rotations(monkeypatch):
     ]
     np.testing.assert_allclose(plan.frame(2).rotation_ref_to_src, rotations[2],
                                atol=1e-5)
+    assert plan.shared_camera.intrinsics.focal_length_mm == pytest.approx(26.0)
     assert not plan.frame(2).rotation_ref_to_src.flags.writeable
     assert plan.accepted_edge_count == 2
     assert plan.frame(3).rotation_ref_to_src is None

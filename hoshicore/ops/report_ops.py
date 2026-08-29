@@ -39,6 +39,13 @@ def format_bundle_window_report(
     lines = [
         f"Bundle alignment: {len(plan.frames)} input, {len(solved)} solved, "
         f"{len(excluded)} excluded",
+        "Shared camera: "
+        f"{type(plan.shared_camera).__name__}, "
+        f"focal={plan.shared_camera.intrinsics.focal_length_mm:.6g}mm, "
+        f"distortion={plan.shared_camera.distortion.to_cv2().tolist()}",
+        f"Bundle edges: {plan.accepted_edge_count} accepted, "
+        f"{plan.rejected_edge_count} rejected, "
+        f"condition={plan.observability_condition}",
         f"Window output: {len(report.frames)} emitted, "
         f"{len(insufficient)} insufficient contributors",
     ]
