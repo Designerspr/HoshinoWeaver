@@ -110,7 +110,13 @@ class ImageSaveOp(BaseOp):
         await self._broadcast_outputs({"return_code": return_code})
 
 
-def _format_output_path(template: str, index: int, total: int) -> str:
+def _format_output_path(
+    template: str,
+    index: int,
+    total: int,
+    *,
+    frame_index: int | None = None,
+) -> str:
     """根据模板生成带序号的输出路径。
 
     支持两种模式：
@@ -119,8 +125,11 @@ def _format_output_path(template: str, index: int, total: int) -> str:
 
     序号位数根据 total 自动确定（至少 4 位）。
     """
-    if "{index" in template:
-        return template.format(index=index)
+    if "{frame_index" in template and frame_index is None:
+        raise ValueError(
+            "output_template uses {frame_index}, but frame_indices is not wired")
+    if "{index" in template or "{frame_index" in template:
+        return template.format(index=index, frame_index=frame_index)
 
     base, ext = os.path.splitext(template)
     width = max(4, len(str(total)))
@@ -141,6 +150,8 @@ class BatchImageSaveOp(ParallelBaseOp):
 
     INPUTS: dict[str, Any] = {
         "data": {"type": "sequence"},
+        "frame_indices": {"type": "sequence", "required": False},
+        "exifs": {"type": "sequence", "required": False},
     }
     CONFIGS: dict[str, Any] = {
         "output_dir": {
@@ -162,6 +173,14 @@ class BatchImageSaveOp(ParallelBaseOp):
             "default": 0,
             "description": "起始序号",
         },
+        "jpg_quality": {
+            "type": "int",
+            "default": 85,
+        },
+        "png_compressing": {
+            "type": "int",
+            "default": 7,
+        },
     }
     OUTPUTS: dict[str, Any] = {
         "result": {"type": "sequence", "item_type": "str",
@@ -180,6 +199,9 @@ class BatchImageSaveOp(ParallelBaseOp):
     async def _async_execute_single(self, data: Mapping[str, Awaitable[Any]],
                                     configs: dict[str, Any]) -> dict[str, Any]:
         frame = await data['data']
+        frame_index = (await data['frame_indices']
+                       if self.inputs['frame_indices'].active else None)
+        exif = (await data['exifs'] if self.inputs['exifs'].active else None)
         output_dir = configs['output_dir']
         template = configs.get('output_template', 'frame.png')
         output_dtype_str = configs.get('output_dtype')
@@ -188,7 +210,8 @@ class BatchImageSaveOp(ParallelBaseOp):
         self._frame_counter += 1
         total = self.length or 0
 
-        filename = _format_output_path(template, idx, total)
+        filename = _format_output_path(
+            template, idx, total, frame_index=frame_index)
         filepath = os.path.join(output_dir, filename)
 
         # dtype 转换
@@ -206,8 +229,16 @@ class BatchImageSaveOp(ParallelBaseOp):
                 save_frame = rescale_array(frame, frame.dtype, target_dtype)
 
         try:
-            await asyncio.to_thread(save_img, filepath, save_frame)
-        except Exception as e:
-            logger.error(f"Failed to save frame {idx} to {filepath}: {e}")
+            await asyncio.to_thread(
+                save_img,
+                filepath,
+                save_frame,
+                png_compressing=configs.get('png_compressing', 7),
+                jpg_quality=configs.get('jpg_quality', 85),
+                exif=exif,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to save frame {idx} to {filepath}: {exc}") from exc
 
         return {"result": filepath}
