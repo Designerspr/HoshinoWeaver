@@ -6,9 +6,15 @@ import numpy as np
 import hoshicore.ops.bundle_ops as bundle_ops
 from hoshicore.component.norma.bundle import (BAAlignmentPlan, FrameAlignment,
                                                FrameAlignmentStatus)
+from hoshicore.component.norma.bundle_window import (
+    build_bundle_window_schedule,
+)
+from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
 from hoshicore.ops.bundle_ops import (BundleAdjustmentOp,
                                       BundleReferenceRemapOp,
-                                      BundleRemapReport)
+                                      BundleRemapReport,
+                                      BundleWindowMeanStackOp,
+                                      BundleWindowReport)
 
 
 class _Camera:
@@ -29,6 +35,33 @@ class _Camera:
         self.calls.append((image, output_size, rotation_dst_to_src, map_scale))
         assert camera is self
         return image + 10
+
+
+class _WindowCamera:
+    def __init__(self):
+        self.intrinsics = SimpleNamespace(
+            image_height_px=8, image_width_px=12)
+        self.calls = []
+
+    def project_image_from_camera(
+        self,
+        camera,
+        image,
+        output_size,
+        *,
+        rotation_dst_to_src,
+        map_scale,
+    ):
+        assert camera is self
+        self.calls.append((rotation_dst_to_src, map_scale, image.shape))
+        return image.copy()
+
+
+class _PartialCoverageCamera(_WindowCamera):
+    def project_image_from_camera(self, *args, **kwargs):
+        result = super().project_image_from_camera(*args, **kwargs)
+        result[:, 0] //= 2
+        return result
 
 
 def _plan(camera, frames, reference=0):
@@ -234,3 +267,121 @@ def test_bundle_reference_remap_validates_second_load_geometry(monkeypatch):
 def test_bundle_reference_remap_resource_estimate_is_sequence_constant():
     assert BundleReferenceRemapOp.estimate_resources({}, 1024, 3) == (2048, 0)
     assert BundleReferenceRemapOp.estimate_resources({}, 1024, 300) == (2048, 0)
+
+
+def test_bundle_window_mean_streams_shrinking_centered_windows(monkeypatch):
+    op = BundleWindowMeanStackOp("window_mean")
+    op.length = 3
+    op.inputs["exifs"] = SimpleNamespace(active=True)
+    images = [np.full((8, 12), value, dtype=np.uint16)
+              for value in (10, 20, 30)]
+    exifs = [object() for _ in images]
+    position = 0
+
+    async def ready(value):
+        return value
+
+    def inputs():
+        nonlocal position
+        current = position
+        position += 1
+        return {
+            "data": ready(images[current]),
+            "exifs": ready(exifs[current]),
+        }
+
+    async def run_cpu(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    broadcasts = []
+
+    async def broadcast(result):
+        broadcasts.append(result)
+
+    camera = _WindowCamera()
+    plan = _plan(camera, (_frame(0), _frame(1), _frame(2)))
+    monkeypatch.setattr(op, "_async_convert_inputs", inputs)
+    monkeypatch.setattr(op, "_run_cpu", run_cpu)
+    monkeypatch.setattr(op, "_broadcast_outputs", broadcast)
+
+    asyncio.run(op._async_filter({
+        "alignment_plan": plan,
+        "window_size": 3,
+        "min_contributors": 2,
+        "remap_map_scale": 0.25,
+    }))
+
+    outputs = broadcasts[:-1]
+    assert [item["center_indices"] for item in outputs] == [0, 1, 2]
+    assert [int(item["result"][0, 0]) for item in outputs] == [15, 20, 25]
+    assert [item["aligned_exifs"] for item in outputs] == exifs
+    assert len(camera.calls) == 4
+    assert all(call[1] == 0.25 for call in camera.calls)
+    assert all(call[2] == (8, 12, 2) for call in camera.calls)
+
+    report = broadcasts[-1]["window_report"]
+    assert isinstance(report, BundleWindowReport)
+    assert [item.contributor_indices for item in report.frames] == [
+        (0, 1), (0, 1, 2), (1, 2)]
+
+
+def test_bundle_window_mean_resource_estimate_scales_with_window_only():
+    small = BundleWindowMeanStackOp.estimate_resources(
+        {"window_size": 3}, 1024, 10, dtype_bytes=2)
+    long_sequence = BundleWindowMeanStackOp.estimate_resources(
+        {"window_size": 3}, 1024, 1000, dtype_bytes=2)
+    wider_window = BundleWindowMeanStackOp.estimate_resources(
+        {"window_size": 5}, 1024, 10, dtype_bytes=2)
+    assert small == long_sequence
+    assert wider_window[0] > small[0]
+
+
+def test_bundle_window_mean_coverage_channel_uses_real_camera_remap():
+    camera = CameraModel(
+        Intrinsics(20.0, 36.0, 24.0, 12, 8), Distortion())
+    plan = _plan(camera, (_frame(0), _frame(1)))
+    spec = build_bundle_window_schedule(
+        plan, 3, min_contributors=2).windows[0]
+    images = {
+        0: np.full((8, 12, 3), 10, dtype=np.uint16),
+        1: np.full((8, 12, 3), 20, dtype=np.uint16),
+    }
+
+    result = bundle_ops._mean_bundle_window(
+        camera, spec, images, (12, 8), 0.5)
+
+    np.testing.assert_array_equal(
+        result, np.full((8, 12, 3), 15, np.uint16))
+
+
+def test_bundle_window_mean_discards_partial_border_samples():
+    camera = _PartialCoverageCamera()
+    plan = _plan(camera, (_frame(0), _frame(1)))
+    spec = build_bundle_window_schedule(
+        plan, 3, min_contributors=2).windows[0]
+    images = {
+        0: np.full((8, 12), 10, dtype=np.uint16),
+        1: np.full((8, 12), 20, dtype=np.uint16),
+    }
+
+    result = bundle_ops._mean_bundle_window(
+        camera, spec, images, (12, 8), 0.5)
+
+    np.testing.assert_array_equal(result[:, 0], 10)
+    np.testing.assert_array_equal(result[:, 1:], 15)
+
+
+def test_bundle_window_mean_preserves_float_values():
+    camera = _WindowCamera()
+    plan = _plan(camera, (_frame(0), _frame(1)))
+    spec = build_bundle_window_schedule(
+        plan, 3, min_contributors=2).windows[0]
+    images = {
+        0: np.full((8, 12), 0.25, dtype=np.float32),
+        1: np.full((8, 12), 0.75, dtype=np.float32),
+    }
+
+    result = bundle_ops._mean_bundle_window(
+        camera, spec, images, (12, 8), 0.5)
+
+    np.testing.assert_allclose(result, 0.5)

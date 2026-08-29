@@ -4,6 +4,8 @@ from .alignment import (AlignmentResult, guided_mutual_rematch,
                         optimize_alignment, run_guided_refine_stage)
 from .bundle import (BAAlignmentPlan, BundleAdjustmentError, BundleFrame,
                      FrameAlignment, FrameAlignmentStatus, build_bundle_plan)
+from .bundle_window import (BundleWindowSchedule, BundleWindowSource,
+                            BundleWindowSpec, build_bundle_window_schedule)
 from .frame_align import (AlignmentCameraCandidate, AlignmentError,
                           CameraInitializationPolicy, align_frame_camera_model,
                           align_frame_homography, build_camera_candidate,
