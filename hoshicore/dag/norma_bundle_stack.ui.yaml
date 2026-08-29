@@ -7,7 +7,7 @@ inputs:
 
 routes:
   stacker:
-    label: "叠加算法"
+    label: "天空叠加算法"
     widget: tabs
     options:
       mean:
@@ -28,6 +28,29 @@ routes:
       max:
         label: "最大值"
         description: "逐像素取最大值，不做其他处理，适合需要保留所有飞机/卫星轨迹的场景。"
+  ground_stacker:
+    label: "地面叠加算法"
+    widget: tabs
+    visible_when: { key: "enable_ground", eq: true }
+    options:
+      mean:
+        label: "均值"
+        description: "不排除异常值的平均值叠加，速度快，适合稳定、干净的地面区域。"
+      sigma_clip:
+        label: "Sigma 裁剪"
+        description: "迭代排除地面区域中的移动物体或其他异常像素。"
+      median:
+        label: "中位数"
+        description: "逐像素取中位数，适合帧数较少且存在偶发干扰的地面区域。"
+      huber_mean:
+        label: "Huber 均值"
+        description: "自动降低异常像素权重，适合轻微干扰。"
+      max_mix:
+        label: "最大值混合"
+        description: "保留较亮变化并校正空间亮度不均。"
+      max:
+        label: "最大值"
+        description: "逐像素取最大值，不进行异常值抑制。"
 
 configs:
   reference_frame_index:
@@ -90,7 +113,14 @@ configs:
   int_weight:
     hidden: true
   mask:
-    hidden: true
+    label: "天空遮罩"
+    description: "白色区域作为天空并执行 BA 对齐；黑色区域作为地面，保持原始几何后独立叠加。"
+    widget: file_picker
+    accept: ".tif,.tiff,.png,.jpg"
+  enable_ground:
+    label: "叠加地面"
+    description: "使用天空遮罩的反向区域叠加未经几何变换的地面，并与天空结果重新混合。"
+    widget: switch
   distortion:
     hidden: true
   pair_offsets:
@@ -130,9 +160,12 @@ layout:
       keys: [optimize_focal, optimize_distortion, optimize_principal_point]
     - name: "重映射"
       keys: [remap_map_scale]
+    - name: "天地分离"
+      keys: [mask, enable_ground]
   order:
     [
       stacker,
+      ground_stacker,
       reference_frame_index,
       lens_type,
       focal_length_mm,
@@ -142,6 +175,8 @@ layout:
       optimize_distortion,
       optimize_principal_point,
       remap_map_scale,
+      mask,
+      enable_ground,
     ]
 
 outputs:
