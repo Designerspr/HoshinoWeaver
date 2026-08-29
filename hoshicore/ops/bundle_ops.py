@@ -255,6 +255,7 @@ class BundleAdjustmentOp(BaseOp):
     OUTPUTS: dict[str, Any] = {
         "alignment_plan": {"type": "object"},
     }
+    REPORTS_PROGRESS = True
 
     @classmethod
     def estimate_resources(cls, configs, frame_bytes, n_frames,
@@ -268,6 +269,9 @@ class BundleAdjustmentOp(BaseOp):
         if configs.get("method", "distortion") != "distortion":
             raise ValueError(
                 "BundleAdjustmentOp supports camera-model distortion mode only")
+        if self.length is not None:
+            self.tracker.create_bar(
+                self.name, self.length, desc=self.display_name)
         exifs_active = self.inputs["exifs"].active
         focal_length = configs.get("focal_length_mm")
         focal_equiv = (float(focal_length) * float(configs.get("crop_factor") or 1.0)
@@ -338,6 +342,8 @@ class BundleAdjustmentOp(BaseOp):
         except Exception as exc:
             raise BundleAdjustmentError(f"sequence BA failed: {exc}") from exc
         await self._broadcast_outputs({"alignment_plan": plan})
+        if self.length is not None:
+            self.tracker.close_bar(self.name)
 
 
 @register_op()
@@ -358,6 +364,7 @@ class BundleReferenceRemapOp(FilterBaseOp):
         "aligned_exifs": {"type": "sequence"},
         "remap_report": {"type": "object"},
     }
+    REPORTS_PROGRESS = True
 
     @classmethod
     def estimate_resources(cls, configs, frame_bytes, n_frames,
@@ -376,6 +383,9 @@ class BundleReferenceRemapOp(FilterBaseOp):
             raise ValueError("remap_map_scale must be in (0, 1]")
         if not 0 <= plan.reference_frame_index < len(plan.frames):
             raise ValueError("AlignmentPlan reference index is outside its frames")
+        if self.length is not None:
+            self.tracker.create_bar(
+                self.name, self.length, desc=self.display_name)
         exifs_active = self.inputs["exifs"].active
         reports: list[BundleRemapFrameReport] = []
         seen_count = 0
@@ -445,6 +455,8 @@ class BundleReferenceRemapOp(FilterBaseOp):
                 f"got {seen_count}, expected {len(plan.frames)}")
         await self._broadcast_outputs({
             "remap_report": BundleRemapReport(tuple(reports))})
+        if self.length is not None:
+            self.tracker.close_bar(self.name)
 
 
 class _BundleWindowStackOp(FilterBaseOp):
@@ -468,6 +480,8 @@ class _BundleWindowStackOp(FilterBaseOp):
         "window_report": {"type": "object"},
     }
 
+    REPORTS_PROGRESS = True
+
     @staticmethod
     def _reduce_window(camera, spec, images, output_size, map_scale, configs):
         raise NotImplementedError
@@ -482,6 +496,9 @@ class _BundleWindowStackOp(FilterBaseOp):
         map_scale = float(configs.get("remap_map_scale", 0.5))
         if not 0.0 < map_scale <= 1.0:
             raise ValueError("remap_map_scale must be in (0, 1]")
+        if self.length is not None:
+            self.tracker.create_bar(
+                self.name, self.length, desc=self.display_name)
 
         intrinsics = plan.shared_camera.intrinsics
         expected_shape = (intrinsics.image_height_px,
@@ -597,6 +614,8 @@ class _BundleWindowStackOp(FilterBaseOp):
         await self._broadcast_outputs({
             "window_report": BundleWindowReport(tuple(reports)),
         })
+        if self.length is not None:
+            self.tracker.close_bar(self.name)
 
 
 @register_op()

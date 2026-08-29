@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -101,6 +102,8 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
         monkeypatch, configured_reference, expected_reference):
     op = BundleAdjustmentOp("bundle")
     op.length = 4
+    op.display_name = "Bundle adjustment"
+    op.tracker = Mock()
     op.inputs["exifs"] = SimpleNamespace(active=True)
     images = [np.zeros((8, 12), dtype=np.uint16) for _ in range(4)]
     exifs = [SimpleNamespace(exif={"frame": index}) for index in range(4)]
@@ -165,11 +168,17 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
         "random_seed": 7,
     }
     assert captured["output"] == {"alignment_plan": "plan"}
+    op.tracker.create_bar.assert_called_once_with(
+        "bundle", 4, desc="Bundle adjustment")
+    assert op.tracker.update.call_count == 4
+    op.tracker.close_bar.assert_called_once_with("bundle")
 
 
 def test_bundle_reference_remap_streams_in_order_and_skips_excluded(monkeypatch):
     op = BundleReferenceRemapOp("remap")
     op.length = 4
+    op.display_name = "Bundle remap"
+    op.tracker = Mock()
     op.inputs["exifs"] = SimpleNamespace(active=True)
     images = [np.full((8, 12), index, dtype=np.uint16)
               for index in range(4)]
@@ -227,6 +236,10 @@ def test_bundle_reference_remap_streams_in_order_and_skips_excluded(monkeypatch)
     assert [item.index for item in report.frames] == [0, 1, 2, 3]
     assert [item.emitted for item in report.frames] == [True, False, True, True]
     assert report.frames[1].reason == "disconnected"
+    op.tracker.create_bar.assert_called_once_with(
+        "remap", 4, desc="Bundle remap")
+    assert op.tracker.update.call_count == 4
+    op.tracker.close_bar.assert_called_once_with("remap")
 
 
 def test_bundle_reference_remap_rejects_solved_frame_without_pose(monkeypatch):
@@ -283,6 +296,8 @@ def test_bundle_reference_remap_resource_estimate_is_sequence_constant():
 def test_bundle_window_mean_streams_shrinking_centered_windows(monkeypatch):
     op = BundleWindowMeanStackOp("window_mean")
     op.length = 3
+    op.display_name = "Bundle window mean"
+    op.tracker = Mock()
     op.inputs["exifs"] = SimpleNamespace(active=True)
     images = [np.full((8, 12), value, dtype=np.uint16)
               for value in (10, 20, 30)]
@@ -334,6 +349,10 @@ def test_bundle_window_mean_streams_shrinking_centered_windows(monkeypatch):
     assert isinstance(report, BundleWindowReport)
     assert [item.contributor_indices for item in report.frames] == [
         (0, 1), (0, 1, 2), (1, 2)]
+    op.tracker.create_bar.assert_called_once_with(
+        "window_mean", 3, desc="Bundle window mean")
+    assert op.tracker.update.call_count == 3
+    op.tracker.close_bar.assert_called_once_with("window_mean")
 
 
 def test_bundle_window_mean_resource_estimate_scales_with_window_only():
