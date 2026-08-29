@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import hoshicore.ops.bundle_ops as bundle_ops
 from hoshicore.component.norma.bundle import (BAAlignmentPlan, FrameAlignment,
@@ -13,7 +14,10 @@ from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
 from hoshicore.ops.bundle_ops import (BundleAdjustmentOp,
                                       BundleReferenceRemapOp,
                                       BundleRemapReport,
+                                      BundleWindowMaxStackOp,
                                       BundleWindowMeanStackOp,
+                                      BundleWindowMedianStackOp,
+                                      BundleWindowSigmaClipStackOp,
                                       BundleWindowReport)
 
 
@@ -385,3 +389,78 @@ def test_bundle_window_mean_preserves_float_values():
         camera, spec, images, (12, 8), 0.5)
 
     np.testing.assert_allclose(result, 0.5)
+
+
+@pytest.mark.parametrize(("op_class", "expected"), [
+    (BundleWindowMaxStackOp, 30),
+    (BundleWindowMedianStackOp, 20),
+    (BundleWindowSigmaClipStackOp, 20),
+])
+def test_bundle_window_additional_reducers(op_class, expected):
+    camera = _WindowCamera()
+    plan = _plan(camera, (_frame(0), _frame(1), _frame(2)))
+    spec = build_bundle_window_schedule(
+        plan, 3, min_contributors=2).windows[1]
+    images = {
+        index: np.full((8, 12), value, dtype=np.uint16)
+        for index, value in enumerate((10, 20, 30))
+    }
+    configs = {"rej_high": 3.0, "rej_low": 3.0, "max_iter": 5}
+
+    result = op_class._reduce_window(
+        camera, spec, images, (12, 8), 0.5, configs)
+
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_bundle_window_sigma_clip_rejects_outlier():
+    camera = _WindowCamera()
+    frames = tuple(_frame(index) for index in range(5))
+    spec = build_bundle_window_schedule(
+        _plan(camera, frames), 5, min_contributors=2).windows[2]
+    images = {
+        index: np.full((8, 12), value, dtype=np.uint16)
+        for index, value in enumerate((10, 10, 10, 10, 250))
+    }
+
+    result = BundleWindowSigmaClipStackOp._reduce_window(
+        camera, spec, images, (12, 8), 0.5,
+        {"rej_high": 1.0, "rej_low": 1.0, "max_iter": 5})
+
+    np.testing.assert_array_equal(result, 10)
+
+
+def test_bundle_window_reducer_resource_estimates_include_window_stack():
+    mean = BundleWindowMeanStackOp.estimate_resources(
+        {"window_size": 5}, 1024, 100, dtype_bytes=2)[0]
+    maximum = BundleWindowMaxStackOp.estimate_resources(
+        {"window_size": 5}, 1024, 100, dtype_bytes=2)[0]
+    median = BundleWindowMedianStackOp.estimate_resources(
+        {"window_size": 5}, 1024, 100, dtype_bytes=2)[0]
+    sigma = BundleWindowSigmaClipStackOp.estimate_resources(
+        {"window_size": 5}, 1024, 100, dtype_bytes=2)[0]
+    assert maximum < median
+    assert mean < sigma
+    assert median < sigma
+
+
+@pytest.mark.parametrize(("op_class", "interior"), [
+    (BundleWindowMaxStackOp, 200),
+    (BundleWindowMedianStackOp, 105),
+])
+def test_bundle_window_reducers_respect_partial_coverage_mask(
+        op_class, interior):
+    camera = _PartialCoverageCamera()
+    plan = _plan(camera, (_frame(0), _frame(1)))
+    spec = build_bundle_window_schedule(
+        plan, 3, min_contributors=2).windows[0]
+    images = {
+        0: np.full((8, 12), 10, dtype=np.uint16),
+        1: np.full((8, 12), 200, dtype=np.uint16),
+    }
+
+    result = op_class._reduce_window(
+        camera, spec, images, (12, 8), 0.5, {})
+
+    np.testing.assert_array_equal(result[:, 0], 10)
+    np.testing.assert_array_equal(result[:, 1:], interior)

@@ -5,8 +5,9 @@ from typing import Any, Optional
 
 import numpy as np
 
+from .._custom_op import median_reduce_chunk, sigma_clip_fused_chunk
 from ..component.data_container import FloatImage
-from ..component.merger import MeanMerger
+from ..component.merger import MaxMerger, MeanMerger
 from ..component.norma.bundle import (BAAlignmentPlan, BundleAdjustmentError,
                                       BundleFrame, FrameAlignmentStatus,
                                       build_bundle_plan)
@@ -75,29 +76,8 @@ def _mean_bundle_window(
     center = images[spec.center_index]
     merger = MeanMerger()
 
-    for source in spec.sources:
-        image = images[source.index]
-        if source.index == spec.center_index:
-            sample = image
-            valid = np.ones(image.shape[:2], dtype=np.uint8)
-        else:
-            augmented, coverage_scale = _append_coverage_channel(image)
-            remapped = camera.project_image_from_camera(
-                camera,
-                augmented,
-                output_size,
-                rotation_dst_to_src=source.rotation_center_to_source,
-                map_scale=map_scale,
-            )
-            sample = remapped[..., :-1]
-            if image.ndim == 2:
-                sample = sample[..., 0]
-            coverage = remapped[..., -1]
-            if np.issubdtype(coverage.dtype, np.integer):
-                valid = (coverage == coverage_scale).astype(np.uint8)
-            else:
-                valid = (coverage >= float(coverage_scale) - 1e-6).astype(
-                    np.uint8)
+    for sample, valid in _iter_bundle_window_samples(
+            camera, spec, images, output_size, map_scale):
         merger.merge(sample, spatial_mask=valid)
 
     statistics = merger.result
@@ -109,6 +89,139 @@ def _mean_bundle_window(
     merged = merger.merged_image
     assert merged is not None
     return merged.data.astype(center.dtype)
+
+
+def _iter_bundle_window_samples(
+    camera: Any,
+    spec: BundleWindowSpec,
+    images: dict[int, np.ndarray],
+    output_size: tuple[int, int],
+    map_scale: float,
+):
+    """Yield each center-coordinate sample and its full-coverage mask."""
+    for source in spec.sources:
+        image = images[source.index]
+        if source.index == spec.center_index:
+            yield image, np.ones(image.shape[:2], dtype=np.uint8)
+            continue
+        augmented, coverage_scale = _append_coverage_channel(image)
+        remapped = camera.project_image_from_camera(
+            camera,
+            augmented,
+            output_size,
+            rotation_dst_to_src=source.rotation_center_to_source,
+            map_scale=map_scale,
+        )
+        sample = remapped[..., :-1]
+        if image.ndim == 2:
+            sample = sample[..., 0]
+        coverage = remapped[..., -1]
+        if np.issubdtype(coverage.dtype, np.integer):
+            valid = coverage == coverage_scale
+        else:
+            valid = coverage >= float(coverage_scale) - 1e-6
+        yield sample, valid.astype(np.uint8)
+
+
+def _collect_bundle_window_stack(
+    camera: Any,
+    spec: BundleWindowSpec,
+    images: dict[int, np.ndarray],
+    output_size: tuple[int, int],
+    map_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Materialize one reducer-local stack for non-streaming algorithms."""
+    center = images[spec.center_index]
+    stack = np.empty((len(spec.sources), *center.shape), dtype=center.dtype)
+    masks = np.empty((len(spec.sources), *center.shape[:2]), dtype=np.uint8)
+    for position, (sample, valid) in enumerate(_iter_bundle_window_samples(
+            camera, spec, images, output_size, map_scale)):
+        stack[position] = sample
+        masks[position] = valid
+    return stack, masks
+
+
+def _max_bundle_window(camera: Any, spec: BundleWindowSpec,
+                       images: dict[int, np.ndarray],
+                       output_size: tuple[int, int],
+                       map_scale: float) -> np.ndarray:
+    merger = MaxMerger()
+    for sample, valid in _iter_bundle_window_samples(
+            camera, spec, images, output_size, map_scale):
+        merger.merge(sample, spatial_mask=valid)
+    result = merger.merged_image
+    if result is None:
+        raise RuntimeError("bundle window has no valid contributors")
+    return result
+
+
+def _masked_median(stack: np.ndarray, masks: np.ndarray) -> np.ndarray:
+    """Exact per-pixel median with a frame-level spatial validity mask."""
+    if np.all(masks):
+        return median_reduce_chunk(stack)
+    expanded = masks if stack.ndim == 3 else masks[..., None]
+    fill = (np.iinfo(stack.dtype).max
+            if np.issubdtype(stack.dtype, np.integer) else np.inf)
+    np.copyto(stack, fill, where=~expanded.astype(bool))
+    stack.sort(axis=0)
+    counts = masks.sum(axis=0, dtype=np.intp)
+    lower_indices = (counts - 1) // 2
+    upper_indices = counts // 2
+    if stack.ndim == 4:
+        lower_indices = np.broadcast_to(lower_indices[..., None], stack.shape[1:])
+        upper_indices = np.broadcast_to(upper_indices[..., None], stack.shape[1:])
+    lower = np.take_along_axis(stack, lower_indices[None, ...], axis=0)[0]
+    upper = np.take_along_axis(stack, upper_indices[None, ...], axis=0)[0]
+    if np.issubdtype(stack.dtype, np.integer):
+        result = (lower.astype(np.float64) + upper.astype(np.float64)) / 2.0
+        return result.astype(stack.dtype)
+    return ((lower + upper) * 0.5).astype(stack.dtype)
+
+
+def _median_bundle_window(camera: Any, spec: BundleWindowSpec,
+                          images: dict[int, np.ndarray],
+                          output_size: tuple[int, int],
+                          map_scale: float) -> np.ndarray:
+    stack, masks = _collect_bundle_window_stack(
+        camera, spec, images, output_size, map_scale)
+    return _masked_median(stack, masks)
+
+
+def _sigma_clip_bundle_window(
+    camera: Any,
+    spec: BundleWindowSpec,
+    images: dict[int, np.ndarray],
+    output_size: tuple[int, int],
+    map_scale: float,
+    rej_high: float,
+    rej_low: float,
+    max_iter: int,
+) -> np.ndarray:
+    stack, masks = _collect_bundle_window_stack(
+        camera, spec, images, output_size, map_scale)
+    if stack.dtype not in (np.dtype("uint8"), np.dtype("uint16")):
+        raise ValueError("BundleWindowSigmaClipStackOp supports uint8/uint16")
+    channels = stack.shape[-1] if stack.ndim == 4 else 1
+    flat_stack = np.ascontiguousarray(stack.reshape(len(stack), -1))
+    expanded_masks = (masks if channels == 1 else np.broadcast_to(
+        masks[..., None], stack.shape))
+    flat_masks = np.ascontiguousarray(expanded_masks.reshape(len(stack), -1),
+                                      dtype=np.uint8)
+    accepted_sum, _, accepted_n = sigma_clip_fused_chunk(
+        flat_stack,
+        rej_high=rej_high,
+        rej_low=rej_low,
+        max_iter=max_iter,
+        mask=flat_masks,
+        channels=channels,
+    )
+    mean = np.divide(
+        accepted_sum,
+        accepted_n,
+        out=np.zeros_like(accepted_sum),
+        where=accepted_n > 0,
+    ).reshape(stack.shape[1:])
+    return np.rint(mean).clip(0, np.iinfo(stack.dtype).max).astype(stack.dtype)
 
 
 @register_op()
@@ -327,9 +440,8 @@ class BundleReferenceRemapOp(FilterBaseOp):
             "remap_report": BundleRemapReport(tuple(reports))})
 
 
-@register_op()
-class BundleWindowMeanStackOp(FilterBaseOp):
-    """Remap each BA window to its center frame and emit a masked mean."""
+class _BundleWindowStackOp(FilterBaseOp):
+    """Shared stream scheduling for concrete bundle-window reducers."""
 
     EXECUTOR = "cpu"
     INPUTS: dict[str, Any] = {
@@ -349,16 +461,9 @@ class BundleWindowMeanStackOp(FilterBaseOp):
         "window_report": {"type": "object"},
     }
 
-    @classmethod
-    def estimate_resources(cls, configs, frame_bytes, n_frames,
-                           dtype_bytes=None):
-        _ = n_frames
-        window_size = int(configs.get("window_size", 5))
-        source_bytes = max(1, int(dtype_bytes or 2))
-        # N originals, an augmented/remapped scratch image, MeanMerger's FGP
-        # arrays, and one output. Conservatively estimated for unknown channels.
-        work_multiplier = 3 + 16 / source_bytes
-        return (int((window_size + work_multiplier) * frame_bytes), 0)
+    @staticmethod
+    def _reduce_window(camera, spec, images, output_size, map_scale, configs):
+        raise NotImplementedError
 
     async def _async_filter(self, configs: dict[str, Any]) -> None:
         plan = configs["alignment_plan"]
@@ -444,12 +549,13 @@ class BundleWindowMeanStackOp(FilterBaseOp):
                     for source in spec.sources
                 }
                 result = await self._run_cpu(
-                    _mean_bundle_window,
+                    self._reduce_window,
                     plan.shared_camera,
                     spec,
                     images,
                     output_size,
                     map_scale,
+                    configs,
                 )
                 center_frame, _, center_exif = frame_cache[spec.center_index]
                 output = (FloatImage(data=result, dtype=center_frame.dtype)
@@ -484,3 +590,96 @@ class BundleWindowMeanStackOp(FilterBaseOp):
         await self._broadcast_outputs({
             "window_report": BundleWindowReport(tuple(reports)),
         })
+
+
+@register_op()
+class BundleWindowMeanStackOp(_BundleWindowStackOp):
+    """Remap each BA window to its center frame and emit a masked mean."""
+
+    @staticmethod
+    def _reduce_window(camera, spec, images, output_size, map_scale, configs):
+        _ = configs
+        return _mean_bundle_window(
+            camera, spec, images, output_size, map_scale)
+
+    @classmethod
+    def estimate_resources(cls, configs, frame_bytes, n_frames,
+                           dtype_bytes=None):
+        _ = n_frames
+        window_size = int(configs.get("window_size", 5))
+        source_bytes = max(1, int(dtype_bytes or 2))
+        work_multiplier = 3 + 16 / source_bytes
+        return (int((window_size + work_multiplier) * frame_bytes), 0)
+
+
+@register_op()
+class BundleWindowMaxStackOp(_BundleWindowStackOp):
+    """Remap each BA window to its center frame and emit a masked maximum."""
+
+    @staticmethod
+    def _reduce_window(camera, spec, images, output_size, map_scale, configs):
+        _ = configs
+        return _max_bundle_window(
+            camera, spec, images, output_size, map_scale)
+
+    @classmethod
+    def estimate_resources(cls, configs, frame_bytes, n_frames,
+                           dtype_bytes=None):
+        _ = (n_frames, dtype_bytes)
+        window_size = int(configs.get("window_size", 5))
+        return ((window_size + 4) * frame_bytes, 0)
+
+
+@register_op()
+class BundleWindowMedianStackOp(_BundleWindowStackOp):
+    """Remap and materialize one window for an exact masked median."""
+
+    @staticmethod
+    def _reduce_window(camera, spec, images, output_size, map_scale, configs):
+        _ = configs
+        return _median_bundle_window(
+            camera, spec, images, output_size, map_scale)
+
+    @classmethod
+    def estimate_resources(cls, configs, frame_bytes, n_frames,
+                           dtype_bytes=None):
+        _ = n_frames
+        window_size = int(configs.get("window_size", 5))
+        source_bytes = max(1, int(dtype_bytes or 2))
+        multiplier = 2 * window_size + window_size / source_bytes + 3
+        return (int(multiplier * frame_bytes), 0)
+
+
+@register_op()
+class BundleWindowSigmaClipStackOp(_BundleWindowStackOp):
+    """Remap and materialize one window for iterative sigma clipping."""
+
+    CONFIGS = {
+        **_BundleWindowStackOp.CONFIGS,
+        "rej_high": {"type": "float", "default": 3.0},
+        "rej_low": {"type": "float", "default": 3.0},
+        "max_iter": {"type": "int", "default": 5},
+    }
+
+    @staticmethod
+    def _reduce_window(camera, spec, images, output_size, map_scale, configs):
+        rej_high = float(configs.get("rej_high", 3.0))
+        rej_low = float(configs.get("rej_low", 3.0))
+        max_iter = int(configs.get("max_iter", 5))
+        if rej_high <= 0.0 or rej_low <= 0.0:
+            raise ValueError("sigma clipping thresholds must be positive")
+        if max_iter <= 0:
+            raise ValueError("max_iter must be positive")
+        return _sigma_clip_bundle_window(
+            camera, spec, images, output_size, map_scale,
+            rej_high, rej_low, max_iter)
+
+    @classmethod
+    def estimate_resources(cls, configs, frame_bytes, n_frames,
+                           dtype_bytes=None):
+        _ = n_frames
+        window_size = int(configs.get("window_size", 5))
+        source_bytes = max(1, int(dtype_bytes or 2))
+        multiplier = (2 * window_size + window_size / source_bytes
+                      + 24 / source_bytes + 3)
+        return (int(multiplier * frame_bytes), 0)
