@@ -46,9 +46,13 @@ def format_bundle_window_report(
         f"Bundle edges: {plan.accepted_edge_count} accepted, "
         f"{plan.rejected_edge_count} rejected, "
         f"condition={plan.observability_condition}",
+        f"Camera solve: {plan.camera_solve_mode}",
         f"Window output: {len(report.frames)} emitted, "
         f"{len(insufficient)} insufficient contributors",
     ]
+    if plan.camera_fallback_reason:
+        lines.append(
+            f"Camera fallback reason: {plan.camera_fallback_reason}")
     if contributor_counts:
         lines.append(
             "Contributors: "

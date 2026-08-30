@@ -133,6 +133,8 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
     def build_plan(frames, **kwargs):
         captured["frames"] = frames
         captured["kwargs"] = kwargs
+        for _ in range(5):
+            kwargs["edge_completed"]()
         return "plan"
 
     async def broadcast(result):
@@ -162,6 +164,8 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
     assert len(candidate_calls) == 1
     assert candidate_calls[0][0] == {"frame": expected_reference}
     assert all(frame.candidate is shared_candidate for frame in captured["frames"])
+    edge_completed = captured["kwargs"].pop("edge_completed")
+    assert callable(edge_completed)
     assert captured["kwargs"] == {
         "reference_frame_index": expected_reference,
         "pair_offsets": (1, 2),
@@ -169,8 +173,9 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
     }
     assert captured["output"] == {"alignment_plan": "plan"}
     op.tracker.create_bar.assert_called_once_with(
-        "bundle", 4, desc="Bundle adjustment")
-    assert op.tracker.update.call_count == 4
+        "bundle", 10, desc="Bundle adjustment")
+    op.tracker.reset_bar.assert_not_called()
+    assert op.tracker.update.call_count == 10
     op.tracker.close_bar.assert_called_once_with("bundle")
 
 

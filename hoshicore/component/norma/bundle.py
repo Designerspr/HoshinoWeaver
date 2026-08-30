@@ -15,7 +15,7 @@ The solve has four stages:
 import dataclasses
 import enum
 from collections import defaultdict, deque
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -71,6 +71,8 @@ class BAAlignmentPlan:
     rejected_edge_count: int
     active_camera_parameter_count: int
     observability_condition: Optional[float]
+    camera_solve_mode: str = "requested"
+    camera_fallback_reason: Optional[str] = None
 
     def frame(self, index: int) -> FrameAlignment:
         if index < 0 or index >= len(self.frames):
@@ -93,6 +95,9 @@ class _BundleEdge:
 
 _SCALE_PROBE_EDGE_COUNT = 3
 _ROTATION_ONLY_POLICY = CameraOptimizationPolicy(False, False, False, 0)
+_FOCAL_FALLBACK_POLICY = CameraOptimizationPolicy(True, False, False, 0)
+_FOCAL_SCALE_DELTA_LIMIT = 0.3
+_DISTORTION_ABS_LIMIT = 1.0
 
 
 def _camera_parameter_count(policy: CameraOptimizationPolicy) -> int:
@@ -117,6 +122,25 @@ def _pack_camera_parameters(camera: BaseCameraModel,
     if policy.optimize_principal_point:
         parts.append(np.zeros(2, dtype=np.float64))
     return np.concatenate(parts) if parts else np.empty(0, dtype=np.float64)
+
+
+def _camera_parameter_bounds(
+    policy: CameraOptimizationPolicy,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return physical bounds in the same order as packed camera parameters."""
+    lower: list[float] = []
+    upper: list[float] = []
+    if policy.optimize_focal:
+        lower.append(-_FOCAL_SCALE_DELTA_LIMIT)
+        upper.append(_FOCAL_SCALE_DELTA_LIMIT)
+    if policy.optimize_distortion:
+        lower.extend([-_DISTORTION_ABS_LIMIT] * policy.n_dist)
+        upper.extend([_DISTORTION_ABS_LIMIT] * policy.n_dist)
+    if policy.optimize_principal_point:
+        lower.extend([-np.inf, -np.inf])
+        upper.extend([np.inf, np.inf])
+    return np.asarray(lower, dtype=np.float64), np.asarray(
+        upper, dtype=np.float64)
 
 
 def _camera_from_parameters(camera: BaseCameraModel,
@@ -308,9 +332,12 @@ def _sequence_scales(frames: Sequence[BundleFrame]) -> tuple[float, ...]:
             tuple(float(scale) for scale in DEFAULT_BOOTSTRAP_SCALES))
 
 
-def _build_edges(frames: Sequence[BundleFrame], offsets: Sequence[int],
-                 random_seed: int | None,
-                 ) -> tuple[list[_BundleEdge], float]:
+def _build_edges(
+    frames: Sequence[BundleFrame],
+    offsets: Sequence[int],
+    random_seed: int | None,
+    edge_completed: Callable[[], None] | None = None,
+) -> tuple[list[_BundleEdge], float]:
     """Build edges with a short full-search probe, then preferred-scale reuse.
 
     A successful single-scale solve already passed the matcher's rotation
@@ -341,14 +368,145 @@ def _build_edges(frames: Sequence[BundleFrame], offsets: Sequence[int],
                     if edge.error is None:
                         _vote_for_scale(votes, edge.selected_scale)
             edges.append(edge)
+            if edge_completed is not None:
+                edge_completed()
     return edges, _ordered_scales(votes)[0]
 
 
-def build_bundle_plan(frames: Sequence[BundleFrame], reference_frame_index: int,
-                      *,
-                      pair_offsets: Sequence[int] = (1, 2, 4),
-                      random_seed: int | None = 0,
-                      max_nfev: int = 300) -> BAAlignmentPlan:
+def _solve_bundle_parameters(
+    edges: Sequence[_BundleEdge],
+    reference_frame_index: int,
+    component: set[int],
+    camera: BaseCameraModel,
+    policy: CameraOptimizationPolicy,
+    max_nfev: int,
+) -> tuple[BaseCameraModel, dict[int, NDArray[np.float64]],
+           list[_BundleEdge], Optional[float]]:
+    """Jointly solve one bounded camera model and the connected frame poses."""
+    _coverage_precheck(edges, policy, camera)
+    initial = _initial_rotations(edges, reference_frame_index, component)
+    variable_indices = [
+        index for index in sorted(component) if index != reference_frame_index]
+    camera0 = _pack_camera_parameters(camera, policy)
+    camera_lower, camera_upper = _camera_parameter_bounds(policy)
+    if (np.any(camera0 < camera_lower)
+            or np.any(camera0 > camera_upper)):
+        raise BundleAdjustmentError(
+            "initial shared camera parameters are outside optimization bounds")
+
+    def pack_with_poses(
+        camera_values: NDArray[np.float64],
+        pose_values: dict[int, NDArray[np.float64]],
+    ) -> NDArray[np.float64]:
+        return np.concatenate((
+            camera_values,
+            *[_rvec_from_rotation(pose_values[index])
+              for index in variable_indices],
+        ))
+
+    def parameter_bounds() -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        pose_width = 3 * len(variable_indices)
+        return (
+            np.concatenate((camera_lower, np.full(pose_width, -np.inf))),
+            np.concatenate((camera_upper, np.full(pose_width, np.inf))),
+        )
+
+    # Optimizer layout: [shared camera parameters, 3D rotation vectors...].
+    # The reference rotation is fixed to identity to remove gauge freedom.
+    x0 = pack_with_poses(camera0, initial)
+
+    def unpack(values):
+        solved_camera = _camera_from_parameters(
+            camera, policy, values[:len(camera0)])
+        rotations = {reference_frame_index: np.eye(3, dtype=np.float64)}
+        offset = len(camera0)
+        for index in variable_indices:
+            rotations[index] = _rotation_from_rvec(
+                values[offset:offset + 3])
+            offset += 3
+        return solved_camera, rotations
+
+    def residual(values, selected_edges):
+        solved_camera, rotations = unpack(values)
+        values_out = []
+        for edge in selected_edges:
+            first = solved_camera.unproject(edge.first_pts)
+            second = solved_camera.unproject(edge.second_pts)
+            # Convert the first-frame ray through the shared reference system
+            # into the second frame, then compare the two unit directions.
+            predicted = (
+                rotations[edge.second_index]
+                @ rotations[edge.first_index].T
+                @ first.T
+            ).T
+            values_out.append(np.cross(predicted, second).reshape(-1))
+        return np.concatenate(values_out)
+
+    def validate_fit(fit, stage: str) -> None:
+        if not fit.success or not np.all(np.isfinite(fit.x)):
+            raise BundleAdjustmentError(
+                f"{stage} bundle optimization failed: {fit.message}")
+        if np.any(np.asarray(fit.active_mask[:len(camera0)]) != 0):
+            raise BundleAdjustmentError(
+                f"{stage} shared camera parameters reached optimization bounds")
+
+    # First pass uses every successfully matched edge in the component. Huber
+    # loss limits individual bad pairs before edge-level rejection is possible.
+    initial_residual = residual(x0, edges)
+    scale = max(float(np.median(np.abs(initial_residual))) * 2.0, 1e-6)
+    fit = least_squares(
+        residual, x0, args=(edges,), method="trf", loss="huber",
+        f_scale=scale, max_nfev=max_nfev, bounds=parameter_bounds())
+    validate_fit(fit, "global")
+    solved_camera, rotations = unpack(fit.x)
+
+    # Reject complete edges only when their robust edge statistic is an obvious
+    # outlier. This prevents one structured correspondence field from steering
+    # the shared camera model.
+    edge_p90 = np.array([
+        np.percentile(_edge_residuals(edge, rotations, solved_camera), 90)
+        for edge in edges
+    ])
+    median = float(np.median(edge_p90))
+    mad = float(np.median(np.abs(edge_p90 - median))) * 1.4826
+    cutoff = max(median + 3.0 * mad, np.deg2rad(0.15))
+    retained = [edge for edge, p90 in zip(edges, edge_p90)
+                if p90 <= cutoff]
+    if len(retained) < len(edges):
+        # Removing one edge may detach frames. Refit all surviving poses and
+        # the same bounded shared camera parameters on the remaining component.
+        component = _connected_component(retained, reference_frame_index)
+        retained = [
+            edge for edge in retained
+            if edge.first_index in component and edge.second_index in component]
+        if len(component) < 2:
+            raise BundleAdjustmentError(
+                "outlier rejection disconnected the reference frame")
+        variable_indices = [
+            index for index in sorted(component)
+            if index != reference_frame_index]
+        initial = {index: rotations[index] for index in component}
+        x0 = pack_with_poses(fit.x[:len(camera0)], initial)
+        fit = least_squares(
+            residual, x0, args=(retained,), method="trf", loss="huber",
+            f_scale=scale, max_nfev=max_nfev, bounds=parameter_bounds())
+        validate_fit(fit, "refined")
+        solved_camera, rotations = unpack(fit.x)
+
+    _coverage_precheck(retained, policy, solved_camera)
+    condition = _camera_observability(fit.jac, len(camera0))
+    return solved_camera, rotations, retained, condition
+
+
+def build_bundle_plan(
+    frames: Sequence[BundleFrame],
+    reference_frame_index: int,
+    *,
+    pair_offsets: Sequence[int] = (1, 2, 4),
+    random_seed: int | None = 0,
+    max_nfev: int = 300,
+    edge_completed: Callable[[], None] | None = None,
+) -> BAAlignmentPlan:
     """Build a robust same-camera geometry plan from collected frames.
 
     Frames contain detected stars rather than source pixels. Integration remaps
@@ -379,7 +537,8 @@ def build_bundle_plan(frames: Sequence[BundleFrame], reference_frame_index: int,
     if not offsets:
         raise ValueError("pair_offsets must contain at least one positive offset")
     ordered = sorted(frames, key=lambda item: item.index)
-    edges, sequence_scale = _build_edges(ordered, offsets, random_seed)
+    edges, sequence_scale = _build_edges(
+        ordered, offsets, random_seed, edge_completed)
     # Pair-scale voting estimates the projection scale needed to establish
     # reliable rotations. Use the same consensus as the shared-camera BA
     # starting point instead of discarding it after edge construction.
@@ -393,72 +552,26 @@ def build_bundle_plan(frames: Sequence[BundleFrame], reference_frame_index: int,
     if len(component) < 2:
         raise BundleAdjustmentError("reference frame has no reliable sequence connection")
     accepted = [edge for edge in accepted if edge.first_index in component and edge.second_index in component]
-    _coverage_precheck(accepted, policy, camera)
-    initial = _initial_rotations(accepted, reference_frame_index, component)
-    variable_indices = [index for index in sorted(component) if index != reference_frame_index]
-    camera0 = _pack_camera_parameters(camera, policy)
-
-    # Optimizer layout: [shared camera parameters, 3D rotation vectors...].
-    # The reference rotation is fixed to identity to remove gauge freedom.
-    x0 = np.concatenate((camera0, *[_rvec_from_rotation(initial[index]) for index in variable_indices]))
-
-    def unpack(values):
-        solved_camera = _camera_from_parameters(camera, policy, values[:len(camera0)])
-        rotations = {reference_frame_index: np.eye(3, dtype=np.float64)}
-        offset = len(camera0)
-        for index in variable_indices:
-            rotations[index] = _rotation_from_rvec(values[offset:offset + 3])
-            offset += 3
-        return solved_camera, rotations
-
-    def residual(values, selected_edges):
-        solved_camera, rotations = unpack(values)
-        values_out = []
-        for edge in selected_edges:
-            first = solved_camera.unproject(edge.first_pts)
-            second = solved_camera.unproject(edge.second_pts)
-            # Convert the first-frame ray through the shared reference system
-            # into the second frame, then compare the two unit directions.
-            predicted = (rotations[edge.second_index] @ rotations[edge.first_index].T @ first.T).T
-            values_out.append(np.cross(predicted, second).reshape(-1))
-        return np.concatenate(values_out)
-
-    # First pass uses every successfully matched edge in the component. Huber
-    # loss limits individual bad pairs before edge-level rejection is possible.
-    initial_residual = residual(x0, accepted)
-    scale = max(float(np.median(np.abs(initial_residual))) * 2.0, 1e-6)
-    fit = least_squares(residual, x0, args=(accepted,), method="trf", loss="huber",
-                        f_scale=scale, max_nfev=max_nfev)
-    if not fit.success or not np.all(np.isfinite(fit.x)):
-        raise BundleAdjustmentError(f"global bundle optimization failed: {fit.message}")
-    solved_camera, rotations = unpack(fit.x)
-
-    # Reject complete edges only when their robust edge statistic is an obvious
-    # outlier.  This prevents one structured correspondence field from steering
-    # the shared camera model.
-    edge_p90 = np.array([np.percentile(_edge_residuals(edge, rotations, solved_camera), 90)
-                         for edge in accepted])
-    median = float(np.median(edge_p90))
-    mad = float(np.median(np.abs(edge_p90 - median))) * 1.4826
-    cutoff = max(median + 3.0 * mad, np.deg2rad(0.15))
-    retained = [edge for edge, p90 in zip(accepted, edge_p90) if p90 <= cutoff]
-    if len(retained) < len(accepted):
-        # Recompute connectivity because removing one edge may detach frames,
-        # then refit all surviving poses and the same shared camera parameters.
-        component = _connected_component(retained, reference_frame_index)
-        retained = [edge for edge in retained if edge.first_index in component and edge.second_index in component]
-        if len(component) < 2:
-            raise BundleAdjustmentError("outlier rejection disconnected the reference frame")
-        variable_indices = [index for index in sorted(component) if index != reference_frame_index]
-        initial = {index: rotations[index] for index in component}
-        x0 = np.concatenate((fit.x[:len(camera0)], *[_rvec_from_rotation(initial[index]) for index in variable_indices]))
-        fit = least_squares(residual, x0, args=(retained,), method="trf", loss="huber",
-                            f_scale=scale, max_nfev=max_nfev)
-        if not fit.success or not np.all(np.isfinite(fit.x)):
-            raise BundleAdjustmentError(f"refined bundle optimization failed: {fit.message}")
-        solved_camera, rotations = unpack(fit.x)
-    _coverage_precheck(retained, policy, solved_camera)
-    condition = _camera_observability(fit.jac, len(camera0))
+    solve_mode = "requested"
+    fallback_reason = None
+    solved_policy = policy
+    try:
+        solved_camera, rotations, retained, condition = (
+            _solve_bundle_parameters(
+                accepted, reference_frame_index, component, camera, policy,
+                max_nfev))
+    except BundleAdjustmentError as exc:
+        can_fallback = (
+            policy.optimize_distortion or policy.optimize_principal_point)
+        if not can_fallback:
+            raise
+        fallback_reason = str(exc)
+        solve_mode = "focal_fallback"
+        solved_policy = _FOCAL_FALLBACK_POLICY
+        solved_camera, rotations, retained, condition = (
+            _solve_bundle_parameters(
+                accepted, reference_frame_index, component, camera,
+                solved_policy, max_nfev))
 
     edge_by_frame: dict[int, list[float]] = defaultdict(list)
     for edge in retained:
@@ -488,5 +601,7 @@ def build_bundle_plan(frames: Sequence[BundleFrame], reference_frame_index: int,
         reference_frame_index=reference_frame_index, shared_camera=solved_camera,
         frames=tuple(frame_results), accepted_edge_count=accepted_edge_count,
         rejected_edge_count=rejected_edge_count,
-        active_camera_parameter_count=len(camera0),
-        observability_condition=condition)
+        active_camera_parameter_count=_camera_parameter_count(solved_policy),
+        observability_condition=condition,
+        camera_solve_mode=solve_mode,
+        camera_fallback_reason=fallback_reason)

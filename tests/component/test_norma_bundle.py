@@ -12,8 +12,10 @@ from hoshicore.component.norma.bundle import (
     FrameAlignmentStatus,
     _BundleEdge,
     _build_edges,
+    _camera_parameter_bounds,
     _camera_observability,
     _make_edge,
+    _solve_bundle_parameters,
     build_bundle_plan,
 )
 from hoshicore.component.norma.detection import DetectedStars
@@ -39,6 +41,83 @@ def test_observability_eliminates_pose_nuisance_columns():
     assert condition == pytest.approx(1.0)
     with pytest.raises(BundleAdjustmentError, match="rank deficient"):
         _camera_observability(np.array([[1.0, 1.0], [2.0, 2.0]]), 1)
+
+
+def test_camera_parameter_bounds_limit_focal_and_distortion():
+    policy = CameraOptimizationPolicy(True, True, False, 4)
+    lower, upper = _camera_parameter_bounds(policy)
+    np.testing.assert_allclose(lower, [-0.3, -1.0, -1.0, -1.0, -1.0])
+    np.testing.assert_allclose(upper, [0.3, 1.0, 1.0, 1.0, 1.0])
+
+
+def test_bundle_solver_applies_camera_bounds_and_leaves_poses_unbounded(
+        monkeypatch):
+    camera = _camera()
+    policy = CameraOptimizationPolicy(True, True, False, 4)
+    points = np.tile(
+        np.array([[0.0, 0.0], [119.0, 0.0],
+                  [0.0, 79.0], [119.0, 79.0]]), (6, 1))
+    edge = _BundleEdge(
+        0, 1, points, points.copy(), np.eye(3))
+    captured = {}
+
+    def fake_least_squares(fun, x0, *, args, bounds, **kwargs):
+        captured["lower"], captured["upper"] = bounds
+        return SimpleNamespace(
+            success=True, x=x0, active_mask=np.zeros_like(x0),
+            message="ok", jac=np.ones((72, len(x0))))
+
+    monkeypatch.setattr(bundle_module, "least_squares", fake_least_squares)
+    monkeypatch.setattr(bundle_module, "_camera_observability",
+                        lambda jacobian, camera_width: 1.0)
+    _solve_bundle_parameters(
+        [edge], 0, {0, 1}, camera, policy, max_nfev=10)
+
+    np.testing.assert_allclose(
+        captured["lower"][:5], [-0.3, -1.0, -1.0, -1.0, -1.0])
+    np.testing.assert_allclose(
+        captured["upper"][:5], [0.3, 1.0, 1.0, 1.0, 1.0])
+    assert np.all(np.isneginf(captured["lower"][5:]))
+    assert np.all(np.isposinf(captured["upper"][5:]))
+
+
+def test_bundle_falls_back_to_focal_only_without_rebuilding_edges(monkeypatch):
+    camera = _camera()
+    requested = CameraOptimizationPolicy(True, True, False, 4)
+    candidate = AlignmentCameraCandidate(camera, requested, "manual")
+    stars = DetectedStars(np.empty((0, 2)), np.empty(0))
+    frames = [BundleFrame(index, stars, candidate) for index in range(2)]
+    edge_calls = []
+
+    def fake_edge(first, second, random_seed, bootstrap_scales):
+        edge_calls.append((first.index, second.index))
+        return _BundleEdge(
+            first.index, second.index,
+            np.zeros((6, 2)), np.zeros((6, 2)), np.eye(3))
+
+    solve_policies = []
+
+    def fake_solve(edges, reference_index, component, initial_camera,
+                   policy, max_nfev):
+        solve_policies.append(policy)
+        if len(solve_policies) == 1:
+            raise BundleAdjustmentError("shared camera parameters are rank deficient")
+        return (initial_camera,
+                {0: np.eye(3), 1: np.eye(3)}, list(edges), 1.0)
+
+    monkeypatch.setattr(bundle_module, "_make_edge", fake_edge)
+    monkeypatch.setattr(bundle_module, "_solve_bundle_parameters", fake_solve)
+    plan = build_bundle_plan(frames, 0, pair_offsets=(1,))
+
+    assert edge_calls == [(0, 1)]
+    assert solve_policies == [
+        requested,
+        CameraOptimizationPolicy(True, False, False, 0),
+    ]
+    assert plan.camera_solve_mode == "focal_fallback"
+    assert plan.camera_fallback_reason == (
+        "shared camera parameters are rank deficient")
+    assert plan.active_camera_parameter_count == 1
 
 
 def test_plan_frame_access():
@@ -113,8 +192,12 @@ def test_bundle_scale_votes_reuse_preferred_and_fall_back(monkeypatch):
                            np.eye(3), selected_scale=selected)
 
     monkeypatch.setattr(bundle_module, "_make_edge", fake_edge)
-    edges, sequence_scale = _build_edges(frames, (1,), random_seed=0)
+    completed = []
+    edges, sequence_scale = _build_edges(
+        frames, (1,), random_seed=0,
+        edge_completed=lambda: completed.append(True))
     assert len(edges) == 5
+    assert len(completed) == 5
     assert sequence_scale == pytest.approx(0.7)
     assert calls == [
         (0, (1.0, 0.7, 1.3)),

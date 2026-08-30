@@ -1,4 +1,5 @@
 """Sequence-wide bundle adjustment and BA-plan consumers."""
+import asyncio
 import dataclasses
 from collections import Counter
 from typing import Any, Optional
@@ -269,9 +270,17 @@ class BundleAdjustmentOp(BaseOp):
         if configs.get("method", "distortion") != "distortion":
             raise ValueError(
                 "BundleAdjustmentOp supports camera-model distortion mode only")
+        pair_offsets = tuple(sorted({
+            int(value) for value in
+            configs.get("pair_offsets") or (1, 2, 4)
+            if int(value) > 0
+        }))
         if self.length is not None:
+            edge_count = sum(
+                max(self.length - offset, 0) for offset in pair_offsets)
             self.tracker.create_bar(
-                self.name, self.length, desc=self.display_name)
+                self.name, self.length + edge_count + 1,
+                desc=self.display_name)
         exifs_active = self.inputs["exifs"].active
         focal_length = configs.get("focal_length_mm")
         focal_equiv = (float(focal_length) * float(configs.get("crop_factor") or 1.0)
@@ -329,18 +338,31 @@ class BundleAdjustmentOp(BaseOp):
         frames = [BundleFrame(index=index, stars=stars,
                               candidate=shared_candidate)
                   for index, stars, _, _ in observations]
+        edge_completed = None
+        if self.length is not None:
+            loop = asyncio.get_running_loop()
+
+            def report_edge_completed() -> None:
+                loop.call_soon_threadsafe(
+                    self.tracker.update, self.name)
+
+            edge_completed = report_edge_completed
         try:
             plan = await self._run_cpu(
                 build_bundle_plan, frames,
                 reference_frame_index=reference_index,
-                pair_offsets=tuple(
-                    int(value) for value in
-                    configs.get("pair_offsets") or (1, 2, 4)),
-                random_seed=configs.get("random_seed", 0))
+                pair_offsets=pair_offsets,
+                random_seed=configs.get("random_seed", 0),
+                edge_completed=edge_completed)
         except BundleAdjustmentError:
             raise
         except Exception as exc:
             raise BundleAdjustmentError(f"sequence BA failed: {exc}") from exc
+        if self.length is not None:
+            # Drain edge callbacks scheduled from the worker thread before
+            # completing the one-step optimization phase.
+            await asyncio.sleep(0)
+            self.tracker.update(self.name)
         await self._broadcast_outputs({"alignment_plan": plan})
         if self.length is not None:
             self.tracker.close_bar(self.name)
