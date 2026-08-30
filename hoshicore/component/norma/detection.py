@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
+from scipy.spatial import cKDTree
 
 from hoshicore._custom_op import median_filter_2d, wavelet_dec_rec
 from hoshicore._custom_op._dispatch import (CustomOpResourceExhaustedError,
@@ -17,6 +18,9 @@ from hoshicore._custom_op.ops.detection import (
 MIN_STAR_AREA = 10
 STAR_FILTER_PERCENTILE = 10
 FULL_GPU_COMPONENT_FILTER_PERCENTILE = 22.5
+NATIVE_CONTOUR_MISMATCH_RATIO = 0.001
+NATIVE_CONTOUR_MIN_MISMATCH_BUDGET = 5
+NATIVE_CONTOUR_MAX_DISTANCE_PX = 1.0
 
 
 @dataclasses.dataclass
@@ -323,18 +327,46 @@ def _measure_native_hybrid_contour_candidates(
 
     ellipses = [cv2.fitEllipse(contour) for contour in contours]
     positions = np.asarray([ellipse[0] for ellipse in ellipses])
-    if len(component_positions) < len(positions):
+    if len(component_positions) == 0:
         raise _NativeHybridGeometryMismatch(
-            "Native detector returned fewer components than contours")
-    distances = np.linalg.norm(
-        positions[:, None, :] - component_positions[None, :, :], axis=2)
-    component_indices = np.argmin(distances, axis=1)
-    nearest_distances = distances[
-        np.arange(len(positions)), component_indices]
-    if (len(np.unique(component_indices)) != len(component_indices)
-            or np.any(nearest_distances > 1.0)):
+            "Native detector returned no components for detected contours")
+
+    nearest_distances, component_indices = cKDTree(component_positions).query(
+        positions, k=1)
+    component_counts = np.bincount(
+        component_indices, minlength=len(component_positions))
+    count_difference = abs(len(component_positions) - len(positions))
+    duplicate_count = int(np.maximum(component_counts - 1, 0).sum())
+    distant = nearest_distances > NATIVE_CONTOUR_MAX_DISTANCE_PX
+    distant_count = int(np.count_nonzero(distant))
+    mismatch_budget = max(
+        NATIVE_CONTOUR_MIN_MISMATCH_BUDGET,
+        int(np.ceil(NATIVE_CONTOUR_MISMATCH_RATIO * len(positions))),
+    )
+    if (count_difference > mismatch_budget
+            or duplicate_count > mismatch_budget
+            or distant_count > mismatch_budget):
         raise _NativeHybridGeometryMismatch(
-            "Native components cannot be mapped one-to-one to contours")
+            "Native/contour mapping exceeds tolerance "
+            f"(count_difference={count_difference}, "
+            f"duplicate_count={duplicate_count}, "
+            f"distant_count={distant_count}, budget={mismatch_budget})")
+
+    if count_difference or duplicate_count or distant_count:
+        logger.debug(
+            "Native/contour mapping accepted within tolerance: "
+            "count_difference={} duplicate_count={} distant_count={} budget={}",
+            count_difference,
+            duplicate_count,
+            distant_count,
+            mismatch_budget,
+        )
+
+    # Within the small mismatch budget, preserve the nearest component's
+    # intensity. Dropping or down-weighting these rare candidates changes the
+    # percentile filter, while the full contour path produces the same values
+    # for candidates that survive it. Larger mismatches still reject the whole
+    # native result above.
 
     areas = np.asarray([
         cv2.contourArea(contour) + 0.5 * len(contour)

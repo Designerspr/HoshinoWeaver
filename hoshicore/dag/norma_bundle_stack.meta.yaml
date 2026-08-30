@@ -101,10 +101,10 @@ nodes:
       mask: load_mask.result
     outputs: { result: { type: image } }
 
-  ba_sky_mask:
+  remap_sky_mask:
     op: ApplyMaskOp
     inputs:
-      image: ba_data_loader.result
+      image: remap_data_loader.result
     configs:
       mask: load_mask.result
     outputs: { result: { type: sequence } }
@@ -112,7 +112,7 @@ nodes:
   bundle_adjust:
     op: BundleAdjustmentOp
     inputs:
-      data: ba_sky_mask.result
+      data: ba_data_loader.result
       exifs: ba_exif_loader.result
     configs:
       reference_frame_index: configs.reference_frame_index
@@ -145,7 +145,7 @@ nodes:
   bundle_remap:
     op: BundleReferenceRemapOp
     inputs:
-      data: remap_data_loader.result
+      data: remap_sky_mask.result
       exifs: remap_exif_loader.result
     configs:
       alignment_plan: bundle_adjust.alignment_plan
