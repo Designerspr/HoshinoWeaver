@@ -169,6 +169,7 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
     assert captured["kwargs"] == {
         "reference_frame_index": expected_reference,
         "pair_offsets": (1, 2),
+        "max_pairs_per_edge": 512,
         "random_seed": 7,
     }
     assert captured["output"] == {"alignment_plan": "plan"}

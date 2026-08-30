@@ -15,7 +15,9 @@ from hoshicore.component.norma.bundle import (
     _camera_parameter_bounds,
     _camera_observability,
     _make_edge,
+    _sample_edge_pairs,
     _solve_bundle_parameters,
+    _spatial_pair_bins,
     build_bundle_plan,
 )
 from hoshicore.component.norma.detection import DetectedStars
@@ -48,6 +50,35 @@ def test_camera_parameter_bounds_limit_focal_and_distortion():
     lower, upper = _camera_parameter_bounds(policy)
     np.testing.assert_allclose(lower, [-0.3, -1.0, -1.0, -1.0, -1.0])
     np.testing.assert_allclose(upper, [0.3, 1.0, 1.0, 1.0, 1.0])
+
+
+def test_edge_sampling_reserves_spatial_bins_then_caps_deterministically():
+    center = np.array([50.0, 50.0])
+    points = []
+    for normalized_radius in (0.2, 0.6, 1.0):
+        for sector in range(8):
+            angle = (sector + 0.25) * 2.0 * np.pi / 8.0
+            point = center + 50.0 * normalized_radius * np.array([
+                np.cos(angle), np.sin(angle)])
+            points.extend([point, point + 0.01])
+    points = np.asarray(points)
+    edge = _BundleEdge(0, 1, points, points + 1.0, np.eye(3))
+
+    sampled = _sample_edge_pairs(edge, 24, 100, 100, random_seed=7)
+    repeated = _sample_edge_pairs(edge, 24, 100, 100, random_seed=7)
+
+    assert len(sampled.first_pts) == 24
+    assert len(np.unique(_spatial_pair_bins(
+        sampled.first_pts, 100, 100))) == 24
+    np.testing.assert_array_equal(sampled.first_pts, repeated.first_pts)
+    np.testing.assert_array_equal(sampled.second_pts, repeated.second_pts)
+
+
+def test_edge_sampling_can_be_disabled():
+    points = np.arange(40, dtype=np.float64).reshape(20, 2)
+    edge = _BundleEdge(0, 1, points, points, np.eye(3))
+    assert _sample_edge_pairs(edge, None, 100, 100, 0) is edge
+    assert _sample_edge_pairs(edge, 0, 100, 100, 0) is edge
 
 
 def test_bundle_solver_applies_camera_bounds_and_leaves_poses_unbounded(

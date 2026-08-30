@@ -98,6 +98,10 @@ _ROTATION_ONLY_POLICY = CameraOptimizationPolicy(False, False, False, 0)
 _FOCAL_FALLBACK_POLICY = CameraOptimizationPolicy(True, False, False, 0)
 _FOCAL_SCALE_DELTA_LIMIT = 0.3
 _DISTORTION_ABS_LIMIT = 1.0
+_DEFAULT_MAX_PAIRS_PER_EDGE = 512
+_SPATIAL_RADIAL_BINS = 3
+_SPATIAL_SECTORS = 8
+_SPATIAL_BIN_RESERVE = 2
 
 
 def _camera_parameter_count(policy: CameraOptimizationPolicy) -> int:
@@ -307,6 +311,64 @@ def _make_edge(first: BundleFrame, second: BundleFrame,
                            np.eye(3), str(exc))
 
 
+def _spatial_pair_bins(points: NDArray[np.float64], width: int,
+                       height: int) -> NDArray[np.int32]:
+    """Assign reference points to 3 radial by 8 angular image bins."""
+    center = np.array([width / 2.0, height / 2.0])
+    scale = np.array([width / 2.0, height / 2.0])
+    normalized = (points - center) / scale
+    radius = np.linalg.norm(normalized, axis=1) / np.sqrt(2.0)
+    radial = np.minimum(
+        (radius * _SPATIAL_RADIAL_BINS).astype(np.int32),
+        _SPATIAL_RADIAL_BINS - 1)
+    angle = (np.arctan2(normalized[:, 1], normalized[:, 0])
+             + 2.0 * np.pi) % (2.0 * np.pi)
+    sector = np.minimum(
+        (angle * _SPATIAL_SECTORS / (2.0 * np.pi)).astype(np.int32),
+        _SPATIAL_SECTORS - 1)
+    return radial * _SPATIAL_SECTORS + sector
+
+
+def _sample_edge_pairs(edge: _BundleEdge, max_pairs: int | None,
+                       width: int, height: int,
+                       random_seed: int | None) -> _BundleEdge:
+    """Keep sparse-bin coverage, then sample the remainder without reweighting.
+
+    At most two points are reserved from every non-empty spatial bin. Remaining
+    slots are drawn uniformly from all other inliers, so the sample mostly
+    preserves the full match distribution instead of equalizing every bin.
+    """
+    if max_pairs is None or max_pairs <= 0 or len(edge.first_pts) <= max_pairs:
+        return edge
+    rng = np.random.default_rng(random_seed)
+    bins = _spatial_pair_bins(edge.first_pts, width, height)
+    bin_order = np.unique(bins)
+    rng.shuffle(bin_order)
+    groups: dict[int, NDArray[np.intp]] = {}
+    for bin_index in bin_order:
+        indices = np.flatnonzero(bins == bin_index)
+        rng.shuffle(indices)
+        groups[int(bin_index)] = indices
+
+    reserved: list[int] = []
+    for reserve_round in range(_SPATIAL_BIN_RESERVE):
+        for bin_index in bin_order:
+            group = groups[int(bin_index)]
+            if reserve_round < len(group):
+                reserved.append(int(group[reserve_round]))
+
+    selected_mask = np.zeros(len(edge.first_pts), dtype=bool)
+    selected_mask[reserved] = True
+    remaining = np.flatnonzero(~selected_mask)
+    rng.shuffle(remaining)
+    order = np.concatenate((
+        np.asarray(reserved, dtype=np.intp), remaining.astype(np.intp)))
+    chosen = order[:max_pairs]
+    return dataclasses.replace(
+        edge, first_pts=edge.first_pts[chosen],
+        second_pts=edge.second_pts[chosen])
+
+
 def _ordered_scales(votes: dict[float, int]) -> tuple[float, ...]:
     """Try the most reliable sequence scale first; prefer 1.0 on ties."""
     original_order = {scale: index for index, scale in enumerate(votes)}
@@ -337,6 +399,7 @@ def _build_edges(
     offsets: Sequence[int],
     random_seed: int | None,
     edge_completed: Callable[[], None] | None = None,
+    max_pairs_per_edge: int | None = _DEFAULT_MAX_PAIRS_PER_EDGE,
 ) -> tuple[list[_BundleEdge], float]:
     """Build edges with a short full-search probe, then preferred-scale reuse.
 
@@ -367,6 +430,16 @@ def _build_edges(
                                       ordered_scales[1:])
                     if edge.error is None:
                         _vote_for_scale(votes, edge.selected_scale)
+            if edge.error is None:
+                camera = first.candidate.camera
+                sample_seed = (None if random_seed is None else
+                               (int(random_seed) + first.index * 1009
+                                + second.index * 9176) % (2 ** 32))
+                edge = _sample_edge_pairs(
+                    edge, max_pairs_per_edge,
+                    camera.intrinsics.image_width_px,
+                    camera.intrinsics.image_height_px,
+                    sample_seed)
             edges.append(edge)
             if edge_completed is not None:
                 edge_completed()
@@ -505,6 +578,7 @@ def build_bundle_plan(
     pair_offsets: Sequence[int] = (1, 2, 4),
     random_seed: int | None = 0,
     max_nfev: int = 300,
+    max_pairs_per_edge: int | None = _DEFAULT_MAX_PAIRS_PER_EDGE,
     edge_completed: Callable[[], None] | None = None,
 ) -> BAAlignmentPlan:
     """Build a robust same-camera geometry plan from collected frames.
@@ -538,7 +612,8 @@ def build_bundle_plan(
         raise ValueError("pair_offsets must contain at least one positive offset")
     ordered = sorted(frames, key=lambda item: item.index)
     edges, sequence_scale = _build_edges(
-        ordered, offsets, random_seed, edge_completed)
+        ordered, offsets, random_seed, edge_completed,
+        max_pairs_per_edge=max_pairs_per_edge)
     # Pair-scale voting estimates the projection scale needed to establish
     # reliable rotations. Use the same consensus as the shared-camera BA
     # starting point instead of discarding it after edge construction.

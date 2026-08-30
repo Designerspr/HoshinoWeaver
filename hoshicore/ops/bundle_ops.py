@@ -251,6 +251,7 @@ class BundleAdjustmentOp(BaseOp):
         "optimize_distortion": {"type": "bool", "default": None},
         "optimize_principal_point": {"type": "bool", "default": None},
         "pair_offsets": {"type": "list", "default": [1, 2, 4]},
+        "max_pairs_per_edge": {"type": "int", "default": 512},
         "random_seed": {"type": "int", "default": 0},
     }
     OUTPUTS: dict[str, Any] = {
@@ -348,10 +349,16 @@ class BundleAdjustmentOp(BaseOp):
 
             edge_completed = report_edge_completed
         try:
+            configured_max_pairs = configs.get("max_pairs_per_edge", 512)
+            max_pairs_per_edge = (
+                None if configured_max_pairs is None
+                or int(configured_max_pairs) <= 0
+                else int(configured_max_pairs))
             plan = await self._run_cpu(
                 build_bundle_plan, frames,
                 reference_frame_index=reference_index,
                 pair_offsets=pair_offsets,
+                max_pairs_per_edge=max_pairs_per_edge,
                 random_seed=configs.get("random_seed", 0),
                 edge_completed=edge_completed)
         except BundleAdjustmentError:
