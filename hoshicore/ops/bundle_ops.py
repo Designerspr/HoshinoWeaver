@@ -4,6 +4,7 @@ import dataclasses
 from collections import Counter
 from typing import Any, Optional
 
+import cv2
 import numpy as np
 
 from .._custom_op import median_reduce_chunk, sigma_clip_fused_chunk
@@ -225,6 +226,34 @@ def _sigma_clip_bundle_window(
     return np.rint(mean).clip(0, np.iinfo(stack.dtype).max).astype(stack.dtype)
 
 
+def _prepare_detection_mask(mask: Any,
+                            image_shape: tuple[int, ...]) -> np.ndarray:
+    """Convert a static workflow mask to a binary detector-sized mask."""
+    array = mask.data if isinstance(mask, FloatImage) else np.asarray(mask)
+    if array.ndim == 3:
+        if array.shape[2] not in (1, 3, 4):
+            raise ValueError("BA detection mask must have 1, 3, or 4 channels")
+        array = array[..., 0]
+    if array.ndim != 2:
+        raise ValueError("BA detection mask must be a 2D image")
+
+    if np.issubdtype(array.dtype, np.bool_):
+        binary = array
+    elif np.issubdtype(array.dtype, np.integer):
+        binary = array > (np.iinfo(array.dtype).max * 0.5)
+    else:
+        binary = array > 0.5
+
+    target_shape = image_shape[:2]
+    if binary.shape != target_shape:
+        binary = cv2.resize(
+            binary.astype(np.uint8),
+            (target_shape[1], target_shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+    return np.ascontiguousarray(binary, dtype=bool)
+
+
 @register_op()
 class BundleAdjustmentOp(BaseOp):
     """Collect a same-camera sequence and emit its geometry-only BA plan.
@@ -240,6 +269,7 @@ class BundleAdjustmentOp(BaseOp):
         "exifs": {"type": "sequence", "required": False},
     }
     CONFIGS: dict[str, Any] = {
+        "mask": {"type": "image", "default": None},
         "reference_frame_index": {"type": "int", "default": None},
         "method": {"type": "str", "default": "distortion"},
         "lens_type": {"type": "str", "default": None},
@@ -288,6 +318,9 @@ class BundleAdjustmentOp(BaseOp):
                        if focal_length is not None else None)
         fallback = float(configs.get("fallback_focal_equiv_mm", 20.0))
         configured_reference = configs.get("reference_frame_index")
+        configured_mask = configs.get("mask")
+        detection_mask = None
+        detection_mask_shape = None
         observations = []
         for index in self._input_range():
             data = self._async_convert_inputs()
@@ -303,8 +336,13 @@ class BundleAdjustmentOp(BaseOp):
                     raise ValueError("data/exifs sequences have different lengths") from exc
             array = image.data if isinstance(image, FloatImage) else image
             tags = exif_obj.exif if exif_obj is not None else None
+            if (configured_mask is not None
+                    and detection_mask_shape != array.shape[:2]):
+                detection_mask = _prepare_detection_mask(
+                    configured_mask, array.shape)
+                detection_mask_shape = array.shape[:2]
             detection = await self._run_cpu(
-                StarDetectionCache.from_image, array)
+                StarDetectionCache.from_image, array, detection_mask)
             stars = await self._run_cpu(lambda: detection.pywt_stars)
             observations.append((index, stars, array.shape, tags))
             self.tracker.update(self.name)

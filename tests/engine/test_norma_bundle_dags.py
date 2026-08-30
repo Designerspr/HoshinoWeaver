@@ -48,7 +48,9 @@ def test_bundle_reference_stack_keeps_ground_outside_remap_path():
     spec = _load_yaml(str(_DAG_DIR / "norma_bundle_stack.meta.yaml"))
 
     assert spec["nodes"]["bundle_adjust"]["inputs"]["data"] == (
-        "ba_sky_mask.result")
+        "ba_data_loader.result")
+    assert spec["nodes"]["bundle_adjust"]["configs"]["mask"] == (
+        "load_mask.result")
     assert spec["nodes"]["sky_stacker"]["inputs"]["data"] == (
         "bundle_remap.result")
     assert spec["nodes"]["ground_stacker"]["inputs"]["data"] == (

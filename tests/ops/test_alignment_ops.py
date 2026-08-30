@@ -123,6 +123,7 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
 
     shared_candidate = object()
     candidate_calls = []
+    detection_masks = []
 
     def build_candidate(tags, shape, method, distortion, focal, policy):
         candidate_calls.append((tags, shape, method, distortion, focal, policy))
@@ -145,7 +146,9 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
     monkeypatch.setattr(op, "_broadcast_outputs", broadcast)
     monkeypatch.setattr(
         bundle_ops.StarDetectionCache, "from_image",
-        staticmethod(lambda image: SimpleNamespace(pywt_stars=object())))
+        staticmethod(lambda image, mask: (
+            detection_masks.append(mask)
+            or SimpleNamespace(pywt_stars=object()))))
     monkeypatch.setattr(bundle_ops, "build_camera_candidate", build_candidate)
     monkeypatch.setattr(bundle_ops, "build_bundle_plan", build_plan)
 
@@ -156,6 +159,7 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
         "fallback_focal_equiv_mm": 20.0,
         "pair_offsets": [1, 2],
         "random_seed": 7,
+        "mask": np.ones((4, 6, 3), dtype=np.float32),
     }
     if configured_reference is not None:
         configs["reference_frame_index"] = configured_reference
@@ -164,6 +168,9 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
     assert len(candidate_calls) == 1
     assert candidate_calls[0][0] == {"frame": expected_reference}
     assert all(frame.candidate is shared_candidate for frame in captured["frames"])
+    assert len(detection_masks) == 4
+    assert all(mask.shape == (8, 12) and mask.dtype == np.bool_
+               and np.all(mask) for mask in detection_masks)
     edge_completed = captured["kwargs"].pop("edge_completed")
     assert callable(edge_completed)
     assert captured["kwargs"] == {

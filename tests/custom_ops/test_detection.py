@@ -684,14 +684,17 @@ class TestStarDetectCustomOps(unittest.TestCase):
 
     def test_cuda_hybrid_contour_mapping_rejects_excessive_mismatch(self) -> None:
         binary_mask = np.zeros((64, 64), dtype=np.uint8)
-        for position in ((10, 10), (10, 50), (50, 10), (50, 50)):
+        for position in (
+            (8, 8), (8, 32), (8, 56), (32, 8),
+            (32, 32), (32, 56), (56, 8), (56, 32),
+        ):
             cv2.circle(binary_mask, position, 4, 255, -1)
 
         with self.assertRaisesRegex(
                 star_detection._CudaHybridGeometryMismatch,
                 "exceeds tolerance"):
             star_detection._measure_cuda_hybrid_contour_candidates(
-                np.array([[10.0, 10.0]], dtype=np.float64),
+                np.array([[8.0, 8.0]], dtype=np.float64),
                 np.array([3.0], dtype=np.float64),
                 binary_mask,
             )

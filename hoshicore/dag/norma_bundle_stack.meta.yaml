@@ -115,6 +115,7 @@ nodes:
       data: ba_data_loader.result
       exifs: ba_exif_loader.result
     configs:
+      mask: load_mask.result
       reference_frame_index: configs.reference_frame_index
       lens_type: configs.lens_type
       distortion: configs.distortion
