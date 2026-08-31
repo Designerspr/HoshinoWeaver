@@ -1,0 +1,228 @@
+description: "Norma bundle-aligned sliding-window image sequence"
+version: "2"
+
+inputs:
+  fnames: { type: sequence, required: true }
+
+routes:
+  window_stacker:
+    options:
+      mean:       BundleWindowMeanStackOp
+      max:        BundleWindowMaxStackOp
+      median:     BundleWindowMedianStackOp
+      sigma_clip: BundleWindowSigmaClipStackOp
+    default: mean
+  ground_window_stacker:
+    options:
+      mean:       BundleWindowMeanStackOp
+      max:        BundleWindowMaxStackOp
+      median:     BundleWindowMedianStackOp
+      sigma_clip: BundleWindowSigmaClipStackOp
+    default: mean
+
+route_configs:
+  window_stacker:
+    sigma_clip:
+      rej_high: { type: float, default: 3.0 }
+      rej_low:  { type: float, default: 3.0 }
+      max_iter: { type: int, default: 5 }
+  ground_window_stacker:
+    sigma_clip:
+      rej_high: { type: float, default: 3.0 }
+      rej_low:  { type: float, default: 3.0 }
+      max_iter: { type: int, default: 5 }
+
+configs:
+  loader_type:              { type: str, default: "img_file_list" }
+  loader_configs:           { type: dict, default: {} }
+  reference_frame_index:    { type: int, default: null }
+  lens_type:                { type: str, default: null }
+  distortion:               { type: list, default: null }
+  focal_length_mm:          { type: float, default: null }
+  crop_factor:              { type: float, default: 1.0 }
+  fallback_focal_equiv_mm:  { type: float, default: 20.0 }
+  optimize_focal:           { type: bool, default: true }
+  optimize_distortion:      { type: bool, default: true }
+  optimize_principal_point: { type: bool, default: null }
+  pair_offsets:             { type: list, default: [1, 2, 4] }
+  max_pairs_per_edge:       { type: int, default: 512 }
+  random_seed:              { type: int, default: 0 }
+  window_size:              { type: int, default: 5 }
+  min_contributors:         { type: int, default: 2 }
+  ground_window_size:       { type: int, default: 5 }
+  ground_min_contributors:  { type: int, default: 1 }
+  remap_map_scale:          { type: float, default: 0.5 }
+  mask:                     { type: str, default: null }
+  enable_ground:            { type: bool, default: true }
+  output_dir:               { type: str, required: true }
+  output_template:          { type: str, default: "frame_{index:05d}.png" }
+  output_dtype:             { type: str, default: "uint16" }
+  jpg_quality:              { type: int, default: 85 }
+  png_compressing:          { type: int, default: 7 }
+
+nodes:
+  ba_data_loader:
+    op: ImgDataLoaderOp
+    inputs: { src: inputs.fnames }
+    configs:
+      loader_type: configs.loader_type
+      configs: configs.loader_configs
+    outputs: { result: { type: sequence } }
+
+  ba_exif_loader:
+    op: ExifReadOp
+    inputs: { fnames: inputs.fnames }
+    outputs: { result: { type: sequence } }
+
+  load_mask:
+    op: LoadMaskImageOp
+    configs:
+      path: configs.mask
+    outputs: { result: { type: image } }
+
+  mask_invert:
+    op: MaskInvertOp
+    configs:
+      mask: load_mask.result
+    outputs: { result: { type: image } }
+
+  bundle_adjust:
+    op: BundleAdjustmentOp
+    inputs:
+      data: ba_data_loader.result
+      exifs: ba_exif_loader.result
+    configs:
+      mask: load_mask.result
+      reference_frame_index: configs.reference_frame_index
+      lens_type: configs.lens_type
+      distortion: configs.distortion
+      focal_length_mm: configs.focal_length_mm
+      crop_factor: configs.crop_factor
+      fallback_focal_equiv_mm: configs.fallback_focal_equiv_mm
+      optimize_focal: configs.optimize_focal
+      optimize_distortion: configs.optimize_distortion
+      optimize_principal_point: configs.optimize_principal_point
+      pair_offsets: configs.pair_offsets
+      max_pairs_per_edge: configs.max_pairs_per_edge
+      random_seed: configs.random_seed
+    outputs: { alignment_plan: { type: object } }
+
+  window_data_loader:
+    op: ImgDataLoaderOp
+    inputs: { src: inputs.fnames }
+    configs:
+      loader_type: configs.loader_type
+      configs: configs.loader_configs
+    outputs: { result: { type: sequence } }
+
+  window_exif_loader:
+    op: ExifReadOp
+    inputs: { fnames: inputs.fnames }
+    outputs: { result: { type: sequence } }
+
+  window_stack:
+    route_key: window_stacker
+    inputs:
+      data: window_data_loader.result
+      exifs: window_exif_loader.result
+    route_configs:
+      mean:
+        alignment_plan: bundle_adjust.alignment_plan
+        window_size: configs.window_size
+        min_contributors: configs.min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: load_mask.result
+      max:
+        alignment_plan: bundle_adjust.alignment_plan
+        window_size: configs.window_size
+        min_contributors: configs.min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: load_mask.result
+      median:
+        alignment_plan: bundle_adjust.alignment_plan
+        window_size: configs.window_size
+        min_contributors: configs.min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: load_mask.result
+      sigma_clip:
+        alignment_plan: bundle_adjust.alignment_plan
+        window_size: configs.window_size
+        min_contributors: configs.min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: load_mask.result
+    outputs:
+      result: { type: sequence }
+      window_report: { type: object }
+
+  ground_window_stack:
+    enable: configs.enable_ground
+    route_key: ground_window_stacker
+    inputs:
+      data: window_data_loader.result
+    route_configs:
+      mean:
+        window_size: configs.ground_window_size
+        min_contributors: configs.ground_min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: mask_invert.result
+      max:
+        window_size: configs.ground_window_size
+        min_contributors: configs.ground_min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: mask_invert.result
+      median:
+        window_size: configs.ground_window_size
+        min_contributors: configs.ground_min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: mask_invert.result
+      sigma_clip:
+        window_size: configs.ground_window_size
+        min_contributors: configs.ground_min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: mask_invert.result
+    outputs:
+      result: { type: sequence }
+
+  window_blend:
+    op: WindowFrameMaskedBlendOp
+    inputs:
+      sky: window_stack.result
+      ground: ground_window_stack.result
+    configs:
+      mask: load_mask.result
+    outputs:
+      result: { type: sequence }
+
+  window_filter:
+    op: WindowFrameFilterGateOp
+    inputs:
+      data: window_blend.result
+    outputs:
+      result: { type: sequence }
+      aligned_exifs: { type: sequence }
+      center_indices: { type: sequence }
+
+  batch_saver:
+    op: BatchImageSaveOp
+    inputs:
+      data: window_filter.result
+      frame_indices: window_filter.center_indices
+      exifs: window_filter.aligned_exifs
+    configs:
+      output_dir: configs.output_dir
+      output_template: configs.output_template
+      output_dtype: configs.output_dtype
+      jpg_quality: configs.jpg_quality
+      png_compressing: configs.png_compressing
+    outputs: { result: { type: sequence } }
+
+  report_display:
+    op: BundleWindowReportDisplayOp
+    configs:
+      alignment_plan: bundle_adjust.alignment_plan
+      window_report: window_stack.window_report
+    outputs: { summary: { type: str } }
+
+outputs:
+  result: batch_saver.result
+  summary: report_display.summary

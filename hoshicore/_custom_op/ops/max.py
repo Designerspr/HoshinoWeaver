@@ -10,13 +10,12 @@ import numpy as np
 from hoshicore._custom_op import thread_tuning as _thread_tuning
 from hoshicore._custom_op._dispatch import \
     apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import \
-    compiled_build_info as _compiled_build_info
 from hoshicore._custom_op._dispatch import debug_enabled as _debug_enabled
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
+from hoshicore._custom_op.ops.fgp import _validate_scalar_weight
 
 
 _debug_log = partial(debug_log, "max")
@@ -67,18 +66,6 @@ def _validate_threshold_inputs(
     if not std_arr.flags.c_contiguous:
         std_arr = np.ascontiguousarray(std_arr)
     return frame_arr, mean_arr, std_arr, result_arr
-
-
-def _validate_scalar_weight(weight: Any, *, op_name: str) -> float | None:
-    if weight is None:
-        return None
-    if isinstance(weight, np.ndarray):
-        if weight.ndim == 0:
-            return float(weight.item())
-        return None
-    if np.isscalar(weight):
-        return float(weight)
-    raise TypeError(f"{op_name}: unsupported weight type")
 
 
 def max_combine_numpy(base: np.ndarray, fresh: np.ndarray) -> np.ndarray:
@@ -221,10 +208,7 @@ def build_info() -> dict[str, Any]:
 
 
 def max_combine(base: np.ndarray, fresh: np.ndarray) -> np.ndarray:
-    backend_name, backend = _select_max_backend(_fallback_preference())
-    if backend_name == "compiled":
-        base_arr, _ = _validate_pair(base, fresh)
-        _apply_compiled_threads("max_combine", base_arr)
+    _, backend = _select_max_backend(_fallback_preference())
     return backend(base, fresh)
 
 
@@ -246,15 +230,5 @@ def threshold_max_merge(
             n_sigma,
             weight,
         )
-    backend_name, backend = _select_threshold_max_backend(_fallback_preference())
-    if backend_name == "compiled":
-        frame_arr, mean_arr, std_arr, result_arr = _validate_threshold_inputs(
-            frame,
-            mean_img,
-            std_img,
-            result,
-            op_name="threshold_max_merge",
-        )
-        _apply_compiled_threads("threshold_max_merge", frame_arr)
-        return backend(frame_arr, mean_arr, std_arr, result_arr, n_sigma, scalar_weight)
+    _, backend = _select_threshold_max_backend(_fallback_preference())
     return backend(frame, mean_img, std_img, result, n_sigma, scalar_weight)

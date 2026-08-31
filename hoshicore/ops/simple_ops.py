@@ -253,6 +253,62 @@ class CalibrationSubtractOp(ParallelBaseOp):
         return {"result": result}
 
 
+@register_op()
+class CalibrationSubtractImageOp(BaseOp):
+    """单图校准减法：用于 master frame 之间的偏置扣除。
+
+    sequence 输入仍由 CalibrationSubtractOp 处理；这里仅处理 configs 中的单张
+    image，避免把单值图像错误接到 ParallelBaseOp 的 sequence 输入上。
+    """
+
+    EXECUTOR = "cpu"
+    CONFIGS: dict[str, Any] = {
+        "data": {
+            "type": "image",
+            "default": None
+        },
+        "reference": {
+            "type": "image",
+            "default": None
+        },
+    }
+    OUTPUTS: dict[str, Any] = {
+        "result": {
+            "type": "image"
+        },
+    }
+
+    async def _async_execute(self, configs: dict[str, Any]) -> None:
+        frame = configs.get('data')
+        ref = configs.get('reference')
+
+        if frame is None:
+            await self._broadcast_outputs({"result": None})
+            return
+        if ref is None:
+            await self._broadcast_outputs({"result": frame})
+            return
+
+        if isinstance(frame, FloatImage):
+            frame_arr, frame_dtype = frame.data, frame.dtype
+        else:
+            frame_arr, frame_dtype = frame, frame.dtype
+
+        if isinstance(ref, FloatImage):
+            ref_arr, ref_dtype = ref.data, ref.dtype
+        else:
+            ref_arr, ref_dtype = ref, ref.dtype
+
+        result_arr, out_dtype = calibration_subtract(frame_arr, ref_arr,
+                                                     frame_dtype, ref_dtype)
+        if isinstance(frame, FloatImage):
+            result = FloatImage(data=result_arr, dtype=out_dtype)
+        else:
+            result = result_arr
+
+        await self._broadcast_outputs({"result": result})
+
+
 # ── 校准除法 ──
 
 

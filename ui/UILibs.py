@@ -305,6 +305,7 @@ class QtSignalTracker(DummyTracker, QObject):
         DummyTracker.__init__(self)
         self._slots: set[str] = set()
         self._bars: dict[str, dict] = {}
+        self._last_active_name: Optional[str] = None
 
     def pre_register(self, name: str) -> None:
         self._slots.add(name)
@@ -319,6 +320,7 @@ class QtSignalTracker(DummyTracker, QObject):
         bar = self._bars.get(name)
         if bar:
             bar['progress'] = min(bar['progress'] + n, bar['total'])
+            self._last_active_name = name
             self._emit()
 
     def close_bar(self, name):
@@ -327,6 +329,7 @@ class QtSignalTracker(DummyTracker, QObject):
     def close_all(self):
         self._slots.clear()
         self._bars.clear()
+        self._last_active_name = None
         self.finished.emit()
 
     def reset_bar(self, name, total, desc=None):
@@ -339,11 +342,17 @@ class QtSignalTracker(DummyTracker, QObject):
             for b in self._bars.values()
         )
         pct = min(int(done / n * 100), 99)
-        active = next(
-            (f"正在执行：{b['desc']}({int(b['progress'] / b['total'] * 100)}%) | 总进度 {pct}%"
-             for b in self._bars.values() if b['progress'] < b['total']),
-            ""
-        )
+        active_bar = self._bars.get(self._last_active_name)
+        if active_bar is None or active_bar['progress'] >= active_bar['total']:
+            active_bar = next(
+                (bar for bar in self._bars.values()
+                 if bar['progress'] < bar['total']), None)
+        active = ""
+        if active_bar is not None:
+            active_pct = (int(active_bar['progress'] / active_bar['total'] * 100)
+                          if active_bar['total'] > 0 else 0)
+            active = (f"正在执行：{active_bar['desc']}({active_pct}%) | "
+                      f"总进度 {pct}%")
         self.progress_updated.emit(pct, active)
 
 class uQDialog(QDialog):

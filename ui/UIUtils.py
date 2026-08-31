@@ -153,6 +153,7 @@ class SlotHandler(QMainWindow):
         # 设置背景图
         bg_map = {
             '星轨叠加': 'url(:/img/resource/img/皿仓山星轨-s.jpg)',
+            '星轨延时': 'url(:/img/resource/img/皿仓山星轨-s.jpg)',
             '堆栈降噪': 'url(:/img/resource/img/back02.jpg)',
             '星点对齐叠加': 'url(:/img/resource/img/皿仓山星轨-s.jpg)',
         }
@@ -171,6 +172,8 @@ class SlotHandler(QMainWindow):
         self.menu = QMenu(self)
         self.menu.addAction("全局设置").triggered.connect(self.show_global_settings)
         self.menu_show_guide = self.menu.addAction("使用指南")
+        self.menu.addAction("组件检测").triggered.connect(
+            self.show_runtime_capabilities)
         self.menu_show_guide.triggered.connect(self.show_guide_window)
 
         # 将按钮点击与显示菜单绑定
@@ -182,6 +185,12 @@ class SlotHandler(QMainWindow):
     def show_global_settings(self):
         from ui.global_settings_dialog import GlobalSettingsDialog
         dlg = GlobalSettingsDialog(self.window)
+        dlg.exec()
+
+    @Slot()
+    def show_runtime_capabilities(self):
+        from ui.runtime_capabilities_dialog import RuntimeCapabilitiesDialog
+        dlg = RuntimeCapabilitiesDialog(self.window)
         dlg.exec()
 
     @Slot()
@@ -550,7 +559,6 @@ class SlotHandler(QMainWindow):
                 )
                 self.window._task = asyncio.create_task(self.start_task())
 
-    @asyncSlot()
     async def start_task(self):
         # 清空预览
         self.view_file()
@@ -606,6 +614,16 @@ class SlotHandler(QMainWindow):
 
             # 执行成功
             output_path = global_configs.get("output_filename", "")
+            if not output_path:
+                output_dir = global_configs.get("output_dir", "")
+                if output_dir and os.path.isdir(output_dir):
+                    _IMG_EXTS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
+                    frames = sorted(
+                        p for p in Path(output_dir).iterdir()
+                        if p.suffix.lower() in _IMG_EXTS
+                    )
+                    if frames:
+                        output_path = str(frames[-1])
             self.window._preview_useable = True
             self.view_file(output_path)
             self.window._status = 'successed'

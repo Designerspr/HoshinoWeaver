@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 from functools import partial
-from typing import Any, Callable
+from typing import Callable
 
 import numpy as np
 
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import compiled_build_info as _compiled_build_info
-from hoshicore._custom_op._dispatch import debug_enabled as _debug_enabled
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
@@ -78,9 +76,5 @@ def _select_median_backend(
 
 
 def median_reduce_chunk(stack: np.ndarray) -> np.ndarray:
-    backend_name, backend = _select_median_backend(_fallback_preference())
-    if backend_name == "compiled":
-        stack_arr = _validate_stack(stack)
-        _apply_compiled_threads("median_reduce_chunk", stack_arr)
-        return backend(stack_arr)
+    _, backend = _select_median_backend(_fallback_preference())
     return backend(stack)

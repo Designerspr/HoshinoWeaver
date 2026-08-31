@@ -30,6 +30,7 @@ class OutputSpec:
     dtype_options: list[str] | None = None  # workflow-allowed dtypes
     format_params: dict[str, str] = field(
         default_factory=dict)  # preset_param → config_key
+    template_key: str | None = None  # sequence output: config key for filename template
 
 
 @dataclass
@@ -97,6 +98,7 @@ class PanelSchema:
                 formats=entry.get("formats"),
                 dtype_options=entry.get("dtype_options"),
                 format_params=entry.get("format_params", {}) or {},
+                template_key=entry.get("template_key"),
             )
             # Validate format_params keys exist in presets
             for preset_param in spec.format_params:
@@ -468,25 +470,43 @@ class DynamicConfigPanel(QWidget):
     # ── Conditional Visibility ────────────────────────────────────────────
 
     def _register_visibility_dep(self, targets: list[QWidget], condition: dict):
+        dep_keys = self._visibility_dependency_keys(condition)
+        for dep_key in dep_keys:
+            if dep_key not in self._visibility_deps:
+                self._visibility_deps[dep_key] = []
+            self._visibility_deps[dep_key].append((targets, condition))
+            self._config_on_change_hooks.setdefault(dep_key, []).append(
+                lambda k=dep_key: self._evaluate_visibility(k)
+            )
+
+    @staticmethod
+    def _visibility_dependency_keys(condition: dict) -> set[str]:
+        if "all" in condition:
+            return {
+                key
+                for child in condition["all"]
+                for key in DynamicConfigPanel._visibility_dependency_keys(child)
+            }
+        key = condition.get("key", "")
+        return {key} if key else set()
+
+    def _visibility_condition_matches(self, condition: dict) -> bool:
+        if "all" in condition:
+            return all(self._visibility_condition_matches(child)
+                       for child in condition["all"])
         dep_key = condition.get("key", "")
         if not dep_key:
-            return
-        if dep_key not in self._visibility_deps:
-            self._visibility_deps[dep_key] = []
-        self._visibility_deps[dep_key].append((targets, condition))
-        self._config_on_change_hooks.setdefault(dep_key, []).append(
-            lambda k=dep_key: self._evaluate_visibility(k)
-        )
+            return True
+        current_val = self._get_current_value(dep_key)
+        if "eq" in condition:
+            return current_val == condition["eq"]
+        if "neq" in condition:
+            return current_val != condition["neq"]
+        return True
 
     def _evaluate_visibility(self, changed_key: str):
         for targets, cond in self._visibility_deps.get(changed_key, []):
-            current_val = self._get_current_value(changed_key)
-            if "eq" in cond:
-                visible = current_val == cond["eq"]
-            elif "neq" in cond:
-                visible = current_val != cond["neq"]
-            else:
-                visible = True
+            visible = self._visibility_condition_matches(cond)
             for w in targets:
                 w.setVisible(visible)
 

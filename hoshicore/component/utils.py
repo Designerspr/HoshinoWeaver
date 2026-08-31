@@ -33,8 +33,8 @@ ASTRO_SUFFIX = ["fits", "fts"]
 SUPPORT_BITS = [8, 16]
 MAGIC_NUM = 3
 
-VERSION = "1.0.0-rc"
-RELEASE_NAME = "Vega"
+VERSION = "1.1.0"
+RELEASE_NAME = "Lyra"
 ORG_NAME = f"STARLab"
 SOFTWARE_NAME = f"HoshinoWeaver"
 

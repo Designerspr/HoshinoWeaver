@@ -9,12 +9,15 @@ from typing import Any, Callable
 import numpy as np
 
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import compiled_build_info as _compiled_build_info
-from hoshicore._custom_op._dispatch import debug_enabled as _debug_enabled
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
+from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
+from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
+from hoshicore._custom_op.backend_registry import resolve_backend as _resolve_backend
+from hoshicore._custom_op.cuda_memory import cuda_chunk_memory_model
+from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
 
 
 _debug_log = partial(debug_log, "fgp")
@@ -38,21 +41,6 @@ def _validate_target(base: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         raise ValueError("fgp_accumulate: base buffers must be C-contiguous")
     if not sum_mu.flags.writeable or not square_sum.flags.writeable or not count.flags.writeable:
         raise ValueError("fgp_accumulate: base buffers must be writeable")
-    return sum_mu, square_sum, count
-
-
-def _validate_peer(other: Any, shape: tuple[int, ...], *, op_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    sum_mu = np.asarray(other.sum_mu)
-    square_sum = np.asarray(other.square_sum)
-    count = np.asarray(other.n)
-    if sum_mu.shape != shape or square_sum.shape != shape or count.shape != shape:
-        raise ValueError(f"{op_name}: accumulator shape mismatch")
-    if not sum_mu.flags.c_contiguous:
-        sum_mu = np.ascontiguousarray(sum_mu)
-    if not square_sum.flags.c_contiguous:
-        square_sum = np.ascontiguousarray(square_sum)
-    if not count.flags.c_contiguous:
-        count = np.ascontiguousarray(count)
     return sum_mu, square_sum, count
 
 
@@ -133,28 +121,6 @@ def _maybe_prepare_target(base: Any, weight: Any) -> tuple[np.ndarray, np.ndarra
                 base.n = count.astype(DTYPE_UPSCALE_MAP[count.dtype])
                 sum_mu, square_sum, count = _validate_target(base)
         base.max_n = next_max_n
-    return sum_mu, square_sum, count
-
-
-def _maybe_prepare_target_add(base: Any, other: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    sum_mu, square_sum, count = _validate_target(base)
-    other_sum_mu, _, _ = _validate_peer(other, sum_mu.shape, op_name="fgp_add")
-    if getattr(base, "ddof", None) != getattr(other, "ddof", None):
-        raise ValueError("fgp_add: ddof mismatch")
-    if getattr(base, "max_n", None) is not None:
-        delta = int(getattr(other, "max_n", np.max(other.n)))
-        next_max_n = int(base.max_n) + delta
-        if next_max_n > base._safe_add_count():
-            base.upscale()
-            sum_mu, square_sum, count = _validate_target(base)
-        from hoshicore.component.data_container import DTYPE_MAX_VALUE, DTYPE_UPSCALE_MAP
-
-        if count.dtype in DTYPE_MAX_VALUE and next_max_n > DTYPE_MAX_VALUE[count.dtype]:
-            if count.dtype in DTYPE_UPSCALE_MAP:
-                base.n = count.astype(DTYPE_UPSCALE_MAP[count.dtype])
-                sum_mu, square_sum, count = _validate_target(base)
-        base.max_n = next_max_n
-    _validate_peer(other, sum_mu.shape, op_name="fgp_add")
     return sum_mu, square_sum, count
 
 
@@ -301,68 +267,8 @@ def fgp_accumulate(base: Any, fresh: np.ndarray, weight: Any = None,
     int_weight = _validate_integer_weight(weight)
     if weight is not None and int_weight is None:
         return _python_fallback(base, np.asarray(fresh), weight)
-    backend_name, backend = _select_fgp_backend(_fallback_preference())
-    if backend_name == "compiled":
-        sum_mu, _, _ = _validate_target(base)
-        fresh_arr = _validate_fresh(sum_mu, fresh)
-        _apply_compiled_threads("fgp_accumulate", fresh_arr)
+    _, backend = _select_fgp_backend(_fallback_preference())
     return backend(base, fresh, int_weight, skip_zero_rgb=skip_zero_rgb)
-
-
-def fgp_add_numpy(base: Any, other: Any) -> Any:
-    sum_mu, square_sum, count = _maybe_prepare_target_add(base, other)
-    other_sum_mu, other_square_sum, other_n = _validate_peer(
-        other,
-        sum_mu.shape,
-        op_name="fgp_add",
-    )
-    np.add(sum_mu, other_sum_mu, out=sum_mu, casting="unsafe")
-    np.add(square_sum, other_square_sum, out=square_sum, casting="unsafe")
-    np.add(count, other_n, out=count, casting="unsafe")
-    return base
-
-
-def fgp_add_compiled(base: Any, other: Any) -> Any:
-    module, _ = _load_compiled_module_result()
-    if module is None:
-        raise RuntimeError("compiled custom op backend is unavailable")
-    sum_mu, square_sum, count = _maybe_prepare_target_add(base, other)
-    other_sum_mu, other_square_sum, other_n = _validate_peer(
-        other,
-        sum_mu.shape,
-        op_name="fgp_add",
-    )
-    _apply_compiled_threads("fgp_add", sum_mu)
-    module.fgp_add(
-        sum_mu,
-        square_sum,
-        count,
-        other_sum_mu,
-        other_square_sum,
-        other_n,
-    )
-    return base
-
-
-@lru_cache(maxsize=2)
-def _select_fgp_add_backend(preference: str) -> tuple[str, Callable[[Any, Any], Any]]:
-    available, compiled_error = _compiled_backend_available("fgp_add", preference)
-    if available:
-        return "compiled", fgp_add_compiled
-
-    if compiled_error:
-        _debug_log(f"compiled backend unavailable, reason: {compiled_error}")
-
-    return "numpy", fgp_add_numpy
-
-
-def fgp_add(base: Any, other: Any) -> Any:
-    backend_name, backend = _select_fgp_add_backend(_fallback_preference())
-    if backend_name == "compiled":
-        sum_mu, _, _ = _validate_target(base)
-        _validate_peer(other, sum_mu.shape, op_name="fgp_add")
-        _apply_compiled_threads("fgp_add", sum_mu)
-    return backend(base, other)
 
 
 def huber_weighted_accumulate_numpy(
@@ -488,22 +394,186 @@ def huber_weighted_accumulate(
             huber_c,
             weight,
         )
-    backend_name, backend = _select_huber_backend(_fallback_preference())
-    if backend_name == "compiled":
-        weighted_sum, _ = _validate_huber_target(base)
-        fresh_arr = _validate_fresh(
-            weighted_sum,
-            fresh,
-            op_name="huber_weighted_accumulate",
-        )
-        _validate_ref_stats(
-            fresh_arr,
-            ref_mean,
-            ref_std,
-            op_name="huber_weighted_accumulate",
-        )
-        _apply_compiled_threads("huber_weighted_accumulate", fresh_arr)
+    _, backend = _select_huber_backend(_fallback_preference())
     return backend(base, fresh, ref_mean, ref_std, huber_c, scalar_weight)
+
+
+def _validate_huber_chunk_inputs(
+    stack: np.ndarray,
+    ref_mean: np.ndarray,
+    ref_std: np.ndarray,
+    weights: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    stack_arr = np.asarray(stack)
+    if stack_arr.ndim != 2:
+        raise ValueError("huber_weighted_chunk: stack must be 2D (n_frames, plane_size)")
+    if stack_arr.shape[0] <= 0 or stack_arr.shape[1] <= 0:
+        raise ValueError("huber_weighted_chunk: stack dimensions must be positive")
+    if stack_arr.dtype not in (np.uint8, np.uint16):
+        raise ValueError("huber_weighted_chunk: unsupported stack dtype; expected uint8/uint16")
+    if not stack_arr.flags.c_contiguous:
+        stack_arr = np.ascontiguousarray(stack_arr)
+
+    ref_mean_arr = np.asarray(ref_mean, dtype=np.float64)
+    ref_std_arr = np.asarray(ref_std, dtype=np.float64)
+    if ref_mean_arr.shape != (stack_arr.shape[1],) or ref_std_arr.shape != (stack_arr.shape[1],):
+        raise ValueError("huber_weighted_chunk: ref_mean/ref_std must match plane_size")
+    if not ref_mean_arr.flags.c_contiguous:
+        ref_mean_arr = np.ascontiguousarray(ref_mean_arr)
+    if not ref_std_arr.flags.c_contiguous:
+        ref_std_arr = np.ascontiguousarray(ref_std_arr)
+
+    weights_arr = None
+    if weights is not None:
+        weights_arr = np.asarray(weights, dtype=np.float64)
+        if weights_arr.shape != (stack_arr.shape[0],):
+            raise ValueError("huber_weighted_chunk: weights must have shape (n_frames,)")
+        if not weights_arr.flags.c_contiguous:
+            weights_arr = np.ascontiguousarray(weights_arr)
+    return stack_arr, ref_mean_arr, ref_std_arr, weights_arr
+
+
+def huber_weighted_chunk_numpy(
+    stack: np.ndarray,
+    ref_mean: np.ndarray,
+    ref_std: np.ndarray,
+    huber_c: float,
+    weights: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    stack_arr, ref_mean_arr, ref_std_arr, weights_arr = _validate_huber_chunk_inputs(
+        stack, ref_mean, ref_std, weights)
+    values = stack_arr.astype(np.float32, copy=False)
+    residual = (values - ref_mean_arr.astype(np.float32)) / (
+        ref_std_arr.astype(np.float32) + np.float32(1e-10))
+    abs_residual = np.abs(residual)
+    huber_weight = np.where(
+        abs_residual <= np.float32(huber_c),
+        np.ones_like(abs_residual, dtype=np.float32),
+        (np.float32(huber_c) / (abs_residual + np.float32(1e-10))).astype(np.float32),
+    )
+    if weights_arr is not None:
+        final_weight = np.multiply(
+            huber_weight,
+            weights_arr[:, np.newaxis],
+            dtype=np.float64,
+        )
+    else:
+        final_weight = huber_weight
+    weighted_sum = np.sum(
+        np.multiply(stack_arr, final_weight, dtype=np.float64),
+        axis=0,
+        dtype=np.float64,
+    )
+    weight_total = np.sum(final_weight, axis=0, dtype=np.float64)
+    return weighted_sum, weight_total
+
+
+def huber_weighted_chunk_compiled_cuda(
+    stack: np.ndarray,
+    ref_mean: np.ndarray,
+    ref_std: np.ndarray,
+    huber_c: float,
+    weights: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    module, _ = _load_compiled_module_result()
+    if module is None or not hasattr(module, "huber_weighted_chunk_cuda"):
+        raise RuntimeError("compiled CUDA custom op backend is unavailable")
+    stack_arr, ref_mean_arr, ref_std_arr, weights_arr = _validate_huber_chunk_inputs(
+        stack, ref_mean, ref_std, weights)
+    model = cuda_chunk_memory_model(
+        "huber_weighted_chunk",
+        n_frames=stack_arr.shape[0],
+        row_bytes=stack_arr.shape[1] * stack_arr.dtype.itemsize,
+        dtype_bytes=stack_arr.dtype.itemsize,
+        include_weights=weights_arr is not None,
+    )
+    # The flattened plane is one modeled row, so estimate(1) covers this chunk.
+    return _run_admitted_cuda(
+        model.estimate(1),
+        module.huber_weighted_chunk_cuda,
+        stack_arr,
+        ref_mean_arr,
+        ref_std_arr,
+        float(huber_c),
+        weights_arr,
+    )
+
+
+def _select_huber_chunk_backend(
+    preference: str,
+) -> BackendSelection:
+    selection = _resolve_backend(
+        "huber_weighted_chunk",
+        preference,
+        load_module=_load_compiled_module_result,
+    )
+    if selection.reason:
+        _debug_log(f"compiled backend unavailable, reason: {selection.reason}")
+    return selection
+
+
+def _huber_chunk_backend(
+    selection: BackendSelection,
+) -> tuple[str, Callable[..., tuple[np.ndarray, np.ndarray]]]:
+    if not selection.native or selection.candidate is None:
+        return "numpy", huber_weighted_chunk_numpy
+    if selection.candidate.kernel_name == "huber_weighted_chunk_cuda":
+        return "cuda", huber_weighted_chunk_compiled_cuda
+    raise RuntimeError(
+        f"unknown huber_weighted_chunk backend candidate: {selection.candidate}"
+    )
+
+
+def huber_weighted_chunk(
+    stack: np.ndarray,
+    ref_mean: np.ndarray,
+    ref_std: np.ndarray,
+    huber_c: float,
+    weights: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    selection = _select_huber_chunk_backend(_fallback_preference())
+    backend_name, backend = _huber_chunk_backend(selection)
+    if backend_name != "cuda":
+        return backend(stack, ref_mean, ref_std, huber_c, weights)
+    try:
+        return backend(stack, ref_mean, ref_std, huber_c, weights)
+    except RuntimeError as exc:
+        resolve_after_cuda_failure(
+            "huber_weighted_chunk",
+            exc,
+            load_module=_load_compiled_module_result,
+            log=_debug_log,
+        )
+    return huber_weighted_chunk_numpy(stack, ref_mean, ref_std, huber_c, weights)
+
+
+def try_huber_weighted_chunk_native(
+    stack: np.ndarray,
+    ref_mean: np.ndarray,
+    ref_std: np.ndarray,
+    huber_c: float,
+    weights: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    selection = _select_huber_chunk_backend(_fallback_preference())
+    backend_name, backend = _huber_chunk_backend(selection)
+    if backend_name != "cuda":
+        return None
+    try:
+        return backend(stack, ref_mean, ref_std, huber_c, weights)
+    except RuntimeError as exc:
+        resolve_after_cuda_failure(
+            "huber_weighted_chunk",
+            exc,
+            load_module=_load_compiled_module_result,
+            log=_debug_log,
+        )
+        return None
+
+
+def huber_weighted_chunk_native_available() -> bool:
+    selection = _select_huber_chunk_backend(_fallback_preference())
+    backend_name, _ = _huber_chunk_backend(selection)
+    return backend_name == "cuda"
 
 
 def fgp_masked_mean_merge_numpy(

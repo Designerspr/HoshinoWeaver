@@ -162,7 +162,7 @@ shake_i = quat_inv(smooth_quats[i]) * quats[i]
   optimize_alignment(ref_camera, src_camera_i)
     → 独立优化: R_i, focal_scale, distortion (~11 参数)
     → camera1_refined_i ≠ camera1_refined_j (帧间不共享)
-  warp_image_by_remap(frame_i)
+  unified remap(frame_i)
 ```
 
 问题:
@@ -236,7 +236,7 @@ shake_i = quat_inv(smooth_quats[i]) * quats[i]
 
   for i, frame_i in enumerate(frames):
       R_i = Rodrigues(rvecs_ba[i])
-      src_cam_i = camera_global.with_pointing_rotation(R_i)
+      rotation_ref_to_src = R_i
       map_xy = src_cam_i.project(world_vecs)  # 仅 project 逐帧计算
       result_i = cv2.remap(frame_i, map_xy)
 ```
@@ -311,3 +311,29 @@ def compute_stabilization_warps(
     """计算每帧的增稳修正旋转: R_correction = R_smooth · R_actual⁻¹。"""
     ...
 ```
+
+## 5. 已实现的序列 BA 节点边界（v1）
+
+v1 将几何 BA 与参考帧 remap 拆成两个节点：
+
+```text
+第一轮 data + exifs → BundleAdjustmentOp → BAAlignmentPlan
+第二轮 data + exifs + BAAlignmentPlan → BundleReferenceRemapOp → 对齐帧 + BundleRemapReport
+```
+
+- `BAAlignmentPlan` 只携带共享相机、相对指定
+  `reference_frame_index` 的姿态、边/帧残差、覆盖与可观测性诊断；它不保存图像
+  或 remap map。
+- BA 只接受同相机、同投影族和相同图像几何。它使用局部冗余帧边，鲁棒联合优化
+  共享内参与每帧旋转；参考帧姿态固定为单位阵。
+- 参考连通分量必须可观测。启用了焦距或畸变时，会先检查星点外场覆盖，再以消除
+  姿态 nuisance 参数后的共享相机 Jacobian 秩/条件数作为硬失败条件。零畸变透视
+  模型不要求畸变覆盖。
+- 未连入参考分量的帧不会进入 BA，并明确标为 `excluded`。BA 不解析
+  时间戳，也不为无图像约束的帧插值或外推姿态；如果以后需要，这属于 BA 之外的
+  序列恢复策略。
+- `BundleReferenceRemapOp` 按输入顺序将已求解帧映射到全局参考帧，参考帧本身
+  原样输出；plan 中明确排除的帧不会输出，并记录在 `BundleRemapReport` 中。
+
+由于计划在读完整个序列后才产生，第二阶段必须从相同的文件列表重新加载图像（或由
+上层提供可重放缓存）；不能让一个仍在等待计划的 integration 节点消费同一条原始流。

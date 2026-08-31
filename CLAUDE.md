@@ -13,6 +13,32 @@ When adding or modifying any feature, check whether the following need updating:
 - `CLAUDE.md` — if architecture, base classes, or invariants changed
 - Inline docstrings / YAML comments in affected files
 
+### Production, Benchmark, and Debug Boundaries
+
+- `hoshicore/` contains production implementations. Algorithm behavior tests
+  should exercise these modules directly.
+- `bench/` contains the existing kernel microbenchmarks. `benchmarks/` contains
+  the tracked Norma alignment benchmark component; keep local datasets under
+  `benchmarks/local/` and out of version control.
+- `tools/debug/` contains tracked developer diagnostics that may call private
+  implementation APIs. Notebooks and local reference files remain independent
+  local diagnostics. None are stable project APIs or may be imported by the
+  tracked test suite.
+- Tests may depend only on tracked production code, tracked test helpers, or a
+  tracked benchmark component. A fresh checkout must not require local debug
+  scripts or private benchmark datasets to collect and run tests.
+- Keep debug scripts thin. Test reusable behavior in its production module;
+  do not add shared wrappers or framework abstractions solely to test a debug
+  command-line interface.
+
+## Agent Tooling Notes
+
+- This repository uses UTF-8 source files. Do not assume Windows PowerShell 5.1 will display UTF-8 correctly.
+- When terminal output looks garbled, prefer reading text files with Python using `encoding="utf-8"` or use `Get-Content -Encoding utf8` explicitly.
+- Treat terminal mojibake as a display issue first. If Python can decode the file as UTF-8, trust the file bytes over the terminal rendering.
+- For patching and search, prefer stable ASCII anchors such as function names, variable names, filenames, and numeric constants. Avoid relying on localized comments or mojibake text as patch context.
+- In frequently edited debug/dev scripts, prefer English comments, docstrings, and log messages unless there is a strong reason to keep localized text.
+
 ## Commands
 
 ```bash
@@ -91,9 +117,15 @@ Nodes reference operators by class name (e.g., `TrailStackerOp`) or by SubDAG fi
 
 ### Custom Op Layer (`hoshicore/_custom_op/` + `csrc/`)
 
-C++/pybind11 compiled extension (`_C`) with numpy fallback. Every wrapper in `_custom_op/ops/` follows `compiled → numpy` two-tier dispatch — the project always runs without compilation.
+C++/pybind11 compiled extension (`_C`) with CPU/NumPy fallbacks. Most wrappers in
+`_custom_op/ops/` select a compiled CUDA/OpenMP backend and then fall back to
+NumPy when that backend is explicitly unavailable. The
+`star_detect_fused_pixel_components` wrapper has CUDA and OpenMP native backends
+but intentionally no standalone NumPy implementation: its final production
+fallback is Norma's OpenCV contour detector at the component layer, so the
+project still runs without compilation.
 
-Key env vars: `HNW_CUSTOM_OPS_FALLBACK` (`auto`|`numpy`), `HNW_CUSTOM_OPS_THREADS` (`auto`|int), `HNW_CUSTOM_OPS_DEBUG` (`0`|`1`).
+Key env vars: `HNW_CUSTOM_OPS_FALLBACK` (`auto`|`cpu`|`numpy`), `HNW_CUSTOM_OPS_THREADS` (`auto`|int), `HNW_CUSTOM_OPS_DEBUG` (`0`|`1`). `cpu` disables CUDA while preserving OpenMP; GUI/runtime callers may use `set_backend_preference()` before starting a pipeline.
 
 Build: `python csrc/build_ops.py`. Windows supports both MSVC and MinGW-w64 ucrt (`--compiler gcc`, CPU-only). See `csrc/README.md` for full build/platform/packaging details.
 
@@ -124,7 +156,7 @@ PySide6 with `qasync` event loop integration. The GUI dynamically generates para
 
 ### Adding a New Custom Op (C++ kernel)
 
-See `csrc/README.md` "新增算子" section for the full checklist. Key steps: C++ impl in `csrc/ops/<name>/` → bind in `module.cpp` → Python wrapper with fallback in `_custom_op/ops/` → tests in `test_custom_ops.py`.
+See `csrc/README.md` "新增算子" section for the full checklist. Key steps: C++ impl in `csrc/ops/cpu/<name>/` or `csrc/ops/cuda/<name>/` → bind in `module.cpp` → Python wrapper with fallback in `_custom_op/ops/` → focused tests in `tests/custom_ops/`.
 
 ## Tech Stack
 

@@ -1,7 +1,9 @@
 import asyncio
 import itertools
 import sys
-from typing import Any, Awaitable, Mapping, Optional, Sequence
+from collections.abc import Callable
+from typing import (Any, Awaitable, Mapping, Optional, ParamSpec, Sequence,
+                    TypeVar)
 
 import numpy as np
 
@@ -13,6 +15,10 @@ from ..component.queue import (BaseQueue, CancellationError, FileCacheQueue,
 from ..component.utils import time_cost_warpper
 
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
 class BaseOp(object):
     EXECUTOR: Optional[str] = None
     INPUTS: dict[str, Any] = {}
@@ -22,6 +28,7 @@ class BaseOp(object):
     VARIABLE_OUTPUT: bool = False  # True 时标记为变长输出（Filter 类）
     REPORTS_PROGRESS: bool = False  # True 时该 Op 被视为限速节点，注入真实 tracker
     CHUNK_PLANNED: bool = False  # True 时 chunk_rows 由 runtime planner 管理
+    BACKEND_LOGICAL_OP: str | None = None  # backend registry 中对应的 logical op
 
     @classmethod
     def estimate_resources(
@@ -186,7 +193,11 @@ class BaseOp(object):
 
     async def _send_sentinel(self) -> None:
         """发送正常结束信号"""
-        for queue_list in self.outputs.values():
+        for key, queue_list in self.outputs.items():
+            # sentinel 只属于流式 sequence 输出。image/int/object 等单值输出
+            # 已经由 _broadcast_outputs 推送结果，再发送 sentinel 会堵塞 maxsize=1 的收集队列。
+            if self.OUTPUTS[key].get("type") != "sequence":
+                continue
             for queue in queue_list:
                 await queue.put(BaseQueue._SENTINEL)
 
@@ -211,7 +222,12 @@ class BaseOp(object):
         if tasks:
             await asyncio.gather(*tasks)
 
-    async def _run_cpu(self, fn, *args, **kwargs):
+    async def _run_cpu(
+        self,
+        fn: Callable[P, R],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
         """将 CPU 密集型同步函数卸载到线程池执行，释放事件循环。
 
         利用 numpy C 扩展释放 GIL 的特性，使 CPU 计算与 I/O 操作可以重叠执行。
@@ -326,27 +342,30 @@ class ParallelBaseOp(BaseOp):
         emit_task = asyncio.create_task(emit_loop())
         tasks: list[asyncio.Task] = []
 
-        for idx in self._input_range():
-            if sentinel_event.is_set() or emit_task.done():
-                break
-            await slots.acquire()
-            if sentinel_event.is_set() or emit_task.done():
-                slots.release()
-                break
-            task = asyncio.create_task(process_item(idx))
-            tasks.append(task)
-
-        # 等待 in-flight tasks 完成（sentinel 回填保证不会永久阻塞）
-        for t in tasks:
-            if not t.done():
-                try:
-                    await asyncio.wait_for(t, timeout=5.0)
-                except (asyncio.TimeoutError, Exception):
-                    t.cancel()
-
-        emit_event.set()
-        if not emit_task.done():
+        try:
+            for idx in self._input_range():
+                if sentinel_event.is_set() or emit_task.done():
+                    break
+                await slots.acquire()
+                if sentinel_event.is_set() or emit_task.done():
+                    slots.release()
+                    break
+                task = asyncio.create_task(process_item(idx))
+                tasks.append(task)
+            await asyncio.gather(*tasks)
+            emit_event.set()
             await emit_task
+        except BaseException:
+            # 只有真正的异常或外部取消才应立即取消子任务。
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if not emit_task.done():
+                emit_task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(emit_task, return_exceptions=True)
+            raise
 
         if self.length is not None:
             self.tracker.close_bar(self.name)
@@ -381,8 +400,10 @@ class ChunkIteratorBaseOp(BaseOp):
     def __init__(self, name: str):
         super().__init__(name)
         self._chunk_states: list[Any] = []
+        self._configs: dict[str, Any] = {}
 
     async def _async_execute(self, configs: dict[str, Any]) -> None:
+        self._configs = configs
         frame_buffer = configs['buffer_handle']
         chunk_rows = configs.get('chunk_rows', self.CHUNK_ROWS)
         overlap = self.CHUNK_OVERLAP

@@ -44,7 +44,7 @@ const char* detect_compiler() {
 #endif
 }
 
-}  // namespace
+} // namespace
 
 py::dict build_info_dict() {
     py::dict info;
@@ -75,6 +75,39 @@ py::dict build_info_dict() {
     return info;
 }
 
+py::dict cuda_memory_info_dict() {
+#if HNW_ENABLE_CUDA
+    return cuda_memory_info_cuda_dict();
+#else
+    py::dict info;
+    info["available"] = false;
+    info["status"] = "unavailable";
+    info["reason_code"] = "cuda_not_built";
+    info["category"] = "build";
+    info["reason"] = "CUDA backend is not built";
+    return info;
+#endif
+}
+
+py::dict cuda_host_io_cache_info_dict() {
+#if HNW_ENABLE_CUDA
+    return cuda_host_io_cache_info_cuda_dict();
+#else
+    py::dict info;
+    info["available"] = false;
+    info["reason"] = "CUDA backend is not built";
+    return info;
+#endif
+}
+
+bool clear_cuda_host_io_cache_dict() {
+#if HNW_ENABLE_CUDA
+    return clear_cuda_host_io_cache_cuda();
+#else
+    return false;
+#endif
+}
+
 int get_openmp_max_threads() {
 #ifdef _OPENMP
     return omp_get_max_threads();
@@ -98,6 +131,12 @@ bool set_openmp_threads(int num_threads) {
 
 void bind_backend_info(py::module_& m) {
     m.def("build_info", &build_info_dict, "Return compiled op backend metadata.");
+    m.def("cuda_memory_info", &cuda_memory_info_dict,
+          "Return CUDA device memory metadata when CUDA runtime is available.");
+    m.def("cuda_host_io_cache_info", &cuda_host_io_cache_info_dict,
+          "Return bounded CUDA host-I/O cache metadata for the current worker thread.");
+    m.def("clear_cuda_host_io_cache", &clear_cuda_host_io_cache_dict,
+          "Clear the CUDA host-I/O cache owned by the current worker thread.");
     m.def("get_openmp_max_threads", &get_openmp_max_threads,
           "Return the current OpenMP max thread count.");
     m.def("set_openmp_threads", &set_openmp_threads, py::arg("num_threads"),

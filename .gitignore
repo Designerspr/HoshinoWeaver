@@ -3,8 +3,12 @@
 *.pyd
 *.dll
 *.so
+*.pdb
+*.csv
 logs/
 build/
+benchmark_results/
+benchmarks/local/
 csrc/build
 ui/__pycache__
 __pycache__/

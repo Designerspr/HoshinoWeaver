@@ -3,18 +3,7 @@ from typing import Optional, Union
 import cv2
 import numpy as np
 
-from hoshicore._custom_op import median_filter_2d
-
-
-def _integer_gray_for_large_median(img: np.ndarray) -> np.ndarray | None:
-    if img.dtype not in (np.uint8, np.uint16):
-        return None
-    if img.ndim == 2:
-        return np.ascontiguousarray(img)
-    if img.ndim == 3 and img.shape[-1] == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        return np.ascontiguousarray(gray)
-    return None
+from .norma.detection import detect_starmask_by_threshold_with_response
 
 
 def detect_starmask_by_threshold(img: np.ndarray,
@@ -28,7 +17,8 @@ def detect_starmask_by_threshold(img: np.ndarray,
     算法：局部背景估计（中值/均值模糊）→ 全局 σ 阈值 → 形态学后处理。
 
     Args:
-        img: 输入图像，支持任意整型/浮点 dtype，支持灰度或 BGR。
+        img: 输入灰度或 BGR 图像。支持 uint8/uint16；浮点输入必须是
+            [0, 1] 范围内的有限值。
         ksize: 中值/均值滤波核大小，用于估计局部背景。
         med_algo: 背景估计算法，"median" 或 "mean"。
         threshold_ratio: 阈值倍率，mask = (img > bg + ratio * σ)。
@@ -38,42 +28,14 @@ def detect_starmask_by_threshold(img: np.ndarray,
     Returns:
         np.ndarray (uint8): 星点蒙版，取值 0/1。
     """
-    if img.dtype.kind == 'f':
-        gray = img.astype(np.float32)
-    else:
-        gray = img.astype(np.float32) / np.iinfo(img.dtype).max
-
-    if gray.ndim == 3 and gray.shape[-1] == 3:
-        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
-
-    if med_algo == "median":
-        if ksize <= 5:
-            bg = cv2.medianBlur(gray, ksize=ksize)
-        else:
-            gray_int = _integer_gray_for_large_median(img)
-            if gray_int is not None:
-                bg_int = median_filter_2d(gray_int, ksize)
-                bg = bg_int.astype(np.float32) / np.iinfo(gray_int.dtype).max
-            else:
-                from scipy.ndimage import median_filter
-
-                size = (ksize, ksize, 1) if gray.ndim == 3 else ksize
-                bg = median_filter(gray, size=size, mode="nearest").astype(np.float32)
-    elif med_algo == "mean":
-        bg = cv2.blur(gray, ksize=(ksize, ksize))
-    else:
-        raise NotImplementedError(f"Unknown med algo: {med_algo}.")
-
-    diff = gray - bg
-    threshold = np.std(diff) * threshold_ratio
-    star_mask = (diff > threshold).astype(np.uint8)
-
-    if open_ksize > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_CROSS, (open_ksize, open_ksize))
-        star_mask = cv2.morphologyEx(star_mask, cv2.MORPH_OPEN, k)
-    if dilate_ksize > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_CROSS, (dilate_ksize, dilate_ksize))
-        star_mask = cv2.morphologyEx(star_mask, cv2.MORPH_DILATE, k)
+    star_mask, _ = detect_starmask_by_threshold_with_response(
+        img,
+        ksize=ksize,
+        med_algo=med_algo,
+        threshold_ratio=threshold_ratio,
+        open_ksize=open_ksize,
+        dilate_ksize=dilate_ksize,
+    )
     return star_mask
 
 
@@ -116,10 +78,12 @@ def detect_starmask_by_dog(img: np.ndarray,
     star_mask = (dog > threshold).astype(np.uint8)
 
     if open_ksize > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_CROSS, (open_ksize, open_ksize))
+        k = cv2.getStructuringElement(cv2.MORPH_CROSS,
+                                      (open_ksize, open_ksize))
         star_mask = cv2.morphologyEx(star_mask, cv2.MORPH_OPEN, k)
     if dilate_ksize > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_CROSS, (dilate_ksize, dilate_ksize))
+        k = cv2.getStructuringElement(cv2.MORPH_CROSS,
+                                      (dilate_ksize, dilate_ksize))
         star_mask = cv2.morphologyEx(star_mask, cv2.MORPH_DILATE, k)
     return star_mask
 

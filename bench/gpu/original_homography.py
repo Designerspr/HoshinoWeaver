@@ -3,65 +3,29 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
-import os
-import platform
-import time
 from dataclasses import dataclass
-from pathlib import Path
-from statistics import mean, median
-from typing import Any
 
 import cv2
 import numpy as np
+
+from bench.common import (
+    collect_env_info,
+    prepare_frames,
+    print_or_save_report,
+    run_benchmark,
+)
+
+
+DEFAULT_HEIGHT = 2048
+DEFAULT_WIDTH = 3072
 
 
 CASE_NAMES = [
     "opencv_warp",
 ]
-
-
-def collect_env_info() -> dict[str, Any]:
-    return {
-        "platform": platform.platform(),
-        "python": platform.python_version(),
-        "cpu_count": os.cpu_count(),
-        "cwd": str(Path(__file__).resolve().parents[2]),
-    }
-
-
-def summarize_samples(samples: list[float]) -> dict[str, Any]:
-    return {
-        "samples_sec": samples,
-        "min_sec": min(samples),
-        "max_sec": max(samples),
-        "mean_sec": mean(samples),
-        "median_sec": median(samples),
-    }
-
-
-def print_or_save_report(report: dict[str, Any], output_json: str | None) -> None:
-    if output_json:
-        path = Path(output_json)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(report, indent=2, sort_keys=True),
-                        encoding="utf-8")
-
-    print("[original_homography]")
-    print(
-        " ".join([
-            f"input={report['input_source']['mode']}",
-            f"shape={report['input_source']['resolved_shape']}",
-            f"dtype={report['input_source']['resolved_dtype']}",
-        ]))
-    for case_name in report["config"]["cases"]:
-        payload = report["results"][case_name]
-        print(
-            f"{case_name}: mean={payload['mean_sec']:.6f}s "
-            f"min={payload['min_sec']:.6f}s max={payload['max_sec']:.6f}s")
-    if output_json:
-        print(f"json={output_json}")
+DEFAULT_CASES = CASE_NAMES
+SUITE_ID = "gpu.original_homography"
 
 
 @dataclass(frozen=True)
@@ -89,20 +53,25 @@ def _make_homography(args: argparse.Namespace) -> np.ndarray:
     ], dtype=np.float32)
 
 
-def _build_config(args: argparse.Namespace) -> WarpConfig:
+def _build_config(
+    args: argparse.Namespace,
+    image_shape: tuple[int, ...] | None,
+) -> WarpConfig:
+    if image_shape is not None:
+        height = int(image_shape[0]) if args.height is None else args.height
+        width = int(image_shape[1]) if args.width is None else args.width
+        channels = int(image_shape[2]) if len(image_shape) == 3 else 1
+    else:
+        height = DEFAULT_HEIGHT if args.height is None else args.height
+        width = DEFAULT_WIDTH if args.width is None else args.width
+        channels = args.channels
+
     return WarpConfig(
-        height=args.height,
-        width=args.width,
-        channels=args.channels,
+        height=height,
+        width=width,
+        channels=channels,
         homography_src_to_dst=_make_homography(args),
     )
-
-
-def _make_input_image(args: argparse.Namespace,
-                      cfg: WarpConfig) -> np.ndarray:
-    rng = np.random.default_rng(args.seed)
-    return rng.random((cfg.height, cfg.width, cfg.channels),
-                      dtype=np.float32)
 
 
 def warp_with_cv2(image: np.ndarray,
@@ -118,25 +87,10 @@ def warp_with_cv2(image: np.ndarray,
     )
 
 
-def run_cpu_benchmark(func,
-                      *,
-                      warmup: int,
-                      repeat: int) -> dict[str, Any]:
-    for _ in range(warmup):
-        func()
-
-    samples: list[float] = []
-    for _ in range(repeat):
-        t0 = time.perf_counter()
-        func()
-        samples.append(time.perf_counter() - t0)
-    return summarize_samples(samples)
-
-
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--height", type=int, default=2048)
-    parser.add_argument("--width", type=int, default=3072)
+    parser.add_argument("--height", type=int, default=None)
+    parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--channels", type=int, default=3)
     parser.add_argument("--tx-px", type=float, default=12.0)
     parser.add_argument("--ty-px", type=float, default=-8.0)
@@ -145,20 +99,46 @@ def main() -> None:
     parser.add_argument("--persp-x", type=float, default=1e-6)
     parser.add_argument("--persp-y", type=float, default=-8e-7)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--input-dir", type=str, default=None)
+    parser.add_argument(
+        "--input-mode",
+        choices=["auto", "cache", "images", "synthetic"],
+        default="auto",
+    )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeat", type=int, default=30)
-    parser.add_argument("--cases", nargs="+", default=list(CASE_NAMES))
+    parser.add_argument("--cases", nargs="+", default=list(DEFAULT_CASES))
     parser.add_argument("--output-json", type=str, default=None)
-    args = parser.parse_args()
+    return parser
 
+
+def run(args: argparse.Namespace) -> dict[str, object]:
     unknown_cases = [case for case in args.cases if case not in CASE_NAMES]
     if unknown_cases:
         raise ValueError(
             f"Unknown original homography benchmark case(s): {unknown_cases}. "
             f"Available: {list(CASE_NAMES)}")
 
-    cfg = _build_config(args)
-    image = _make_input_image(args, cfg)
+    input_height = DEFAULT_HEIGHT if args.height is None else args.height
+    input_width = DEFAULT_WIDTH if args.width is None else args.width
+    frames, input_source = prepare_frames(
+        frames=1,
+        height=input_height,
+        width=input_width,
+        dtype=np.float32,
+        channels=args.channels,
+        seed=args.seed,
+        input_dir=args.input_dir,
+        input_mode=args.input_mode,
+    )
+    image = frames[0]
+    if input_source.get("mode") == "synthetic" and args.channels == 1 and image.ndim == 2:
+        image = image[:, :, None]
+        input_source = {
+            **input_source,
+            "resolved_shape": list(image.shape),
+        }
+    cfg = _build_config(args, image.shape)
     output_size = (cfg.width, cfg.height)
 
     runners = {
@@ -166,7 +146,7 @@ def main() -> None:
             image, cfg.homography_src_to_dst, output_size),
     }
     results = {
-        case_name: run_cpu_benchmark(
+        case_name: run_benchmark(
             runners[case_name],
             warmup=args.warmup,
             repeat=args.repeat,
@@ -181,27 +161,34 @@ def main() -> None:
             "cv2": cv2.__version__,
         },
         "config": {
-            "height": args.height,
-            "width": args.width,
-            "channels": args.channels,
+            "height": cfg.height,
+            "width": cfg.width,
+            "channels": cfg.channels,
+            "requested_channels": args.channels,
+            "requested_height": args.height,
+            "requested_width": args.width,
             "tx_px": args.tx_px,
             "ty_px": args.ty_px,
             "rotation_deg": args.rotation_deg,
             "scale": args.scale,
             "persp_x": args.persp_x,
             "persp_y": args.persp_y,
+            "input_dir": args.input_dir,
+            "input_mode": args.input_mode,
             "warmup": args.warmup,
             "repeat": args.repeat,
             "cases": args.cases,
         },
-        "input_source": {
-            "mode": "synthetic_numpy",
-            "resolved_frames": 1,
-            "resolved_shape": [cfg.height, cfg.width, cfg.channels],
-            "resolved_dtype": "fp32",
-        },
+        "input_source": input_source,
         "results": results,
     }
+    return report
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    report = run(args)
     print_or_save_report(report, args.output_json)
 
 

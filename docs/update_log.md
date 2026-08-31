@@ -25,7 +25,6 @@
 2. 支持已知的叠加功能
 
 - [ ] 去除热燥 (暗场) / 去除暗角（平场）
-- [ ] 创建星轨延时序列
 - [ ] 星轨断点的补齐(P0)
 - [ ] 支持创建时间切片
 
@@ -65,6 +64,31 @@
 8. xAI
 
 - [ ] 接入Skill，允许agent阅读需求和可用算子，生成可执行计算图
+
+## v1.1.0-beta (Aug 31st, 2026)
+
+### ✅ New Features
+
+- **延时星轨序列工作流**：新增延时星轨工作流，支持 EMA衰减星轨、加权滑动窗口最大值等模式，可用于生成逐帧星轨序列。
+- **延时对齐降噪工作流**：新增延时对齐降噪工作流，支持天空地景分别叠加，并可分别选择不同窗口长度或叠加算法。
+- **Norma 配准系统**：建立相机模型对齐管线，支持对齐任意两张图像，并联合优化旋转、焦距和畸变参数。
+- **多帧 Bundle Adjustment**：新增基于图像匹配图的序列 BA 工作流，可联合求解同一相机拍摄序列的每帧指向与共享相机参数，改善对齐稳定性。
+- **Custom Op 多后端能力扩展**：为星点检测、特征匹配、相机 remap、wavelet、  calibration、sigma-clip、Huber、noise equalization 和 star shrink 等逻辑增加  OpenMP CPU 或 CUDA 加速实现及统一 Python facade，改善运行速度。
+
+### ✅ Improvements
+
+- **Remap 性能优化**：新增融合 CPU/CUDA camera-model remap，支持四种 perspective/fisheye 源目标组合；重用 pinned staging/workspace，并支持稀疏坐标 map 计算后插值，以降低高分辨率图像的内存和计算开销。
+- **Custom Op 分发收口**：重构 backend registry、wrapper dispatch 和错误元数据，集中处理 runtime unavailable、resource exhausted、forced NumPy 与 native validation，移除旧 CUDA hybrid aliases 和失效路径。
+- **Native 内核结构整理**：按逻辑算子和 CPU/CUDA/Metal 后端重组源码，共享 median histogram、Gaussian kernel、camera-model math、host-I/O workspace 和参数校验，降低重复实现。
+
+### ✅ Bug Fixed
+
+- 修复 CUDA 设备架构不兼容、显存准入误判、forced NumPy 影响 CUDA fallback，以及第二 accelerator 存在时 fused DoG 无法继续回退的问题。
+- 修复 `ParallelBaseOp` 在上游结束后取消仍在收尾的慢任务，导致最后若干输出帧丢失的问题。
+- 修复 DAG feeder 未注册为 executor task 时的结束/异常传播问题。
+- 修复 GUI 按进度条创建顺序显示“当前节点”，导致等待中的节点长时间遮蔽实际 BA/WindowStack 执行状态的问题。
+
+---
 
 ## v1.0.0-rc (Jun 23rd, 2026)
 

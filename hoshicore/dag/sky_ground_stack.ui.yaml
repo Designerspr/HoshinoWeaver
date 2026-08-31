@@ -58,28 +58,93 @@ configs:
     hidden: true
   output_filename:
     hidden: true
+  align_base:
+    label: "对齐基准帧"
+    description: "天空对齐的参考图像。"
+    widget: file_picker
+    accept: ".cr2,.cr3,.arw,.nef,.dng,.rw2,.orf,.raf,.tiff,.tif,.jpeg,.jpg,.png,.bmp,.gif,.fits"
   align_method:
     label: "对齐方式"
-    description: "星点对齐算法。透视变换适合移动范围小且已经经过镜头畸变矫正的图像，畸变优化适合未矫正的图像，但计算速度较慢。"
+    description: "透视变换速度快，适合小范围移动且已矫正畸变的图像；畸变校正路径需要 EXIF 或手动焦距，支持畸变联合优化，更精确。"
     widget: select
     options:
-      - { value: "auto",       label: "自动" }
       - { value: "homography", label: "透视变换" }
-      - { value: "distortion", label: "畸变优化" }
+      - { value: "distortion", label: "畸变校正" }
+  camera_setup_mode:
+    label: "相机信息"
+    description: "优先使用自动读取；仅在 EXIF 不完整或参考帧、输入帧来自不同镜头时手动展开。"
+    widget: select
+    visible_when: { key: "align_method", eq: "distortion" }
+    options:
+      - { value: "auto", label: "读取 EXIF" }
+      - { value: "manual", label: "指定同一相机" }
+      - { value: "separate", label: "指定不同相机" }
+  lens_type:
+    label: "镜头类型"
+    description: "参考帧和输入帧共同使用的投影模型。"
+    widget: select
+    visible_when:
+      all:
+        - { key: "align_method", eq: "distortion" }
+        - { key: "camera_setup_mode", eq: "manual" }
+    options:
+      - { value: "perspective", label: "标准镜头" }
+      - { value: "fisheye", label: "鱼眼镜头" }
+  matching_path:
+    hidden: true
+  guided_refine:
+    hidden: true
+  ref_lens_type:
+    label: "参考帧镜头类型"
+    description: "显式指定参考帧投影模型；留空时尝试从参考帧 EXIF 推断。"
+    widget: select
+    visible_when:
+      all:
+        - { key: "align_method", eq: "distortion" }
+        - { key: "camera_setup_mode", eq: "separate" }
+    options:
+      - { value: null, label: "自动" }
+      - { value: "perspective", label: "透视" }
+      - { value: "fisheye", label: "鱼眼" }
+  src_lens_type:
+    label: "输入帧镜头类型"
+    description: "显式指定输入帧投影模型；留空时逐帧从 EXIF 推断。"
+    widget: select
+    visible_when:
+      all:
+        - { key: "align_method", eq: "distortion" }
+        - { key: "camera_setup_mode", eq: "separate" }
+    options:
+      - { value: null, label: "自动" }
+      - { value: "perspective", label: "透视" }
+      - { value: "fisheye", label: "鱼眼" }
+  focal_length_mm:
+    label: "镜头焦距（mm）"
+    description: "EXIF 不完整时使用的实际焦距；不同相机模式下暂作为两侧共同的手动后备值。"
+    widget: input
+    visible_when:
+      all:
+        - { key: "align_method", eq: "distortion" }
+        - { key: "camera_setup_mode", neq: "auto" }
+    min: 1
+    max: 2000
+  crop_factor:
+    label: "传感器裁切系数"
+    description: "全画幅 = 1.0，APS-C（尼康/索尼）≈ 1.5，APS-C（佳能）≈ 1.6，M43 ≈ 2.0。等效焦距 = 焦距 × 裁切系数。"
+    widget: input
+    visible_when:
+      all:
+        - { key: "align_method", eq: "distortion" }
+        - { key: "camera_setup_mode", neq: "auto" }
+    min: 0.5
+    max: 4.0
   same_camera:
-    label: "同一相机拍摄"
-    description: "所有帧来自同一相机和焦距。开启可加速对齐计算"
-    widget: switch
+    hidden: true
   mask:
     label: "天空遮罩"
     description: "选择一张白色=天空，黑色=地面的遮罩图像。用绘图软件绘制后导入。"
     widget: file_picker
     accept: ".tif,.tiff,.png,.jpg"
-  align_base:
-    label: "对齐基准帧"
-    description: "天空对齐的参考图像。留空则使用第一张"
-    widget: file_picker
-    accept: ".cr2,.cr3,.arw,.nef,.dng,.rw2,.orf,.raf,.tiff,.tif,.jpeg,.jpg,.png,.bmp,.gif,.fits"
   enable_exif:
     label: "写入 EXIF"
     description: "在输出文件中保留拍摄参数。关闭后输出不含 EXIF 信息"
@@ -107,10 +172,10 @@ route_configs:
 layout:
   groups:
     - name: "对齐设置"
-      keys: [align_method, align_base, same_camera, mask, enable_ground]
+      keys: [align_base, align_method, camera_setup_mode, lens_type, ref_lens_type, src_lens_type, focal_length_mm, crop_factor, mask, enable_ground]
     - name: "输出设置"
       keys: [int_weight]
-  order: [sky_stacker, ground_stacker, align_method, same_camera, mask, enable_ground, int_weight]
+  order: [sky_stacker, ground_stacker, align_base, align_method, camera_setup_mode, lens_type, ref_lens_type, src_lens_type, focal_length_mm, crop_factor, mask, enable_ground, int_weight]
 
 outputs:
   - "!include": fragments/image_output.ui.yaml

@@ -99,6 +99,14 @@ visible_when: { key: "<config_key 或 route_key>", eq: <期望值> }
 - `key`：引用同一 ui.yaml 中的另一个 config 键名或 route 键名
 - `eq`：期望值（bool / string）。当 key 当前值 == eq 时，控件可见
 - `neq`（可选）：不等于。当 key 当前值 != neq 时，控件可见
+- `all`（可选）：组合多个条件；全部满足时控件可见
+
+```yaml
+visible_when:
+  all:
+    - { key: "align_method", eq: "distortion" }
+    - { key: "camera_setup_mode", neq: "auto" }
+```
 
 ### 行为
 
