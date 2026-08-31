@@ -22,6 +22,7 @@ from qasync import QEventLoop
 
 from hoshicore.component.utils import ORG_NAME, SOFTWARE_NAME, VERSION
 from hoshicore.component.utils import init_logger as _init_logger
+from hoshicore.component.runtime_diagnostics import log_runtime_components
 from ui.output_panel import OutputPanel
 from ui.panel_builder import DynamicConfigPanel, PanelSchema
 from ui.UI import Ui_guide, Ui_HNW
@@ -591,6 +592,7 @@ if __name__ == '__main__':
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     _init_logger(_logger, debug_mode=False, trace_mode=False, log_path=None, task="gui")
+    log_runtime_components(_logger)
 
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(u":/icons/resource/icon/HNW.jpg"))

@@ -7,6 +7,7 @@ import json
 
 from loguru import logger as default_logger
 
+from hoshicore.component.runtime_diagnostics import log_runtime_components
 from hoshicore.component.utils import init_logger, is_support_format
 from hoshicore.engine.executor import DAGExecutionError
 from hoshicore.engine.inspect import InspectResult, inspect_yaml
@@ -203,6 +204,7 @@ def main():
 
     logger = init_logger(default_logger, args.debug, args.trace, None,
                          task=os.path.splitext(os.path.basename(args.config))[0])
+    log_runtime_components(logger)
 
     yaml_path = args.config
     if not os.path.isfile(yaml_path):

@@ -172,6 +172,8 @@ class SlotHandler(QMainWindow):
         self.menu = QMenu(self)
         self.menu.addAction("全局设置").triggered.connect(self.show_global_settings)
         self.menu_show_guide = self.menu.addAction("使用指南")
+        self.menu.addAction("组件检测").triggered.connect(
+            self.show_runtime_capabilities)
         self.menu_show_guide.triggered.connect(self.show_guide_window)
 
         # 将按钮点击与显示菜单绑定
@@ -183,6 +185,12 @@ class SlotHandler(QMainWindow):
     def show_global_settings(self):
         from ui.global_settings_dialog import GlobalSettingsDialog
         dlg = GlobalSettingsDialog(self.window)
+        dlg.exec()
+
+    @Slot()
+    def show_runtime_capabilities(self):
+        from ui.runtime_capabilities_dialog import RuntimeCapabilitiesDialog
+        dlg = RuntimeCapabilitiesDialog(self.window)
         dlg.exec()
 
     @Slot()
