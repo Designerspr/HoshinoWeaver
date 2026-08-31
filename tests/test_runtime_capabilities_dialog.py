@@ -1,4 +1,25 @@
-from ui.runtime_capabilities_dialog import format_runtime_capabilities_html
+import subprocess
+import sys
+
+from ui.runtime_capabilities_format import format_runtime_capabilities_html
+
+
+def test_capability_formatter_import_is_qt_free():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import ui.runtime_capabilities_format; "
+                "assert not any(name.startswith('PySide6') for name in sys.modules)"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_capability_dialog_shows_native_import_failure_reason():
