@@ -1,5 +1,5 @@
 description: "Norma bundle-aligned sliding-window image sequence"
-version: "1"
+version: "2"
 
 inputs:
   fnames: { type: sequence, required: true }
@@ -12,9 +12,21 @@ routes:
       median:     BundleWindowMedianStackOp
       sigma_clip: BundleWindowSigmaClipStackOp
     default: mean
+  ground_window_stacker:
+    options:
+      mean:       BundleWindowMeanStackOp
+      max:        BundleWindowMaxStackOp
+      median:     BundleWindowMedianStackOp
+      sigma_clip: BundleWindowSigmaClipStackOp
+    default: mean
 
 route_configs:
   window_stacker:
+    sigma_clip:
+      rej_high: { type: float, default: 3.0 }
+      rej_low:  { type: float, default: 3.0 }
+      max_iter: { type: int, default: 5 }
+  ground_window_stacker:
     sigma_clip:
       rej_high: { type: float, default: 3.0 }
       rej_low:  { type: float, default: 3.0 }
@@ -37,7 +49,11 @@ configs:
   random_seed:              { type: int, default: 0 }
   window_size:              { type: int, default: 5 }
   min_contributors:         { type: int, default: 2 }
+  ground_window_size:       { type: int, default: 5 }
+  ground_min_contributors:  { type: int, default: 1 }
   remap_map_scale:          { type: float, default: 0.5 }
+  mask:                     { type: str, default: null }
+  enable_ground:            { type: bool, default: true }
   output_dir:               { type: str, required: true }
   output_template:          { type: str, default: "frame_{index:05d}.png" }
   output_dtype:             { type: str, default: "uint16" }
@@ -58,12 +74,25 @@ nodes:
     inputs: { fnames: inputs.fnames }
     outputs: { result: { type: sequence } }
 
+  load_mask:
+    op: LoadMaskImageOp
+    configs:
+      path: configs.mask
+    outputs: { result: { type: image } }
+
+  mask_invert:
+    op: MaskInvertOp
+    configs:
+      mask: load_mask.result
+    outputs: { result: { type: image } }
+
   bundle_adjust:
     op: BundleAdjustmentOp
     inputs:
       data: ba_data_loader.result
       exifs: ba_exif_loader.result
     configs:
+      mask: load_mask.result
       reference_frame_index: configs.reference_frame_index
       lens_type: configs.lens_type
       distortion: configs.distortion
@@ -102,33 +131,83 @@ nodes:
         window_size: configs.window_size
         min_contributors: configs.min_contributors
         remap_map_scale: configs.remap_map_scale
+        mask: load_mask.result
       max:
         alignment_plan: bundle_adjust.alignment_plan
         window_size: configs.window_size
         min_contributors: configs.min_contributors
         remap_map_scale: configs.remap_map_scale
+        mask: load_mask.result
       median:
         alignment_plan: bundle_adjust.alignment_plan
         window_size: configs.window_size
         min_contributors: configs.min_contributors
         remap_map_scale: configs.remap_map_scale
+        mask: load_mask.result
       sigma_clip:
         alignment_plan: bundle_adjust.alignment_plan
         window_size: configs.window_size
         min_contributors: configs.min_contributors
         remap_map_scale: configs.remap_map_scale
+        mask: load_mask.result
+    outputs:
+      result: { type: sequence }
+      window_report: { type: object }
+
+  ground_window_stack:
+    enable: configs.enable_ground
+    route_key: ground_window_stacker
+    inputs:
+      data: window_data_loader.result
+    route_configs:
+      mean:
+        window_size: configs.ground_window_size
+        min_contributors: configs.ground_min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: mask_invert.result
+      max:
+        window_size: configs.ground_window_size
+        min_contributors: configs.ground_min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: mask_invert.result
+      median:
+        window_size: configs.ground_window_size
+        min_contributors: configs.ground_min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: mask_invert.result
+      sigma_clip:
+        window_size: configs.ground_window_size
+        min_contributors: configs.ground_min_contributors
+        remap_map_scale: configs.remap_map_scale
+        mask: mask_invert.result
+    outputs:
+      result: { type: sequence }
+
+  window_blend:
+    op: WindowFrameMaskedBlendOp
+    inputs:
+      sky: window_stack.result
+      ground: ground_window_stack.result
+    configs:
+      mask: load_mask.result
+    outputs:
+      result: { type: sequence }
+
+  window_filter:
+    op: WindowFrameFilterGateOp
+    inputs:
+      data: window_blend.result
     outputs:
       result: { type: sequence }
       aligned_exifs: { type: sequence }
       center_indices: { type: sequence }
-      window_report: { type: object }
 
   batch_saver:
     op: BatchImageSaveOp
     inputs:
-      data: window_stack.result
-      frame_indices: window_stack.center_indices
-      exifs: window_stack.aligned_exifs
+      data: window_filter.result
+      frame_indices: window_filter.center_indices
+      exifs: window_filter.aligned_exifs
     configs:
       output_dir: configs.output_dir
       output_template: configs.output_template

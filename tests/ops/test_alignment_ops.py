@@ -12,6 +12,7 @@ from hoshicore.component.norma.bundle_window import (
     build_bundle_window_schedule,
 )
 from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
+from hoshicore.component.queue import StreamExhausted
 from hoshicore.ops.bundle_ops import (BundleAdjustmentOp,
                                       BundleReferenceRemapOp,
                                       BundleRemapReport,
@@ -19,7 +20,10 @@ from hoshicore.ops.bundle_ops import (BundleAdjustmentOp,
                                       BundleWindowMeanStackOp,
                                       BundleWindowMedianStackOp,
                                       BundleWindowSigmaClipStackOp,
-                                      BundleWindowReport)
+                                      BundleWindowReport, WindowFrame,
+                                      WindowFrameFilterGateOp,
+                                      WindowFrameMaskedBlendOp,
+                                      WindowFrameStatus)
 
 
 class _Camera:
@@ -343,7 +347,7 @@ def test_bundle_window_mean_streams_shrinking_centered_windows(monkeypatch):
     monkeypatch.setattr(op, "_run_cpu", run_cpu)
     monkeypatch.setattr(op, "_broadcast_outputs", broadcast)
 
-    asyncio.run(op._async_filter({
+    asyncio.run(op._async_execute({
         "alignment_plan": plan,
         "window_size": 3,
         "min_contributors": 2,
@@ -351,9 +355,11 @@ def test_bundle_window_mean_streams_shrinking_centered_windows(monkeypatch):
     }))
 
     outputs = broadcasts[:-1]
-    assert [item["center_indices"] for item in outputs] == [0, 1, 2]
-    assert [int(item["result"][0, 0]) for item in outputs] == [15, 20, 25]
-    assert [item["aligned_exifs"] for item in outputs] == exifs
+    frames = [item["result"] for item in outputs]
+    assert [item.center_index for item in frames] == [0, 1, 2]
+    assert [int(item.image[0, 0]) for item in frames] == [15, 20, 25]
+    assert [item.exif for item in frames] == exifs
+    assert all(item.status == WindowFrameStatus.READY for item in frames)
     assert len(camera.calls) == 4
     assert all(call[1] == 0.25 for call in camera.calls)
     assert all(call[2] == (8, 12, 2) for call in camera.calls)
@@ -366,6 +372,232 @@ def test_bundle_window_mean_streams_shrinking_centered_windows(monkeypatch):
         "window_mean", 3, desc="Bundle window mean")
     assert op.tracker.update.call_count == 3
     op.tracker.close_bar.assert_called_once_with("window_mean")
+
+
+def test_bundle_window_keeps_excluded_center_as_invalid_position(monkeypatch):
+    op = BundleWindowMeanStackOp("window_mean")
+    op.length = 3
+    op.tracker = Mock()
+    op.inputs["exifs"] = SimpleNamespace(active=False)
+    images = [np.full((8, 12), value, dtype=np.uint16)
+              for value in (10, 20, 30)]
+    position = 0
+
+    async def ready(value):
+        return value
+
+    def inputs():
+        nonlocal position
+        image = images[position]
+        position += 1
+        return {"data": ready(image)}
+
+    async def run_cpu(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    broadcasts = []
+    camera = _WindowCamera()
+    plan = _plan(camera, (
+        _frame(0),
+        _frame(1, FrameAlignmentStatus.EXCLUDED, reason="disconnected"),
+        _frame(2),
+    ))
+    monkeypatch.setattr(op, "_async_convert_inputs", inputs)
+    monkeypatch.setattr(op, "_run_cpu", run_cpu)
+    monkeypatch.setattr(
+        op, "_broadcast_outputs", lambda result: _append_async(broadcasts, result))
+
+    asyncio.run(op._async_execute({
+        "alignment_plan": plan,
+        "window_size": 3,
+        "min_contributors": 1,
+        "remap_map_scale": 0.5,
+    }))
+
+    frames = [item["result"] for item in broadcasts[:-1]]
+    assert len(frames) == 3
+    assert frames[1].center_index == 1
+    assert frames[1].image is None
+    assert frames[1].status == WindowFrameStatus.EXCLUDED
+    assert frames[1].reason == "disconnected"
+
+
+async def _append_async(items, value):
+    items.append(value)
+
+
+def test_bundle_window_identity_path_does_not_remap(monkeypatch):
+    op = BundleWindowMeanStackOp("window_mean")
+    op.length = 3
+    op.tracker = Mock()
+    op.inputs["exifs"] = SimpleNamespace(active=False)
+    images = [np.full((8, 12), value, dtype=np.uint16)
+              for value in (10, 20, 30)]
+    position = 0
+
+    async def ready(value):
+        return value
+
+    def inputs():
+        nonlocal position
+        image = images[position]
+        position += 1
+        return {"data": ready(image)}
+
+    async def run_cpu(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    broadcasts = []
+    monkeypatch.setattr(op, "_async_convert_inputs", inputs)
+    monkeypatch.setattr(op, "_run_cpu", run_cpu)
+    monkeypatch.setattr(
+        op, "_broadcast_outputs", lambda result: _append_async(broadcasts, result))
+
+    asyncio.run(op._async_execute({
+        "alignment_plan": None,
+        "window_size": 3,
+        "min_contributors": 1,
+        "remap_map_scale": 0.5,
+    }))
+
+    frames = [item["result"] for item in broadcasts[:-1]]
+    assert [int(frame.image[0, 0]) for frame in frames] == [15, 20, 25]
+    assert all(frame.status == WindowFrameStatus.READY for frame in frames)
+
+
+def test_bundle_window_identity_streams_unknown_length_and_flushes_edges(
+        monkeypatch):
+    op = BundleWindowMeanStackOp("window_mean")
+    op.length = None
+    op.tracker = Mock()
+    op.inputs["exifs"] = SimpleNamespace(active=False)
+    images = [np.full((8, 12), value, dtype=np.uint16)
+              for value in (10, 20, 30, 40)]
+    position = 0
+
+    async def ready(value):
+        return value
+
+    async def exhausted():
+        raise StreamExhausted
+
+    def inputs():
+        nonlocal position
+        if position == len(images):
+            return {"data": exhausted()}
+        image = images[position]
+        position += 1
+        return {"data": ready(image)}
+
+    async def run_cpu(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    broadcasts = []
+    monkeypatch.setattr(op, "_async_convert_inputs", inputs)
+    monkeypatch.setattr(op, "_run_cpu", run_cpu)
+    monkeypatch.setattr(
+        op, "_broadcast_outputs", lambda result: _append_async(broadcasts, result))
+
+    asyncio.run(op._async_execute({
+        "alignment_plan": None,
+        "window_size": 3,
+        "min_contributors": 1,
+        "remap_map_scale": 0.5,
+    }))
+
+    frames = [item["result"] for item in broadcasts[:-1]]
+    assert [frame.center_index for frame in frames] == [0, 1, 2, 3]
+    assert [int(frame.image[0, 0]) for frame in frames] == [15, 20, 30, 35]
+    assert all(frame.status == WindowFrameStatus.READY for frame in frames)
+    report = broadcasts[-1]["window_report"]
+    assert len(report.frames) == 4
+    op.tracker.create_bar.assert_not_called()
+    assert op.tracker.update.call_count == 4
+    op.tracker.close_bar.assert_not_called()
+
+
+def test_window_frame_filter_gate_keeps_sidecars_aligned(monkeypatch):
+    op = WindowFrameFilterGateOp("gate")
+    op.length = 3
+    op.tracker = Mock()
+    frames = [
+        WindowFrame(0, np.array([10]), "a", (0,), WindowFrameStatus.READY),
+        WindowFrame(1, None, "b", (), WindowFrameStatus.EXCLUDED, "bad"),
+        WindowFrame(2, np.array([30]), "c", (2,), WindowFrameStatus.READY),
+    ]
+    position = 0
+
+    async def ready(value):
+        return value
+
+    def inputs():
+        nonlocal position
+        frame = frames[position]
+        position += 1
+        return {"data": ready(frame)}
+
+    broadcasts = []
+    monkeypatch.setattr(op, "_async_convert_inputs", inputs)
+    monkeypatch.setattr(
+        op, "_broadcast_outputs", lambda result: _append_async(broadcasts, result))
+
+    asyncio.run(op._async_filter({}))
+
+    assert [item["center_indices"] for item in broadcasts] == [0, 2]
+    assert [item["aligned_exifs"] for item in broadcasts] == ["a", "c"]
+    assert [int(item["result"][0]) for item in broadcasts] == [10, 30]
+
+
+def test_window_mean_propagates_hard_mask_through_remap():
+    camera = _WindowCamera()
+    plan = _plan(camera, (_frame(0), _frame(1)))
+    spec = build_bundle_window_schedule(
+        plan, 3, min_contributors=2).windows[0]
+    images = {
+        0: np.full((8, 12), 10, dtype=np.uint16),
+        1: np.full((8, 12), 20, dtype=np.uint16),
+    }
+    mask = np.zeros((8, 12), dtype=bool)
+    mask[:, :6] = True
+
+    result = bundle_ops._mean_bundle_window(
+        camera, spec, images, (12, 8), 0.5, mask)
+
+    np.testing.assert_array_equal(result[:, :6], 15)
+    np.testing.assert_array_equal(result[:, 6:], 0)
+    assert camera.calls[0][2] == (8, 12, 2)
+
+
+def test_window_frame_masked_blend_uses_center_index_and_hard_mask(
+        monkeypatch):
+    op = WindowFrameMaskedBlendOp("blend")
+    op.length = 1
+    op.inputs["ground"] = SimpleNamespace(active=True)
+    sky = WindowFrame(
+        0, np.full((2, 4), 10, np.uint16), "sky", (0,),
+        WindowFrameStatus.READY)
+    ground = WindowFrame(
+        0, np.full((2, 4), 20, np.uint16), None, (0,),
+        WindowFrameStatus.READY)
+
+    async def ready(value):
+        return value
+
+    monkeypatch.setattr(op, "_async_convert_inputs", lambda: {
+        "sky": ready(sky), "ground": ready(ground)})
+    broadcasts = []
+    monkeypatch.setattr(
+        op, "_broadcast_outputs", lambda result: _append_async(broadcasts, result))
+
+    asyncio.run(op._async_execute({
+        "mask": np.array([[255, 255, 0, 0], [255, 255, 0, 0]], np.uint8),
+    }))
+
+    result = broadcasts[0]["result"]
+    assert result.center_index == 0
+    np.testing.assert_array_equal(
+        result.image,
+        np.array([[10, 10, 20, 20], [10, 10, 20, 20]], np.uint16))
 
 
 def test_bundle_window_mean_resource_estimate_scales_with_window_only():

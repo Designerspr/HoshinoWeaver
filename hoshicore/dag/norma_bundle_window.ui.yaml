@@ -23,6 +23,18 @@ routes:
         label: "Sigma 裁剪"
         description: "迭代排除异常值后求平均。适合有卫星/飞机线或其他异常值干扰，且叠加图像张数较多(>10张)的场景。"
 
+  ground_window_stacker:
+    label: "地景窗口叠加算法"
+    widget: tabs
+    visible_when:
+      all:
+        - { key: "enable_ground", eq: true }
+    options:
+      mean: { label: "均值" }
+      max: { label: "最大值" }
+      median: { label: "中位数" }
+      sigma_clip: { label: "Sigma 裁剪" }
+
 configs:
   reference_frame_index:
     label: "BA 参考帧序号"
@@ -85,6 +97,26 @@ configs:
     max: 31
     step: 2
 
+  ground_window_size:
+    label: "地景窗口大小"
+    description: "地景不做几何变换，以当前帧为中心使用独立的滑动窗口。"
+    widget: slider
+    min: 1
+    max: 31
+    step: 2
+    visible_when:
+      all:
+        - { key: "enable_ground", eq: true }
+
+  mask:
+    label: "天空/地景蒙版"
+    description: "白色使用天空对齐结果，黑色使用未变换的地景窗口结果。"
+    widget: file_picker
+
+  enable_ground:
+    label: "启用地景窗口"
+    widget: switch
+
   min_contributors:
     label: "最少贡献帧数"
     description: "有效对齐帧少于该值时跳过对应中心帧。"
@@ -92,6 +124,9 @@ configs:
     min: 1
     max: 31
     step: 1
+    hidden: true
+
+  ground_min_contributors:
     hidden: true
 
   remap_map_scale:
@@ -164,10 +199,12 @@ layout:
     - name: "联合优化"
       keys: [optimize_focal, optimize_distortion, optimize_principal_point]
     - name: "滑动窗口"
-      keys: [window_size, min_contributors, remap_map_scale]
+      keys: [window_size, ground_window_size, min_contributors,
+             remap_map_scale, mask, enable_ground]
   order:
     [
       window_stacker,
+      ground_window_stacker,
       reference_frame_index,
       lens_type,
       focal_length_mm,
@@ -177,8 +214,11 @@ layout:
       optimize_distortion,
       optimize_principal_point,
       window_size,
+      ground_window_size,
       min_contributors,
       remap_map_scale,
+      mask,
+      enable_ground,
     ]
 
 outputs:

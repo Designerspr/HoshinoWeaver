@@ -22,7 +22,10 @@ def format_bundle_window_report(
     if not isinstance(report, BundleWindowReport):
         raise TypeError("window_report must be a BundleWindowReport")
 
-    emitted = {frame.center_index: frame for frame in report.frames}
+    emitted = {
+        frame.center_index: frame for frame in report.frames
+        if frame.status == "ready"
+    }
     excluded = [
         frame for frame in plan.frames
         if frame.status == FrameAlignmentStatus.EXCLUDED
@@ -31,9 +34,17 @@ def format_bundle_window_report(
         frame for frame in plan.frames
         if frame.status == FrameAlignmentStatus.SOLVED
     ]
-    insufficient = [frame for frame in solved if frame.index not in emitted]
+    explicit_insufficient = [
+        frame for frame in report.frames
+        if frame.status == "insufficient_contributors"
+    ]
+    reported_indices = {frame.center_index for frame in report.frames}
+    legacy_insufficient = [
+        frame for frame in solved
+        if frame.index not in reported_indices
+    ]
     contributor_counts = [
-        len(frame.contributor_indices) for frame in report.frames
+        len(frame.contributor_indices) for frame in emitted.values()
     ]
 
     lines = [
@@ -47,8 +58,9 @@ def format_bundle_window_report(
         f"{plan.rejected_edge_count} rejected, "
         f"condition={plan.observability_condition}",
         f"Camera solve: {plan.camera_solve_mode}",
-        f"Window output: {len(report.frames)} emitted, "
-        f"{len(insufficient)} insufficient contributors",
+        f"Window output: {len(emitted)} emitted, "
+        f"{len(explicit_insufficient) + len(legacy_insufficient)} "
+        "insufficient contributors",
     ]
     if plan.camera_fallback_reason:
         lines.append(
@@ -65,11 +77,15 @@ def format_bundle_window_report(
             f"  {frame.index}: {frame.reason or 'excluded by bundle adjustment'}"
             for frame in excluded
         )
-    if insufficient:
+    if explicit_insufficient or legacy_insufficient:
         lines.append("Skipped window centers:")
         lines.extend(
+            f"  {frame.center_index}: {frame.reason or 'insufficient contributors'}"
+            for frame in explicit_insufficient
+        )
+        lines.extend(
             f"  {frame.index}: insufficient contributors"
-            for frame in insufficient
+            for frame in legacy_insufficient
         )
     return "\n".join(lines)
 

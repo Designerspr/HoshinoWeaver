@@ -109,3 +109,67 @@ def build_bundle_window_schedule(
         window_size=window_size,
         windows=tuple(windows),
     )
+
+
+def build_identity_window_schedule(
+    frame_count: int,
+    window_size: int,
+    *,
+    min_contributors: int = 1,
+) -> BundleWindowSchedule:
+    """Build shrinking-edge windows without any geometric transform.
+    """
+    if frame_count < 0:
+        raise ValueError("frame_count must be non-negative")
+    if window_size <= 0 or window_size % 2 == 0:
+        raise ValueError("window_size must be a positive odd integer")
+    if not 1 <= min_contributors <= window_size:
+        raise ValueError("min_contributors must be in [1, window_size]")
+
+    identity = np.eye(3, dtype=np.float64)
+    identity.setflags(write=False)
+    windows: list[BundleWindowSpec] = []
+    for center_index in range(frame_count):
+        spec = build_identity_window_spec(
+            frame_count, center_index, window_size,
+            min_contributors=min_contributors, identity=identity)
+        if spec is not None:
+            windows.append(spec)
+    return BundleWindowSchedule(
+        frame_count=frame_count,
+        window_size=window_size,
+        windows=tuple(windows),
+    )
+
+
+def build_identity_window_spec(
+    frame_count: int,
+    center_index: int,
+    window_size: int,
+    *,
+    min_contributors: int = 1,
+    identity: NDArray[np.float64] | None = None,
+) -> BundleWindowSpec | None:
+    """Build one shrinking-edge identity window for streaming execution."""
+    if not 0 <= center_index < frame_count:
+        raise ValueError("center_index must be inside frame_count")
+    if window_size <= 0 or window_size % 2 == 0:
+        raise ValueError("window_size must be a positive odd integer")
+    if not 1 <= min_contributors <= window_size:
+        raise ValueError("min_contributors must be in [1, window_size]")
+    radius = window_size // 2
+    start = max(0, center_index - radius)
+    stop = min(frame_count, center_index + radius + 1)
+    source_indices = tuple(range(start, stop))
+    if len(source_indices) < min_contributors:
+        return None
+    if identity is None:
+        identity = np.eye(3, dtype=np.float64)
+        identity.setflags(write=False)
+    return BundleWindowSpec(
+        center_index=center_index,
+        sources=tuple(BundleWindowSource(
+            index=source_index,
+            rotation_center_to_source=identity,
+        ) for source_index in source_indices),
+    )

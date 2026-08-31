@@ -77,6 +77,24 @@ def test_bundle_window_dag_wires(route):
         feeder.close()
 
 
+def test_bundle_window_dag_wires_independent_ground_window():
+    spec = _load_yaml(str(_DAG_DIR / "norma_bundle_window.meta.yaml"))
+    spec = meta_resolve(
+        spec,
+        {"window_stacker": "mean", "ground_window_stacker": "median"},
+        {"enable_ground": True},
+    )
+    dag = validate_and_build_order(flatten_sub_dags(spec))
+    _, feeders, _, _ = instantiate_and_wire(
+        dag,
+        {"fnames": ["a.tif", "b.tif"]},
+        {"output_dir": "output", "enable_ground": True,
+         "ground_window_size": 3},
+    )
+    for feeder in feeders:
+        feeder.close()
+
+
 @pytest.mark.parametrize("name", [
     "norma_bundle_stack",
     "norma_bundle_window",

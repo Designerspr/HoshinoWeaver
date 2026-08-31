@@ -7,6 +7,7 @@ from hoshicore.component.progress import DummyTracker
 from hoshicore.component.queue import (RichContextQueue,
                                        StreamExhausted)
 from hoshicore.ops.base import BaseOp, ChunkIteratorBaseOp, ParallelBaseOp
+from ui.UILibs import QtSignalTracker
 
 
 def test_baseop_reports_progress_defaults_false():
@@ -44,6 +45,22 @@ def test_reports_progress_can_be_set_on_subclass():
     class MyLimitingOp(BaseOp):
         REPORTS_PROGRESS = True
     assert MyLimitingOp.REPORTS_PROGRESS is True
+
+
+def test_qt_tracker_displays_most_recently_updated_node():
+    tracker = QtSignalTracker()
+    updates = []
+    tracker.progress_updated.connect(
+        lambda percent, description: updates.append((percent, description)))
+    tracker.pre_register("window_filter")
+    tracker.pre_register("bundle_adjust")
+    tracker.create_bar("window_filter", 10)
+    tracker.create_bar("bundle_adjust", 10)
+
+    tracker.update("bundle_adjust")
+
+    assert "bundle_adjust(10%)" in updates[-1][1]
+    assert "window_filter" not in updates[-1][1]
 
 
 class SpyTracker(DummyTracker):
