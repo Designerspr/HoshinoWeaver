@@ -25,8 +25,8 @@ from hoshicore.engine.wiring import run_from_yaml
 # 导入图标资源
 from ui import resource
 # 导入自定义组件
-from ui.UILibs import (CategoryDialog, ClickableLabel, QtSignalTracker,
-                       exifCheckDialog)
+from ui.UILibs import CategoryDialog, ClickableLabel, exifCheckDialog
+from ui.progress_tracker import QtSignalTracker
 
 
 def _format_exception_chain(exc: BaseException) -> str:

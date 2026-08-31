@@ -7,7 +7,7 @@ from hoshicore.component.progress import DummyTracker
 from hoshicore.component.queue import (RichContextQueue,
                                        StreamExhausted)
 from hoshicore.ops.base import BaseOp, ChunkIteratorBaseOp, ParallelBaseOp
-from ui.UILibs import QtSignalTracker
+from ui.progress_tracker import QtSignalTracker
 
 
 def test_baseop_reports_progress_defaults_false():
