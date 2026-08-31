@@ -123,6 +123,8 @@ configs:
     hidden: true
   png_compressing:
     hidden: true
+  max_pairs_per_edge:
+    hidden: true
 
 route_configs:
   sigma_clip:
