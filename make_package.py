@@ -125,6 +125,15 @@ shared_datas.append(({join_path(work_path, 'LICENSE')!r}, '.'))
 
 _shared_excludes = ['tensorflow', 'keras', 'torch', 'PyQt5', 'PyQt6']
 
+# UPX can break native extensions with CUDA/MSVC module initializers even
+# when all dependent DLLs are present. Keep project custom-op extensions
+# uncompressed; other collected binaries may still use UPX.
+_native_upx_exclude = [
+    'hoshicore/_custom_op/_C*.pyd',
+    'hoshicore/_custom_op/_metal*.pyd',
+    'hoshicore/_custom_op/_metal*.so',
+]
+
 a_gui = Analysis(
     [{gui_script!r}],
     pathex=[{work_path!r}],
@@ -160,6 +169,7 @@ exe_gui = EXE(
     debug=False,
     strip=False,
     upx={upx!r},
+    upx_exclude=_native_upx_exclude,
     console={console_gui!r},
     icon={icon_path!r},
 )
@@ -174,6 +184,7 @@ exe_cli = EXE(
     debug=False,
     strip=False,
     upx={upx!r},
+    upx_exclude=_native_upx_exclude,
     console=True,
 )
 
@@ -188,6 +199,7 @@ coll = COLLECT(
     a_cli.datas,
     strip=False,
     upx={upx!r},
+    upx_exclude=_native_upx_exclude,
     name={final_name!r},
 )
 """

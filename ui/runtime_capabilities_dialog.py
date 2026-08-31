@@ -34,7 +34,8 @@ def format_runtime_capabilities_html(report: dict[str, Any]) -> str:
         native_class = "ok"
     else:
         native_text = (
-            "原生算子不可用；程序将使用 NumPy/兼容实现。")
+            "原生算子不可用；程序将使用 NumPy/兼容实现。"
+            f"原因：{_reason(compiled)}")
         native_class = "warn"
 
     openmp_text = (
