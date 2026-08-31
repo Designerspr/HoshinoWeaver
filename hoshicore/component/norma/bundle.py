@@ -295,6 +295,7 @@ def _make_edge(first: BundleFrame, second: BundleFrame,
             same_camera=True,
             use_asterism_bootstrap=True,
             random_seed=random_seed,
+            residual_space="angular",
         )
         if len(match.pair_idx) < 6:
             raise ValueError(f"only {len(match.pair_idx)} matched stars")

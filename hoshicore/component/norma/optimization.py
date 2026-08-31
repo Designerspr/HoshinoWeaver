@@ -12,11 +12,13 @@ solve starts.  During each residual evaluation the flow is:
 
     ref pixels -> ref camera unproject -> unit rays
     src pixels -> src camera unproject -> unit rays
-    rotate ref rays -> angular residual against src rays
+    rotate ref rays -> selected residual against src rays
 
-If ``residual_space="pixel"`` is requested, the rotated ref rays are projected
-through the source camera and compared to source pixels.  Projection dispatch is
-per camera, so perspective/fisheye mixed pairs use the same solver path.
+``residual_space="angular"`` produces one scalar angle per pair. ``"cross"``
+keeps the three-component ray cross product used by sequence BA. If ``"pixel"``
+is requested, the rotated ref rays are projected through the source camera and
+compared to source pixels. Projection dispatch is per camera, so
+perspective/fisheye mixed pairs use the same solver path.
 
 Robust loss is delegated to ``scipy.optimize.least_squares``.  When
 ``robust_scale`` is not provided, it is estimated once from the initial residual
@@ -37,6 +39,10 @@ from .projection import (
     unproject_fisheye_pixels,
     unproject_pixels,
 )
+
+
+_FOCAL_SCALE_DELTA_LIMIT = 0.3
+_DISTORTION_ABS_LIMIT = 1.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,7 +103,7 @@ class FlexibleOptimizationContext:
     robust_scale: Optional[float] = None
     robust_scale_method: str = "median"
     robust_scale_multiplier: float = 2.0
-    residual_space: str = "angular"  # "angular" | "pixel"
+    residual_space: str = "angular"  # "angular" | "cross" | "pixel"
 
 
 def _camera_param_width(state: CameraOptimizationState) -> int:
@@ -130,6 +136,28 @@ def iter_optimized_camera_param_slices(
             slice(offset, offset + _camera_param_width(ctx.src_state)),
         ))
     return slices
+
+
+def make_flexible_parameter_bounds(
+    ctx: FlexibleOptimizationContext,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Bound camera variables while leaving the relative rotation unbounded."""
+    lower = np.full(3 + sum(
+        param_slice.stop - param_slice.start
+        for _, _, param_slice in iter_optimized_camera_param_slices(ctx)
+    ), -np.inf, dtype=np.float64)
+    upper = np.full_like(lower, np.inf)
+    for _, state, param_slice in iter_optimized_camera_param_slices(ctx):
+        offset = param_slice.start
+        if state.policy.optimize_focal:
+            lower[offset] = -_FOCAL_SCALE_DELTA_LIMIT
+            upper[offset] = _FOCAL_SCALE_DELTA_LIMIT
+            offset += 1
+        if state.policy.optimize_distortion:
+            width = state.policy.n_dist
+            lower[offset:offset + width] = -_DISTORTION_ABS_LIMIT
+            upper[offset:offset + width] = _DISTORTION_ABS_LIMIT
+    return lower, upper
 
 
 def make_flexible_regularization_weights(
@@ -297,14 +325,24 @@ def _compute_flexible_residual_components(
             pixel_residual = pixel_residual.copy()
             pixel_residual[~finite] = 1e6
         data_residual = pixel_residual.reshape(-1)
-    else:
+    elif ctx.residual_space == "cross":
+        # Keep both tangent-plane error directions.  This matches the residual
+        # representation used by the sequence BA solver; for small angular
+        # errors, ||cross(a, b)|| ~= angle(a, b).
+        data_residual = np.cross(ref_rotated, src_vecs).reshape(-1)
+    elif ctx.residual_space == "angular":
         data_residual = raw_angle.copy()
+    else:
+        raise ValueError(
+            f"Unsupported residual_space: {ctx.residual_space!r}")
 
     if ctx.pts_weight is not None:
-        if ctx.residual_space == "pixel":
-            data_residual = data_residual * np.repeat(ctx.pts_weight, 2)
-        else:
+        if ctx.residual_space == "angular":
             data_residual = data_residual * ctx.pts_weight
+        else:
+            component_count = 2 if ctx.residual_space == "pixel" else 3
+            data_residual = data_residual * np.repeat(
+                ctx.pts_weight, component_count)
 
     reg_residual = _flexible_regularization(params_flat, ctx)
 
@@ -362,13 +400,18 @@ def run_flexible_optimization(
         ctx.params0 = x0.copy()
     loss = "linear" if ctx.robust_loss is None else ctx.robust_loss
     f_scale = estimate_robust_scale_from_initial_residual(x0, ctx)
+    bounds = make_flexible_parameter_bounds(ctx)
+    if np.any(x0 < bounds[0]) or np.any(x0 > bounds[1]):
+        raise ValueError(
+            "initial camera parameters are outside optimization bounds")
     return least_squares(flexible_reproject_error,
                          x0,
                          args=(ctx, ),
                          method="trf",
                          loss=loss,
                          f_scale=f_scale,
-                         max_nfev=max_nfev)
+                         max_nfev=max_nfev,
+                         bounds=bounds)
 
 
 def estimate_robust_scale(error: NDArray[np.float64],
@@ -406,9 +449,12 @@ def estimate_robust_scale_from_initial_residual(
         return 1.0
     if ctx.robust_scale is not None:
         return float(ctx.robust_scale)
-    _, data_residual, _, _ = _compute_flexible_residual_components(x0, ctx)
+    raw_angle, data_residual, _, _ = _compute_flexible_residual_components(
+        x0, ctx)
+    scale_residual = (
+        raw_angle if ctx.residual_space == "cross" else data_residual)
     return estimate_robust_scale(
-        data_residual,
+        scale_residual,
         method=ctx.robust_scale_method,
         multiplier=ctx.robust_scale_multiplier,
     )

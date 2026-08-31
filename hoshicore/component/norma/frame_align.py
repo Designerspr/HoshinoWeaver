@@ -625,6 +625,7 @@ def solve_star_alignment(
     same_camera: bool = False,
     use_asterism_bootstrap: bool = True,
     random_seed: int | None = None,
+    residual_space: str = "cross",
 ) -> tuple[AlignmentResult, MatchResult]:
     """Align pre-detected stars without retaining source image pixels."""
     ref_geo = GeometryView(ref_stars, ref_candidate.camera)
@@ -646,6 +647,7 @@ def solve_star_alignment(
         same_camera=same_camera,
         ref_policy=selected_ref.optimization_policy,
         src_policy=selected_src.optimization_policy,
+        residual_space=residual_space,
     )
     return alignment, match
 
@@ -663,6 +665,7 @@ def solve_staged_alignment(
     ref_refine_stars: Optional[DetectedStars] = None,
     src_refine_stars: Optional[DetectedStars] = None,
     random_seed: int | None = None,
+    residual_space: str = "cross",
 ) -> StagedSolveResult:
     """Solve from explicit bootstrap and optional refine star sets.
 
@@ -695,6 +698,7 @@ def solve_staged_alignment(
         same_camera=same_camera,
         ref_policy=ref_candidate.optimization_policy,
         src_policy=src_candidate.optimization_policy,
+        residual_space=residual_space,
     )
     timings["first_optimization"] = perf_counter() - started
 
@@ -726,6 +730,7 @@ def solve_staged_alignment(
                 max_distance_px=guided_refine_radius_px,
                 ref_policy=ref_candidate.optimization_policy,
                 src_policy=src_candidate.optimization_policy,
+                residual_space=residual_space,
             )
             timings["guided_rematch"] = perf_counter() - started
         except Exception as exc:

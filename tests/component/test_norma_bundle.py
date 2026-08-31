@@ -195,6 +195,7 @@ def test_bundle_edge_refines_rotation_without_camera_parameters(monkeypatch):
     assert calls[0][2]["bootstrap_scales"] == (0.7, 1.0, 1.3)
     assert calls[0][2]["same_camera"] is True
     assert calls[0][2]["random_seed"] == 7
+    assert calls[0][2]["residual_space"] == "angular"
 
 
 def test_bundle_scale_votes_reuse_preferred_and_fall_back(monkeypatch):
