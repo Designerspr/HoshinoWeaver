@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import platform
 import shutil
@@ -58,7 +59,17 @@ def _extension_patterns() -> tuple[str, ...]:
     return ("_C*.so",)
 
 
-def verify_packaged_custom_ops(work_dir: Path) -> None:
+def _metal_extension_patterns() -> tuple[str, ...]:
+    return ("_metal*.so", "_metal*.dylib")
+
+
+def verify_packaged_custom_ops(
+    work_dir: Path,
+    *,
+    require_metal: bool = False,
+) -> None:
+    if require_metal and platform.system() != "Darwin":
+        raise RuntimeError("--require-metal is only valid on macOS")
     dist_dir = work_dir / "dist"
     build_dir = work_dir / "build"
     spec_dir = work_dir / "spec"
@@ -84,8 +95,23 @@ def verify_packaged_custom_ops(work_dir: Path) -> None:
         str(PROJECT_ROOT),
         "--hidden-import",
         "hoshicore._custom_op._C",
-        str(SMOKE_ENTRY),
     ]
+    if require_metal:
+        metal_library = (
+            PROJECT_ROOT
+            / "hoshicore"
+            / "_custom_op"
+            / "_metal_kernels.metallib"
+        )
+        command.extend(
+            [
+                "--hidden-import",
+                "hoshicore._custom_op._metal",
+                "--add-data",
+                f"{metal_library}:hoshicore/_custom_op",
+            ]
+        )
+    command.append(str(SMOKE_ENTRY))
     subprocess.run(command, cwd=PROJECT_ROOT, check=True)
 
     package_dir = dist_dir / "hnw_native_smoke"
@@ -99,11 +125,27 @@ def verify_packaged_custom_ops(work_dir: Path) -> None:
     ]
     if not extensions:
         raise RuntimeError("PyInstaller output does not contain hoshicore._custom_op._C")
+    if require_metal:
+        metal_extensions = [
+            path
+            for pattern in _metal_extension_patterns()
+            for path in package_dir.rglob(pattern)
+        ]
+        metal_libraries = list(package_dir.rglob("_metal_kernels.metallib"))
+        if not metal_extensions:
+            raise RuntimeError(
+                "PyInstaller output does not contain hoshicore._custom_op._metal"
+            )
+        if not metal_libraries:
+            raise RuntimeError("PyInstaller output does not contain Metal shaders")
 
+    runtime_env = _clean_runtime_environment()
+    if require_metal:
+        runtime_env["HNW_REQUIRE_METAL_RUNTIME"] = "1"
     result = subprocess.run(
         [str(executable)],
         cwd=package_dir,
-        env=_clean_runtime_environment(),
+        env=runtime_env,
         capture_output=True,
         text=True,
         timeout=120,
@@ -119,7 +161,17 @@ def verify_packaged_custom_ops(work_dir: Path) -> None:
 
 
 def main() -> None:
-    verify_packaged_custom_ops(DEFAULT_WORK_DIR)
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--require-metal",
+        action="store_true",
+        help="Bundle Metal artifacts and require a real frozen Metal kernel run.",
+    )
+    args = parser.parse_args()
+    verify_packaged_custom_ops(
+        DEFAULT_WORK_DIR,
+        require_metal=args.require_metal,
+    )
 
 
 if __name__ == "__main__":

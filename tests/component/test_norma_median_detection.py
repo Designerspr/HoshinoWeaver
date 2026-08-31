@@ -1,6 +1,9 @@
+from unittest import mock
+
 import cv2
 import numpy as np
 
+import hoshicore.component.norma.detection as detection_module
 from hoshicore.component.norma.detection import (
     _candidate_volumes_with_rescue,
     detect_star_points_median,
@@ -94,6 +97,28 @@ def test_median_detector_detailed_result_exposes_candidate_stages() -> None:
         details.detected_stars.positions,
         details.candidate_positions[details.valid_stars],
     )
+
+
+def test_median_detector_detailed_result_reuses_mask_threshold() -> None:
+    image = np.zeros((32, 48), dtype=np.float64)
+    star_mask = np.zeros(image.shape, dtype=np.uint8)
+    response = np.zeros(image.shape, dtype=np.float32)
+
+    with mock.patch.object(
+            detection_module,
+            "median_star_mask",
+            return_value=(star_mask, response, 0.125)):
+        with mock.patch.object(
+                detection_module.np,
+                "std",
+                side_effect=AssertionError("threshold must not be recomputed")):
+            details = detect_star_points_median_detailed(
+                image,
+                median_ksize=13,
+                min_star_points=0,
+            )
+
+    assert details.threshold == 0.125
 
 
 def test_outer_rescue_disables_eccentricity_rejection_experimentally() -> None:

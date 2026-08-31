@@ -23,6 +23,9 @@ HNW_CAMERA_HD inline bool valid_projection(const int projection) {
     return projection == PROJECTION_PERSPECTIVE || projection == PROJECTION_FISHEYE;
 }
 
+// Mirrors OpenCV 5 on x86_64: C1/C3/C4 interpolate exactly, other channel counts
+// fall back to the 1/32 table. That fallback is not portable -- arm64 OpenCV is
+// exact for every channel count -- so only C1/C3/C4 have cross-platform parity.
 HNW_CAMERA_HD inline bool remap_uses_exact_linear(const int channels) {
     return channels == 1 || channels == 3 || channels == 4;
 }

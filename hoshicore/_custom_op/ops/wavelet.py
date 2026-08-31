@@ -13,18 +13,15 @@ import pywt
 from numpy.typing import NDArray
 
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
-from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
-from hoshicore._custom_op.backend_registry import resolve_after_resource_exhausted
-from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
+from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
 from hoshicore._custom_op.backend_registry import select_backend as _select_backend
-from hoshicore._custom_op.cuda_memory import cuda_memory_admission
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
+from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
 
 
 _debug_log = partial(debug_log, "wavelet")
@@ -95,13 +92,8 @@ def wavelet_dec_rec_core_cuda(
         width=image_arr.shape[1],
         level=int(level),
     )
-    with cuda_memory_admission(estimate) as admission:
-        if not admission.granted:
-            raise CustomOpResourceExhaustedError(
-                f"{memory_logical_op} skipped CUDA because estimated "
-                f"peak {admission.estimated_peak_bytes} bytes exceeds usable VRAM"
-            )
-        return module.wavelet_dec_rec_cuda_core(image_arr, int(level))
+    return _run_admitted_cuda(
+        estimate, module.wavelet_dec_rec_cuda_core, image_arr, int(level))
 
 
 @lru_cache(maxsize=2)
@@ -133,28 +125,12 @@ def wavelet_dec_rec_core_cuda_or_numpy(
     try:
         return backend(image, level)
     except RuntimeError as exc:
-        if is_cuda_resource_exhausted_error(exc):
-            fallback_selection = resolve_after_resource_exhausted(
-                "wavelet_dec_rec_cuda_core",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "compiled CUDA backend exhausted resources, falling back to "
-                f"numpy: {exc}"
-            )
-        else:
-            fallback_selection = resolve_after_runtime_unavailable(
-                "wavelet_dec_rec_cuda_core",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "compiled CUDA backend unavailable at runtime, falling back "
-                f"to numpy: {exc}"
-            )
+        fallback_selection = resolve_after_cuda_failure(
+            "wavelet_dec_rec_cuda_core",
+            exc,
+            load_module=_load_compiled_module_result,
+            log=_debug_log,
+        )
         if fallback_selection.native:
             raise RuntimeError(
                 "wavelet_dec_rec_cuda_core selected an unsupported native fallback"
@@ -203,28 +179,12 @@ def wavelet_dec_rec_core(
     try:
         return backend(image, level)
     except RuntimeError as exc:
-        if is_cuda_resource_exhausted_error(exc):
-            fallback_selection = resolve_after_resource_exhausted(
-                "wavelet_dec_rec",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "compiled CUDA backend exhausted resources, falling back to "
-                f"the next backend: {exc}"
-            )
-        else:
-            fallback_selection = resolve_after_runtime_unavailable(
-                "wavelet_dec_rec",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "compiled CUDA backend unavailable at runtime, falling back "
-                f"to the next backend: {exc}"
-            )
+        fallback_selection = resolve_after_cuda_failure(
+            "wavelet_dec_rec",
+            exc,
+            load_module=_load_compiled_module_result,
+            log=_debug_log,
+        )
     fallback_name, fallback_backend = _wavelet_dec_rec_backend(
         fallback_selection
     )
@@ -245,6 +205,10 @@ def wavelet_dec_rec(
     if small.size < MIN_CUDA_WAVELET_PIXELS:
         reconstructed = wavelet_dec_rec_core_numpy(small, level)
         return cv2.resize(reconstructed, (image_arr.shape[1], image_arr.shape[0]))
+    # Mid-size tier: the standalone ``wavelet_dec_rec_cuda_core`` logical op runs
+    # CUDA-or-NumPy and deliberately skips the OpenMP CPU kernel, whose launch
+    # overhead does not pay off at this size. This branch is that op's only
+    # consumer, so the op is reachable-but-internal here, not dead code.
     if small.size < MIN_COMPILED_WAVELET_PIXELS:
         reconstructed = wavelet_dec_rec_core_cuda_or_numpy(small, level)
     else:

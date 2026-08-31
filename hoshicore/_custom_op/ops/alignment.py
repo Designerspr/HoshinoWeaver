@@ -13,18 +13,15 @@ from scipy.spatial import cKDTree
 from scipy.spatial import distance as spd
 
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
-from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import native_backend_available as _native_backend_available
-from hoshicore._custom_op.backend_registry import resolve_after_resource_exhausted
-from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
+from hoshicore._custom_op.backend_registry import run_with_accelerator_fallback
 from hoshicore._custom_op.backend_registry import resolve_backend as _resolve_backend
-from hoshicore._custom_op.cuda_memory import cuda_memory_admission
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
+from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
 
 
 _debug_log = partial(debug_log, "alignment")
@@ -233,14 +230,7 @@ def _matching_cosine_bidirectional_nearest_compiled_kernel(
         n2=features2_arr.shape[0],
         feature_dim=features1_arr.shape[1],
     )
-    with cuda_memory_admission(estimate) as admission:
-        if not admission.granted:
-            raise CustomOpResourceExhaustedError(
-                "matching cosine bidirectional nearest skipped CUDA because "
-                f"estimated peak {admission.estimated_peak_bytes} bytes exceeds "
-                "usable VRAM"
-            )
-        return kernel(features1_arr, features2_arr)
+    return _run_admitted_cuda(estimate, kernel, features1_arr, features2_arr)
 
 
 def matching_cosine_bidirectional_nearest_cpu_compiled(
@@ -293,44 +283,15 @@ def matching_cosine_bidirectional_nearest(
     )
     if selection.reason:
         _debug_log(f"matching backend unavailable, reason: {selection.reason}")
-    backend_name, backend = _matching_cosine_bidirectional_nearest_backend(
-        selection)
 
-    try:
-        result = backend(features1_arr, features2_arr)
-    except RuntimeError as exc:
-        if backend_name != "cuda":
-            raise
-        if is_cuda_resource_exhausted_error(exc):
-            fallback_selection = resolve_after_resource_exhausted(
-                "matching_cosine_bidirectional_nearest",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "matching CUDA backend exhausted resources, falling back to "
-                f"the next backend: {exc}"
-            )
-        else:
-            fallback_selection = resolve_after_runtime_unavailable(
-                "matching_cosine_bidirectional_nearest",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "matching CUDA backend unavailable at runtime, falling back "
-                f"to the next backend: {exc}"
-            )
-        fallback_name, fallback_backend = (
-            _matching_cosine_bidirectional_nearest_backend(fallback_selection)
-        )
-        if fallback_name == "cuda":
-            raise RuntimeError(
-                "CUDA matching backend remained selected after runtime exclusion"
-            )
-        result = fallback_backend(features1_arr, features2_arr)
+    result = run_with_accelerator_fallback(
+        "matching_cosine_bidirectional_nearest",
+        selection,
+        _matching_cosine_bidirectional_nearest_backend,
+        lambda entry: entry(features1_arr, features2_arr),
+        load_module=_load_compiled_module_result,
+        log=_debug_log,
+    )
 
     if result is None:
         _debug_log(

@@ -53,10 +53,15 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build libturbojpeg0-dev
+          sudo apt-get install -y cmake ninja-build libturbojpeg0-dev clang
 
       - name: Build C++ custom ops
         run: python csrc/build_ops.py --compiler gcc
+
+      # Catches Objective-C++ typos here instead of on the macOS runner, which is
+      # otherwise the first compiler these files see.
+      - name: Parse the Metal Objective-C++ sources
+        run: python csrc/check_objc_syntax.py
 
       - name: Run tests (compiled backend)
         env:
@@ -114,3 +119,94 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
           HNW_CUSTOM_OPS_FALLBACK: numpy
         run: python -m pytest tests/ -v --tb=short -x
+
+  test-macos-cpu:
+    runs-on: macos-15
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          # pyexiv2 ships a libexiv2.dylib linked against Homebrew inih, so the
+          # component tests cannot even be collected without libINIReader.
+          brew install libomp inih
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build OpenMP custom ops without Metal
+        run: python csrc/build_ops.py --compiler clang --no-metal
+
+      - name: Verify the build is OpenMP-only with no Metal artifacts
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python csrc/verify_no_metal_fallback.py
+
+      - name: Verify custom ops in clean PyInstaller package
+        run: python csrc/verify_packaged_custom_ops.py
+
+      # No -x on macOS: the suite runs in seconds here, and platform-specific
+      # failures come in clusters that are cheaper to see all at once.
+      - name: Run tests (compiled backend)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m pytest tests/ -v --tb=short
+
+      - name: Run tests (numpy fallback)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          HNW_CUSTOM_OPS_FALLBACK: numpy
+        run: python -m pytest tests/ -v --tb=short
+
+  test-macos-metal:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          # pyexiv2 ships a libexiv2.dylib linked against Homebrew inih, so the
+          # component tests cannot even be collected without libINIReader.
+          brew install libomp inih
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build OpenMP and Metal custom ops
+        run: python csrc/build_ops.py --compiler clang
+
+      - name: Verify real Metal runtime and kernel
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python csrc/verify_metal_runtime.py
+
+      # The runtime gate above already gives the Metal-specific fast signal, so
+      # this runs the whole suite without -x (see test-macos-cpu).
+      - name: Run tests (compiled backend)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m pytest tests/ -v --tb=short
+
+      - name: Verify Metal in clean PyInstaller package
+        run: python csrc/verify_packaged_custom_ops.py --require-metal
+
+      # Runs last: it deletes the Metal artifacts the steps above rely on.
+      - name: Rebuild without Metal and verify OpenMP fallback
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python csrc/build_ops.py --compiler clang --no-metal
+          python csrc/verify_no_metal_fallback.py

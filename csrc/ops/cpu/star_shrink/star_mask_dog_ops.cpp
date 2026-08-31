@@ -2,6 +2,7 @@
 
 #include "common/compat.h"
 #include "common/cpu_compat.h"
+#include "common/gaussian_kernel.h"
 
 #include <pybind11/numpy.h>
 
@@ -23,25 +24,6 @@ int64_t reflect101(int64_t index, const int64_t length) {
         index = index < 0 ? -index : 2 * length - index - 2;
     }
     return index;
-}
-
-std::vector<float> make_gaussian_kernel(const float sigma) {
-    if (!std::isfinite(sigma) || !(sigma > 0.0f)) {
-        throw std::invalid_argument("star_mask_dog_cpu: sigma values must be positive and finite");
-    }
-    const int radius = std::max(1, static_cast<int>(std::ceil(3.0f * sigma)));
-    std::vector<float> kernel(static_cast<size_t>(2 * radius + 1));
-    const float denominator = 2.0f * sigma * sigma;
-    double sum = 0.0;
-    for (int offset = -radius; offset <= radius; ++offset) {
-        const float value = std::exp(-static_cast<float>(offset * offset) / denominator);
-        kernel[static_cast<size_t>(offset + radius)] = value;
-        sum += value;
-    }
-    for (float& value : kernel) {
-        value = static_cast<float>(static_cast<double>(value) / sum);
-    }
-    return kernel;
 }
 
 template <typename T>
@@ -195,8 +177,10 @@ void star_mask_dog_cpu(const T* image, uint8_t* output, const int64_t height, co
                        const float threshold_ratio, const int open_kernel_size,
                        const int dilate_kernel_size) {
     const int64_t plane_size = height * width;
-    const std::vector<float> small_kernel = make_gaussian_kernel(sigma_small);
-    const std::vector<float> large_kernel = make_gaussian_kernel(sigma_large);
+    const std::vector<float> small_kernel =
+        hnw::camera::make_dog_gaussian_kernel(sigma_small, "star_mask_dog_cpu");
+    const std::vector<float> large_kernel =
+        hnw::camera::make_dog_gaussian_kernel(sigma_large, "star_mask_dog_cpu");
     const int small_radius = static_cast<int>(small_kernel.size() / 2);
     const int large_radius = static_cast<int>(large_kernel.size() / 2);
     std::vector<float> gray(static_cast<size_t>(plane_size));

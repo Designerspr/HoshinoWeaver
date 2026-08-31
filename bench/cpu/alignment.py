@@ -19,13 +19,19 @@ from bench.common import (
     run_benchmark,
 )
 from bench.data_tools.starfield import generate_starfield_frames
-from hoshicore._custom_op.ops.detection import star_detect_threshold_morph_numpy
+from hoshicore._custom_op.ops.detection import (
+    median_star_mask_cpu_compiled,
+    median_star_mask_numpy,
+    star_detect_threshold_morph_numpy,
+)
+from hoshicore._custom_op.ops.filter import median_filter_2d_compiled
 from hoshicore.component.norma.alignment import match_star_pairs, optimize_alignment
 from hoshicore.component.norma.detection import (
     _detect_star_points_native_hybrid,
     _detect_star_points_opencv,
     _wavelet_dec_rec,
     detect_star_points,
+    detect_star_points_median,
 )
 from hoshicore.component.norma.frame_align import (
     AlignmentCameraCandidate,
@@ -63,11 +69,22 @@ NATIVE_CASE_NAMES = [
 BASELINE_CASE_NAMES = [
     "detect_opencv_stream",
 ]
+MEDIAN_CASE_NAMES = [
+    "median_mask_numpy_stream",
+    "median_mask_unfused_cpu_stream",
+    "median_mask_cpu_stream",
+    "median_contour_stream",
+    "median_geometry_stream",
+    "median_intensity_stream",
+    "median_filter_stream",
+    "median_detect_stream",
+]
 QUALITY_CASE_NAME = "detect_native_hybrid_vs_contour_quality"
 CASE_NAMES = [
     *DEFAULT_CASE_NAMES,
     *NATIVE_CASE_NAMES,
     *BASELINE_CASE_NAMES,
+    *MEDIAN_CASE_NAMES,
     QUALITY_CASE_NAME,
 ]
 DEFAULT_CASES = DEFAULT_CASE_NAMES
@@ -81,6 +98,14 @@ ALL_FRAME_CASE_NAMES = {
     "detect_threshold_morph_stream",
     "detect_contour_stream",
     "detect_ellipse_intensity_stream",
+    "median_mask_numpy_stream",
+    "median_mask_unfused_cpu_stream",
+    "median_mask_cpu_stream",
+    "median_contour_stream",
+    "median_geometry_stream",
+    "median_intensity_stream",
+    "median_filter_stream",
+    "median_detect_stream",
     "features_stream",
     "geometry_stream",
     "detect_native_hybrid_stream",
@@ -128,6 +153,20 @@ class DetectContourPayload:
     img_rec: np.ndarray
     bw: np.ndarray
     contours: list[np.ndarray]
+
+
+@dataclasses.dataclass
+class MedianContourPayload:
+    response: np.ndarray
+    star_mask: np.ndarray
+    contours: list[np.ndarray]
+
+
+@dataclasses.dataclass
+class MedianFilterPayload:
+    areas: np.ndarray
+    intensities: np.ndarray
+    eccentricities: np.ndarray
 
 
 def alignment_case_units(
@@ -321,6 +360,108 @@ def bench_detect_native_hybrid_stream(frames: list[np.ndarray]) -> None:
     for frame in frames:
         gray = to_gray_f64(frame)
         _ = _detect_star_points_native_hybrid(gray)
+
+
+def bench_median_mask_numpy_stream(gray_frames: list[np.ndarray]) -> None:
+    for gray in gray_frames:
+        _ = median_star_mask_numpy(gray)
+
+
+def _median_mask_unfused_cpu(gray: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    gray_f32 = gray.astype(np.float32)
+    if not np.all(np.isfinite(gray_f32)):
+        raise ValueError("median benchmark input must be finite")
+    if gray_f32.size and (
+            float(gray_f32.min()) < 0.0 or float(gray_f32.max()) > 1.0):
+        raise ValueError("median benchmark input must be normalized to [0, 1]")
+    working = np.rint(gray_f32 * np.float32(65535.0)).astype(np.uint16)
+    background = median_filter_2d_compiled(working, 13)
+    response = (
+        working.astype(np.float32) - background.astype(np.float32)
+    ) / np.float32(65535.0)
+    threshold = np.std(response)
+    star_mask = (response > threshold).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    return cv2.morphologyEx(star_mask, cv2.MORPH_OPEN, kernel), response
+
+
+def bench_median_mask_unfused_cpu_stream(
+        gray_frames: list[np.ndarray]) -> None:
+    for gray in gray_frames:
+        _ = _median_mask_unfused_cpu(gray)
+
+
+def bench_median_mask_cpu_stream(gray_frames: list[np.ndarray]) -> None:
+    for gray in gray_frames:
+        _ = median_star_mask_cpu_compiled(gray)
+
+
+def _find_median_contours(star_mask: np.ndarray) -> list[np.ndarray]:
+    contours, _ = cv2.findContours(
+        star_mask * np.uint8(255), cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    return [contour for contour in contours if len(contour) > 5]
+
+
+def _measure_median_geometry(
+        contours: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ellipses = [cv2.fitEllipse(contour) for contour in contours]
+    positions = np.asarray([ellipse[0] for ellipse in ellipses],
+                           dtype=np.float64)
+    areas = np.asarray([
+        cv2.contourArea(contour) + 0.5 * len(contour) for contour in contours
+    ], dtype=np.float64)
+    eccentricities = np.sqrt(np.asarray([
+        1 - (ellipse[1][0] / ellipse[1][1])**2 for ellipse in ellipses
+    ], dtype=np.float64))
+    return positions, areas, eccentricities
+
+
+def _measure_median_intensities(
+        response: np.ndarray, contours: list[np.ndarray]) -> np.ndarray:
+    intensities = np.zeros(len(contours), dtype=np.float64)
+    for index, contour in enumerate(contours):
+        x, y, width, height = cv2.boundingRect(contour)
+        response_roi = response[y:y + height, x:x + width]
+        contour_mask = np.zeros((height, width), dtype=np.uint8)
+        local_contour = contour - np.array([[[x, y]]], dtype=contour.dtype)
+        cv2.drawContours(contour_mask, [local_contour], -1, 255, -1)
+        intensities[index] = cv2.mean(response_roi, contour_mask)[0]
+    return intensities
+
+
+def _filter_median_candidates(payload: MedianFilterPayload) -> np.ndarray:
+    area_percentile = np.percentile(payload.areas, 10)
+    intensity_percentile = np.percentile(payload.intensities, 10)
+    return ((payload.areas >= 7.0)
+            & (payload.areas > area_percentile)
+            & (payload.intensities > intensity_percentile)
+            & np.isfinite(payload.eccentricities)
+            & (payload.eccentricities < 0.85))
+
+
+def bench_median_contour_stream(payloads: list[MedianContourPayload]) -> None:
+    for payload in payloads:
+        _ = _find_median_contours(payload.star_mask)
+
+
+def bench_median_geometry_stream(payloads: list[MedianContourPayload]) -> None:
+    for payload in payloads:
+        _ = _measure_median_geometry(payload.contours)
+
+
+def bench_median_intensity_stream(payloads: list[MedianContourPayload]) -> None:
+    for payload in payloads:
+        _ = _measure_median_intensities(payload.response, payload.contours)
+
+
+def bench_median_filter_stream(payloads: list[MedianFilterPayload]) -> None:
+    for payload in payloads:
+        _ = _filter_median_candidates(payload)
+
+
+def bench_median_detect_stream(gray_frames: list[np.ndarray]) -> None:
+    for gray in gray_frames:
+        _ = detect_star_points_median(gray)
 
 
 def bench_detect_prepare_stream(frames: list[np.ndarray]) -> None:
@@ -781,6 +922,49 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if "remap_stream" in benchmark_case_names:
         remap_payloads = _prepare_remap_payloads(frames)
 
+    median_gray_frames = None
+    if any(case in benchmark_case_names for case in (
+            "median_mask_numpy_stream",
+            "median_mask_unfused_cpu_stream",
+            "median_mask_cpu_stream",
+            "median_contour_stream",
+            "median_geometry_stream",
+            "median_intensity_stream",
+            "median_filter_stream",
+            "median_detect_stream",
+    )):
+        median_gray_frames = [to_gray_f64(frame) for frame in frames]
+
+    median_contour_payloads = None
+    if any(case in benchmark_case_names for case in (
+            "median_contour_stream",
+            "median_geometry_stream",
+            "median_intensity_stream",
+            "median_filter_stream",
+    )):
+        median_contour_payloads = []
+        for gray in median_gray_frames:
+            star_mask, response, _ = median_star_mask_cpu_compiled(gray)
+            median_contour_payloads.append(MedianContourPayload(
+                response=response,
+                star_mask=star_mask,
+                contours=_find_median_contours(star_mask),
+            ))
+
+    median_filter_payloads = None
+    if "median_filter_stream" in benchmark_case_names:
+        median_filter_payloads = []
+        for payload in median_contour_payloads:
+            _, areas, eccentricities = _measure_median_geometry(
+                payload.contours)
+            intensities = _measure_median_intensities(
+                payload.response, payload.contours)
+            median_filter_payloads.append(MedianFilterPayload(
+                areas=areas,
+                intensities=intensities,
+                eccentricities=eccentricities,
+            ))
+
     stream_geometry = None
     if any(case in benchmark_case_names for case in (
             "match_stream",
@@ -793,6 +977,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "detect_stream": lambda: bench_detect_stream(frames),
         "detect_opencv_stream": lambda: bench_detect_opencv_stream(frames),
         "detect_native_hybrid_stream": lambda: bench_detect_native_hybrid_stream(frames),
+        "median_mask_numpy_stream": lambda: bench_median_mask_numpy_stream(
+            median_gray_frames),
+        "median_mask_unfused_cpu_stream": lambda: bench_median_mask_unfused_cpu_stream(
+            median_gray_frames),
+        "median_mask_cpu_stream": lambda: bench_median_mask_cpu_stream(
+            median_gray_frames),
+        "median_contour_stream": lambda: bench_median_contour_stream(
+            median_contour_payloads),
+        "median_geometry_stream": lambda: bench_median_geometry_stream(
+            median_contour_payloads),
+        "median_intensity_stream": lambda: bench_median_intensity_stream(
+            median_contour_payloads),
+        "median_filter_stream": lambda: bench_median_filter_stream(
+            median_filter_payloads),
+        "median_detect_stream": lambda: bench_median_detect_stream(
+            median_gray_frames),
         "detect_prepare_stream": lambda: bench_detect_prepare_stream(frames),
         "detect_wavelet_stream": lambda: bench_detect_wavelet_stream(
             detect_payloads),

@@ -11,22 +11,17 @@ import numpy as np
 from loguru import logger
 
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
-from hoshicore._custom_op._dispatch import is_cuda_resource_exhausted_error
-from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result
 from hoshicore._custom_op.backend_registry import BackendSelection
-from hoshicore._custom_op.backend_registry import resolve_after_resource_exhausted
-from hoshicore._custom_op.backend_registry import resolve_after_runtime_unavailable
+from hoshicore._custom_op.backend_registry import resolve_after_cuda_failure
 from hoshicore._custom_op.backend_registry import select_backend as _select_backend
-from hoshicore._custom_op.cuda_memory import cuda_memory_admission
 from hoshicore._custom_op.cuda_memory import cuda_memory_estimate
+from hoshicore._custom_op.cuda_memory import run_admitted_cuda as _run_admitted_cuda
 
 
 _debug_log = partial(debug_log, "remap")
-_is_cuda_runtime_unavailable_error = is_cuda_runtime_unavailable_error
 _COMPILED_SUPPORTED_DTYPES = (
     np.dtype(np.uint8),
     np.dtype(np.uint16),
@@ -459,13 +454,7 @@ def _camera_model_remap_compiled_kernel(
         out_height=int(out_height),
         out_width=int(out_width),
     )
-    with cuda_memory_admission(estimate) as admission:
-        if not admission.granted:
-            raise CustomOpResourceExhaustedError(
-                "camera_model_remap skipped CUDA because estimated peak "
-                f"{admission.estimated_peak_bytes} bytes exceeds usable VRAM"
-            )
-        return kernel(*kernel_args)
+    return _run_admitted_cuda(estimate, kernel, *kernel_args)
 
 
 def camera_model_remap_compiled(
@@ -646,28 +635,12 @@ def camera_model_remap(
     except RuntimeError as exc:
         if backend_name != "cuda":
             raise
-        if is_cuda_resource_exhausted_error(exc):
-            fallback_selection = resolve_after_resource_exhausted(
-                "camera_model_remap",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "compiled CUDA backend exhausted resources, falling back to "
-                f"the next backend: {exc}"
-            )
-        else:
-            fallback_selection = resolve_after_runtime_unavailable(
-                "camera_model_remap",
-                "cuda_host_io",
-                exc,
-                load_module=_load_compiled_module_result,
-            )
-            _debug_log(
-                "compiled CUDA backend unavailable at runtime, falling back "
-                f"to the next backend: {exc}"
-            )
+        fallback_selection = resolve_after_cuda_failure(
+            "camera_model_remap",
+            exc,
+            load_module=_load_compiled_module_result,
+            log=_debug_log,
+        )
     fallback_name, fallback_backend = _camera_model_remap_backend(
         fallback_selection)
     if fallback_name == "cuda":

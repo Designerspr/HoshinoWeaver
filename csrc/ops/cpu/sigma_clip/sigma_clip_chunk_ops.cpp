@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -185,6 +186,21 @@ py::tuple sigma_clip_iterative_chunk_dispatch(
     if (n_frames <= 0) {
         throw std::invalid_argument("sigma_clip_iterative_chunk: n_frames must be > 0");
     }
+    if (plane_size <= 0) {
+        throw std::invalid_argument(
+            "sigma_clip_iterative_chunk: stack dimensions must be positive");
+    }
+    if (n_frames > std::numeric_limits<int>::max() ||
+        plane_size > std::numeric_limits<int>::max()) {
+        throw std::invalid_argument("sigma_clip_iterative_chunk: stack is too large");
+    }
+    if (channels <= 0 || channels > std::numeric_limits<int>::max()) {
+        throw std::invalid_argument("sigma_clip_iterative_chunk: channels must be positive");
+    }
+    if (skip_zero_rgb && channels >= 3 && plane_size % channels != 0) {
+        throw std::invalid_argument("sigma_clip_iterative_chunk: plane_size must be divisible by "
+                                    "channels when skip_zero_rgb is true");
+    }
     if (total_sum.size() != plane_size || total_sq.size() != plane_size ||
         total_n.size() != plane_size) {
         throw std::invalid_argument(
@@ -325,6 +341,20 @@ py::tuple sigma_clip_fused_chunk_dispatch(const py::array& stack, double rej_hig
 
     if (n_frames <= 0) {
         throw std::invalid_argument("sigma_clip_fused_chunk: n_frames must be > 0");
+    }
+    if (plane_size <= 0) {
+        throw std::invalid_argument("sigma_clip_fused_chunk: stack dimensions must be positive");
+    }
+    if (n_frames > std::numeric_limits<int>::max() ||
+        plane_size > std::numeric_limits<int>::max()) {
+        throw std::invalid_argument("sigma_clip_fused_chunk: stack is too large");
+    }
+    if (channels <= 0 || channels > std::numeric_limits<int>::max()) {
+        throw std::invalid_argument("sigma_clip_fused_chunk: channels must be positive");
+    }
+    if (skip_zero_rgb && channels >= 3 && plane_size % channels != 0) {
+        throw std::invalid_argument("sigma_clip_fused_chunk: plane_size must be divisible by "
+                                    "channels when skip_zero_rgb is true");
     }
 
     // Parse optional mask

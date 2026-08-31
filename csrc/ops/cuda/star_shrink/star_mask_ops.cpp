@@ -1,6 +1,7 @@
 #include "star_mask_ops.h"
 
 #include "common/compat.h"
+#include "common/gaussian_kernel.h"
 
 #include <pybind11/numpy.h>
 
@@ -51,25 +52,6 @@ using process_launch_fn_t = void (*)(const T* image_host, T* out_host, int heigh
                                      float threshold_ratio, int open_ksize, int dilate_ksize,
                                      int shrink_ksize, int shrink_shape, int shrink_times,
                                      float shrink_ratio, int deringing_ksize);
-
-std::vector<float> make_gaussian_kernel(const float sigma) {
-    if (!(sigma > 0.0f)) {
-        throw std::invalid_argument("star_mask_dog_cuda: sigma values must be positive");
-    }
-    const int radius = std::max(1, static_cast<int>(std::ceil(3.0f * sigma)));
-    std::vector<float> kernel(static_cast<size_t>(2 * radius + 1));
-    const float denom = 2.0f * sigma * sigma;
-    double sum = 0.0;
-    for (int i = -radius; i <= radius; ++i) {
-        const float value = std::exp(-(static_cast<float>(i * i)) / denom);
-        kernel[static_cast<size_t>(i + radius)] = value;
-        sum += value;
-    }
-    for (float& value : kernel) {
-        value = static_cast<float>(static_cast<double>(value) / sum);
-    }
-    return kernel;
-}
 
 void validate_common(const py::array& image, const int open_ksize, const int dilate_ksize) {
     if (image.ndim() != 2 && image.ndim() != 3) {
@@ -134,8 +116,10 @@ star_mask_dog_cuda_impl(const py::array_t<T, py::array::c_style | py::array::for
     const int height = static_cast<int>(image.shape(0));
     const int width = static_cast<int>(image.shape(1));
     const int channels = image.ndim() == 3 ? 3 : 1;
-    std::vector<float> small_kernel = make_gaussian_kernel(sigma_small);
-    std::vector<float> large_kernel = make_gaussian_kernel(sigma_large);
+    std::vector<float> small_kernel =
+        hnw::camera::make_dog_gaussian_kernel(sigma_small, "star_mask_dog_cuda");
+    std::vector<float> large_kernel =
+        hnw::camera::make_dog_gaussian_kernel(sigma_large, "star_mask_dog_cuda");
     const int small_radius = static_cast<int>(small_kernel.size() / 2);
     const int large_radius = static_cast<int>(large_kernel.size() / 2);
     py::array_t<uint8_t> output({height, width});
@@ -179,8 +163,10 @@ py::array_t<T> star_shrink_dog_process_cuda_impl(
     const int width = static_cast<int>(image.shape(1));
     const int channels = image.ndim() == 3 ? 3 : 1;
     const int shape = parse_shape(shrink_shape);
-    std::vector<float> small_kernel = make_gaussian_kernel(sigma_small);
-    std::vector<float> large_kernel = make_gaussian_kernel(sigma_large);
+    std::vector<float> small_kernel =
+        hnw::camera::make_dog_gaussian_kernel(sigma_small, "star_mask_dog_cuda");
+    std::vector<float> large_kernel =
+        hnw::camera::make_dog_gaussian_kernel(sigma_large, "star_mask_dog_cuda");
     const int small_radius = static_cast<int>(small_kernel.size() / 2);
     const int large_radius = static_cast<int>(large_kernel.size() / 2);
     py::array_t<T> output(image.request().shape);

@@ -15,6 +15,13 @@ include(HnwCuda)
 hnw_enable_cuda_language()
 hnw_require_python_and_pybind11()
 
+if(HNW_ENABLE_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "HNW_ENABLE_METAL is only supported on macOS.")
+    endif()
+    enable_language(OBJCXX)
+endif()
+
 set(HNW_PACKAGE_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../hoshicore/_custom_op")
 
 add_library(hnw_ops_common STATIC
@@ -26,6 +33,7 @@ add_library(hnw_ops_cpu_calibration STATIC
 )
 
 add_library(hnw_ops_cpu_detection STATIC
+    ops/cpu/detection/median_star_mask_ops.cpp
     ops/cpu/detection/star_detect_fused_pixel_components_ops.cpp
 )
 
@@ -170,3 +178,102 @@ set_target_properties(_C PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${HNW_PACKAGE_OUTPUT_DIR}"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/archive"
 )
+
+if(HNW_ENABLE_METAL)
+    find_program(HNW_XCRUN_EXECUTABLE xcrun REQUIRED)
+    find_library(HNW_METAL_FRAMEWORK Metal REQUIRED)
+    find_library(HNW_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    find_library(HNW_COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+
+    execute_process(
+        COMMAND "${HNW_XCRUN_EXECUTABLE}" -sdk macosx -find metal
+        RESULT_VARIABLE HNW_METAL_COMPILER_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND "${HNW_XCRUN_EXECUTABLE}" -sdk macosx -find metallib
+        RESULT_VARIABLE HNW_METALLIB_COMPILER_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(NOT HNW_METAL_COMPILER_RESULT EQUAL 0 OR
+       NOT HNW_METALLIB_COMPILER_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "Metal shader tools are unavailable. Install/select a full Xcode "
+            "toolchain that provides xcrun metal and metallib."
+        )
+    endif()
+
+    # Every shader compiles to its own .air; metallib links them into the single
+    # library the runtime loads, so kernels can be split per logical op.
+    set(HNW_METAL_SHADER_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/ops/metal/star_shrink/star_shrink_process.metal"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ops/metal/star_shrink/star_mask.metal"
+    )
+    set(HNW_METAL_LIBRARY
+        "${HNW_PACKAGE_OUTPUT_DIR}/_metal_kernels.metallib"
+    )
+    set(HNW_METAL_AIR_FILES "")
+    foreach(HNW_METAL_SHADER IN LISTS HNW_METAL_SHADER_SOURCES)
+        get_filename_component(HNW_METAL_SHADER_NAME "${HNW_METAL_SHADER}" NAME_WE)
+        set(HNW_METAL_AIR
+            "${CMAKE_CURRENT_BINARY_DIR}/metal/${HNW_METAL_SHADER_NAME}.air"
+        )
+        add_custom_command(
+            OUTPUT "${HNW_METAL_AIR}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${CMAKE_CURRENT_BINARY_DIR}/metal"
+            COMMAND "${HNW_XCRUN_EXECUTABLE}" -sdk macosx metal
+                    -c "${HNW_METAL_SHADER}" -o "${HNW_METAL_AIR}"
+            DEPENDS "${HNW_METAL_SHADER}"
+            VERBATIM
+        )
+        list(APPEND HNW_METAL_AIR_FILES "${HNW_METAL_AIR}")
+    endforeach()
+    add_custom_command(
+        OUTPUT "${HNW_METAL_LIBRARY}"
+        COMMAND "${HNW_XCRUN_EXECUTABLE}" -sdk macosx metallib
+                ${HNW_METAL_AIR_FILES} -o "${HNW_METAL_LIBRARY}"
+        DEPENDS ${HNW_METAL_AIR_FILES}
+        VERBATIM
+    )
+    add_custom_target(hnw_metal_shaders ALL DEPENDS "${HNW_METAL_LIBRARY}")
+
+    pybind11_add_module(_metal MODULE
+        NO_EXTRAS
+        metal/module.mm
+        common/metal_runtime.mm
+        common/metal_host_io_workspace.mm
+        ops/metal/star_shrink/star_shrink_process_ops.mm
+        ops/metal/star_shrink/star_mask_ops.mm
+    )
+    add_dependencies(_metal hnw_metal_shaders)
+    target_include_directories(
+        _metal
+        PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            ${HNW_PYBIND11_INCLUDE_DIRS}
+    )
+    target_compile_options(_metal PRIVATE -fobjc-arc)
+    target_link_libraries(
+        _metal
+        PRIVATE
+            pybind11::headers
+            "${HNW_METAL_FRAMEWORK}"
+            "${HNW_FOUNDATION_FRAMEWORK}"
+            "${HNW_COREGRAPHICS_FRAMEWORK}"
+    )
+    set_target_properties(
+        _metal
+        PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED ON
+            OBJCXX_STANDARD 17
+            OBJCXX_STANDARD_REQUIRED ON
+            OUTPUT_NAME "_metal"
+            LIBRARY_OUTPUT_DIRECTORY "${HNW_PACKAGE_OUTPUT_DIR}"
+            RUNTIME_OUTPUT_DIRECTORY "${HNW_PACKAGE_OUTPUT_DIR}"
+            ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/archive"
+    )
+endif()

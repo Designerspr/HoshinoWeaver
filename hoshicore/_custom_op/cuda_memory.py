@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Callable, Iterator
+from typing import Callable, Iterator, TypeVar
 
 from hoshicore._custom_op._dispatch import CudaProbeError
 from hoshicore._custom_op._dispatch import CustomOpCudaRuntimeUnavailableError
@@ -18,6 +18,8 @@ CUDA_ADMISSION_HEADROOM_FRACTION = 0.05
 STAR_DETECT_MAX_FOREGROUND_FRACTION = 0.25
 STAR_SHRINK_THREADS_PER_BLOCK = 256
 MATCHING_COSINE_TILE_SIZE = 16
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -35,8 +37,6 @@ class CudaChunkMemoryModel:
     host_bytes_per_row: int
     device_bytes_per_row: int
     fixed_device_bytes: int = 0
-    pinned_bytes_per_row: int = 0
-    fixed_pinned_bytes: int = 0
     confidence: str = "bounded"
     reason: str = ""
 
@@ -47,9 +47,6 @@ class CudaChunkMemoryModel:
             logical_op=self.logical_op,
             peak_device_bytes=(
                 self.device_bytes_per_row * rows + self.fixed_device_bytes
-            ),
-            peak_pinned_bytes=(
-                self.pinned_bytes_per_row * rows + self.fixed_pinned_bytes
             ),
             confidence=self.confidence,
             reason=self.reason,
@@ -599,6 +596,15 @@ def _headroom_bytes(total_bytes: int) -> int:
     )
 
 
+def cuda_usable_memory_bytes(
+    free_bytes: int,
+    total_bytes: int,
+    reserved_bytes: int = 0,
+) -> int:
+    headroom = _headroom_bytes(total_bytes)
+    return max(0, min(total_bytes, free_bytes) - headroom - reserved_bytes)
+
+
 def _clear_current_thread_cuda_cache() -> bool:
     module, _ = load_compiled_module()
     if module is None or not hasattr(module, "clear_cuda_host_io_cache"):
@@ -642,13 +648,11 @@ def _probe_admission(
     total_bytes = int(info["total_bytes"])
     headroom = _headroom_bytes(total_bytes)
     reserved = _reserved_bytes_by_device.get(device, 0)
-    process_available = max(0, total_bytes - headroom - reserved)
     # Reservations may later also reduce free_bytes.  Counting both is a
     # deliberate conservative v0 policy: a false rejection is safer than two
     # workers concurrently committing more than the currently free memory.
-    runtime_available = max(0, free_bytes - headroom - reserved)
-    granted = estimate.peak_device_bytes <= min(
-        process_available, runtime_available)
+    granted = estimate.peak_device_bytes <= cuda_usable_memory_bytes(
+        free_bytes, total_bytes, reserved)
     return CudaAdmissionDecision(
         logical_op=estimate.logical_op,
         granted=granted,
@@ -694,6 +698,28 @@ def cuda_memory_admission(
                     _reserved_bytes_by_device[decision.device] = remaining
                 else:
                     _reserved_bytes_by_device.pop(decision.device, None)
+
+
+def run_admitted_cuda(
+    estimate: CudaMemoryEstimate,
+    kernel: Callable[..., _T],
+    *args: object,
+) -> _T:
+    """Run a CUDA host-I/O kernel under VRAM admission control.
+
+    Raises CustomOpResourceExhaustedError when the estimated peak exceeds
+    usable VRAM, so callers re-resolve onto their declared fallback backend.
+    """
+    with cuda_memory_admission(estimate) as admission:
+        if not admission.granted:
+            raise CustomOpResourceExhaustedError(
+                f"{estimate.logical_op} skipped CUDA because estimated peak "
+                f"{admission.estimated_peak_bytes} bytes exceeds usable VRAM "
+                f"(free={admission.free_bytes}, "
+                f"reserved={admission.reserved_bytes}, "
+                f"headroom={admission.headroom_bytes})"
+            )
+        return kernel(*args)
 
 
 def _reset_cuda_reservations_for_tests() -> None:

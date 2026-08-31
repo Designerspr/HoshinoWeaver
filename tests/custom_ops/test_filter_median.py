@@ -9,6 +9,7 @@ from hoshicore._custom_op import (
     median_reduce_chunk,
 )
 import hoshicore._custom_op.ops.filter as filter_ops
+import hoshicore._custom_op.ops.detection as detection_ops
 import hoshicore._custom_op.ops.median as median_ops
 import hoshicore.component.norma.detection as norma_detection
 from hoshicore.component.frame_buffer import MemoryFrameBuffer
@@ -185,12 +186,15 @@ class TestFilterMedianCustomOps(CustomOpsTestCase):
     def test_star_detect_uint16_large_median_uses_custom_filter(self) -> None:
         image = np.zeros((9, 11), dtype=np.uint16)
         image[4, 5] = 50000
-        filtered_bg = np.zeros_like(image)
 
         with mock.patch.object(
             norma_detection,
-            "median_filter_2d",
-            return_value=filtered_bg,
+            "median_star_mask",
+            return_value=(
+                np.zeros_like(image, dtype=np.uint8),
+                np.zeros_like(image, dtype=np.float32),
+                0.0,
+            ),
         ) as patched_filter:
             mask = star_detect.detect_starmask_by_threshold(
                 image,
@@ -201,9 +205,9 @@ class TestFilterMedianCustomOps(CustomOpsTestCase):
             )
 
         patched_filter.assert_called_once()
-        args, _ = patched_filter.call_args
+        args, kwargs = patched_filter.call_args
         np.testing.assert_array_equal(args[0], image)
-        self.assertEqual(args[1], 7)
+        self.assertEqual(kwargs["median_ksize"], 7)
         self.assertEqual(mask.shape, image.shape)
         self.assertEqual(mask.dtype, np.uint8)
 
@@ -242,13 +246,13 @@ class TestFilterMedianCustomOps(CustomOpsTestCase):
         filtered_bg = np.zeros(image.shape, dtype=np.uint16)
 
         with mock.patch.object(
-            norma_detection,
-            "median_filter_2d",
+            detection_ops,
+            "_median_filter_2d_numpy",
             return_value=filtered_bg,
         ) as patched_filter:
-            star_detect.detect_starmask_by_threshold_with_response(
+            detection_ops.median_star_mask_numpy(
                 image,
-                ksize=7,
+                median_ksize=7,
                 threshold_ratio=1,
                 open_ksize=0,
             )
@@ -265,17 +269,15 @@ class TestFilterMedianCustomOps(CustomOpsTestCase):
         filtered_bg = np.full_like(image, 1000)
 
         with mock.patch.object(
-            norma_detection,
-            "median_filter_2d",
+            detection_ops,
+            "_median_filter_2d_numpy",
             return_value=filtered_bg,
         ):
-            mask, response = (
-                star_detect.detect_starmask_by_threshold_with_response(
-                    image,
-                    ksize=7,
-                    threshold_ratio=1,
-                    open_ksize=0,
-                )
+            mask, response, _ = detection_ops.median_star_mask_numpy(
+                image,
+                median_ksize=7,
+                threshold_ratio=1,
+                open_ksize=0,
             )
 
         self.assertEqual(response.dtype, np.float32)

@@ -1,7 +1,10 @@
-"""Application-level production-path overview benchmark.
+"""Application-level production compute-path benchmark.
 
 This suite runs representative production paths independently and prints only
-path totals. Per-stage details stay in the JSON report when requested.
+path totals without routing them through the DAG engine. The default ``auto``
+backend preference follows production dispatch. ``cpu`` and ``numpy`` are
+comparison policies, not claims that every case has a corresponding backend.
+Per-stage details stay in the JSON report when requested.
 """
 
 from __future__ import annotations
@@ -565,7 +568,13 @@ def _run_alignment_case(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Benchmark independent production compute paths. The default auto "
+            "backend follows production dispatch; cpu and numpy are comparison "
+            "policies."
+        )
+    )
     parser.add_argument("--frames", type=int, default=10)
     parser.add_argument("--height", type=int, default=2048)
     parser.add_argument("--width", type=int, default=3072)
@@ -605,14 +614,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         dest="backend",
-        choices=["auto", "numpy"],
+        choices=["auto", "cpu", "numpy"],
         default="auto",
-        help="Use production backend selection or force numpy custom-op fallbacks.",
+        help=(
+            "Backend preference: auto follows production dispatch (default); "
+            "cpu disables CUDA while retaining compiled CPU kernels; numpy "
+            "forces custom-op fallbacks. Auto does not mean every case uses CUDA."
+        ),
     )
     parser.add_argument(
         "--custom-op-backend",
         dest="backend",
-        choices=["auto", "numpy"],
+        choices=["auto", "cpu", "numpy"],
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--warmup", type=int, default=0)
@@ -699,6 +712,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     return {
         "suite": SUITE_ID,
+        "benchmark_scope": "production_compute_paths",
         "env": collect_env_info(),
         "custom_ops": custom_ops_build_info(),
         "config": {
@@ -726,6 +740,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "ref_projection": args.ref_projection,
             "src_projection": args.src_projection,
             "backend": args.backend,
+            "backend_preference": args.backend,
             "warmup": args.warmup,
             "repeat": args.repeat,
             "log_level": args.log_level,

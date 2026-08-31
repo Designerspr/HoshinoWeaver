@@ -35,11 +35,14 @@ DEFAULT_WIDTH = 3072
 
 CASE_NAMES = [
     "numpy_grid",
+    "sparse_numpy_grid",
     "custom_op_fused",
     "custom_op_auto",
     "custom_op_cpu_fused",
     "opencv_remap",
+    "opencv_sparse_remap",
     "original_remap",
+    "sparse_original_remap",
 ]
 DEFAULT_CASES = [
     "numpy_grid",
@@ -178,6 +181,15 @@ def build_grid_numpy(cfg: RemapConfig) -> tuple[np.ndarray, np.ndarray]:
     grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
     dst_pixels = np.stack([grid_x.ravel(), grid_y.ravel()], axis=1)
 
+    src_pixels = _project_dst_pixels(cfg, dst_pixels)
+    return (
+        src_pixels[:, 0].reshape(cfg.height, cfg.width).astype(np.float32),
+        src_pixels[:, 1].reshape(cfg.height, cfg.width).astype(np.float32),
+    )
+
+
+def _project_dst_pixels(cfg: RemapConfig,
+                        dst_pixels: np.ndarray) -> np.ndarray:
     k_dst = _make_camera_matrix(cfg.fx_dst, cfg.fy_dst, cfg.cx_dst, cfg.cy_dst)
     if cfg.dst_projection == "fisheye":
         dst_rays = unproject_fisheye_pixels(
@@ -192,10 +204,46 @@ def build_grid_numpy(cfg: RemapConfig) -> tuple[np.ndarray, np.ndarray]:
     else:
         src_pixels = project_vectors(src_rays, k_src, cfg.src_dist_coeffs)
 
-    return (
-        src_pixels[:, 0].reshape(cfg.height, cfg.width).astype(np.float32),
-        src_pixels[:, 1].reshape(cfg.height, cfg.width).astype(np.float32),
-    )
+    return src_pixels
+
+
+def build_sparse_grid_numpy(
+    cfg: RemapConfig,
+    map_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not 0.0 < map_scale < 1.0:
+        raise ValueError("map_scale must be in (0, 1) for sparse remap")
+
+    grid_width = max(2, round(cfg.width * map_scale))
+    grid_height = max(2, round(cfg.height * map_scale))
+    sx = grid_width / cfg.width
+    sy = grid_height / cfg.height
+    xs = (np.arange(grid_width, dtype=np.float64) + 0.5) / sx - 0.5
+    ys = (np.arange(grid_height, dtype=np.float64) + 0.5) / sy - 0.5
+    grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
+    dst_pixels = np.stack([grid_x.ravel(), grid_y.ravel()], axis=1)
+    src_pixels = _project_dst_pixels(cfg, dst_pixels)
+    map_x = src_pixels[:, 0].reshape(grid_height, grid_width).astype(np.float32)
+    map_y = src_pixels[:, 1].reshape(grid_height, grid_width).astype(np.float32)
+    map_x = cv2.resize(map_x, (cfg.width, cfg.height),
+                       interpolation=cv2.INTER_LINEAR)
+    map_y = cv2.resize(map_y, (cfg.width, cfg.height),
+                       interpolation=cv2.INTER_LINEAR)
+
+    border_x = np.arange(cfg.width, dtype=np.float64)
+    border_y = np.arange(1, cfg.height - 1, dtype=np.float64)
+    border_pixels = np.concatenate((
+        np.column_stack((border_x, np.zeros(cfg.width))),
+        np.column_stack((border_x, np.full(cfg.width, cfg.height - 1.0))),
+        np.column_stack((np.zeros(len(border_y)), border_y)),
+        np.column_stack((np.full(len(border_y), cfg.width - 1.0), border_y)),
+    ))
+    border_src = _project_dst_pixels(cfg, border_pixels)
+    bx = border_pixels[:, 0].astype(np.intp)
+    by = border_pixels[:, 1].astype(np.intp)
+    map_x[by, bx] = border_src[:, 0].astype(np.float32)
+    map_y[by, bx] = border_src[:, 1].astype(np.float32)
+    return map_x, map_y
 
 
 def _make_camera_matrix(fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
@@ -308,6 +356,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pitch-deg", type=float, default=0.15)
     parser.add_argument("--roll-deg", type=float, default=0.05)
     parser.add_argument("--distortion-scale", type=float, default=0.0)
+    parser.add_argument("--map-scale", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--input-dir", type=str, default=None)
     parser.add_argument(
@@ -360,6 +409,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     cfg = _build_config(args, image.shape)
     channel_count = int(image.shape[2]) if image.ndim == 3 else 1
     map_cache: tuple[np.ndarray, np.ndarray] | None = None
+    sparse_map_cache: tuple[np.ndarray, np.ndarray] | None = None
 
     def get_cached_maps() -> tuple[np.ndarray, np.ndarray]:
         nonlocal map_cache
@@ -367,13 +417,24 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             map_cache = build_grid_numpy(cfg)
         return map_cache
 
+    def get_cached_sparse_maps() -> tuple[np.ndarray, np.ndarray]:
+        nonlocal sparse_map_cache
+        if sparse_map_cache is None:
+            sparse_map_cache = build_sparse_grid_numpy(cfg, args.map_scale)
+        return sparse_map_cache
+
     runners = {
         "numpy_grid": lambda: build_grid_numpy(cfg),
+        "sparse_numpy_grid": lambda: build_sparse_grid_numpy(cfg, args.map_scale),
         "custom_op_fused": lambda: remap_with_custom_op(image, cfg),
         "custom_op_auto": lambda: remap_with_auto_custom_op(image, cfg),
         "custom_op_cpu_fused": lambda: remap_with_cpu_custom_op(image, cfg),
         "opencv_remap": lambda: remap_with_cv2(image, *get_cached_maps()),
+        "opencv_sparse_remap": lambda: remap_with_cv2(
+            image, *get_cached_sparse_maps()),
         "original_remap": lambda: remap_with_cv2(image, *build_grid_numpy(cfg)),
+        "sparse_original_remap": lambda: remap_with_cv2(
+            image, *build_sparse_grid_numpy(cfg, args.map_scale)),
     }
 
     results = {
@@ -408,6 +469,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "pitch_deg": args.pitch_deg,
             "roll_deg": args.roll_deg,
             "distortion_scale": args.distortion_scale,
+            "map_scale": args.map_scale,
             "input_dir": args.input_dir,
             "input_mode": args.input_mode,
             "warmup": args.warmup,
@@ -452,6 +514,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             }
     if custom_backends:
         report["custom_backends"] = custom_backends
+    if any(case in args.cases for case in (
+            "sparse_numpy_grid", "opencv_sparse_remap",
+            "sparse_original_remap")) and not args.skip_accuracy:
+        reference = remap_with_cv2(image, *get_cached_maps()).astype(np.float64)
+        sparse = remap_with_cv2(image,
+                                *get_cached_sparse_maps()).astype(np.float64)
+        abs_err = np.abs(sparse - reference)
+        accuracy_by_case["sparse_map"] = {
+            "max_abs_err": float(np.max(abs_err)),
+            "mean_abs_err": float(np.mean(abs_err)),
+        }
     if accuracy_by_case:
         report["accuracy_by_case"] = accuracy_by_case
         if "custom_op_fused" in accuracy_by_case:

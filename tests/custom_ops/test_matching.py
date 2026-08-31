@@ -11,6 +11,7 @@ from hoshicore._custom_op.backend_registry import BackendSelection
 import hoshicore._custom_op.cuda_memory as cuda_memory
 import hoshicore._custom_op.ops.alignment as alignment_ops
 import hoshicore.component.norma.matching as norma_matching
+import hoshicore._custom_op.backend_registry as backend_registry
 
 
 LOGICAL_OP = "matching_cosine_bidirectional_nearest"
@@ -142,6 +143,27 @@ class TestMatchingCosineBidirectionalNearest(unittest.TestCase):
             self.assertTrue(value.flags.c_contiguous)
         self.assertEqual(got[0].dtype, np.int64)
         self.assertEqual(got[1].dtype, np.float64)
+
+    def test_cpu_parallel_row_blocks_match_numpy(self) -> None:
+        features1, features2 = _random_features(
+            seed=31,
+            n1=401,
+            n2=421,
+            feature_dim=120,
+        )
+
+        expected = alignment_ops.matching_cosine_bidirectional_nearest_numpy(
+            features1, features2
+        )
+        got = alignment_ops.matching_cosine_bidirectional_nearest_cpu_compiled(
+            features1, features2
+        )
+
+        self.assertIsNotNone(got)
+        np.testing.assert_array_equal(got[0], expected[0])
+        np.testing.assert_allclose(got[1], expected[1], rtol=1e-12, atol=1e-14)
+        np.testing.assert_array_equal(got[2], expected[2])
+        np.testing.assert_allclose(got[3], expected[3], rtol=1e-12, atol=1e-14)
 
     def test_cuda_matches_numpy_when_available(self) -> None:
         module = self._compiled_module()
@@ -318,7 +340,7 @@ class TestMatchingCosineBidirectionalNearest(unittest.TestCase):
                 side_effect=CustomOpResourceExhaustedError("estimated VRAM"),
             ):
                 with mock.patch.object(
-                    alignment_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=_selection("openmp_cpu"),
                 ) as resolve:
@@ -364,7 +386,7 @@ class TestMatchingCosineBidirectionalNearest(unittest.TestCase):
                         return_value=False,
                     ):
                         with mock.patch.object(
-                            alignment_ops,
+                            backend_registry,
                             "resolve_after_resource_exhausted",
                             return_value=_selection("openmp_cpu"),
                         ) as resolve:
@@ -536,3 +558,26 @@ class TestMatchingCosineBidirectionalNearest(unittest.TestCase):
 
         nearest.assert_not_called()
         np.testing.assert_array_equal(pair_idx, expected)
+
+    def test_norma_percentile_threshold_excludes_equal_distances(self) -> None:
+        features = np.eye(4, dtype=np.float64)
+        points = np.column_stack((np.arange(4, dtype=np.float64),
+                                  np.zeros(4, dtype=np.float64)))
+        indices = np.arange(4, dtype=np.int64)
+        distances = np.full(4, 0.25, dtype=np.float64)
+
+        with mock.patch.object(
+            norma_matching,
+            "matching_cosine_bidirectional_nearest",
+            return_value=(indices, distances, indices, distances),
+        ):
+            pair_idx = norma_matching.find_initial_match(
+                features,
+                features,
+                points,
+                points,
+                alpha=0.0,
+                apply_threshold_filter=False,
+            )
+
+        np.testing.assert_array_equal(pair_idx, np.empty((0, 2), dtype=np.int32))

@@ -32,6 +32,20 @@ class TestAlignmentCustomOps(CustomOpsTestCase):
 
         np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-12)
 
+    def test_extract_point_features_compiled_handles_duplicate_points(self) -> None:
+        vec, _, vol, _, _, _ = _make_alignment_match_inputs(seed=5, n_points=48)
+        # Exact duplicates create similarity ties in the neighbor selection;
+        # duplicated points must still get identical, finite descriptors.
+        vec[24:] = vec[:24]
+        vol[24:] = vol[:24]
+
+        got = alignment_ops.extract_point_features_compiled(vec, vol, k=8)
+
+        self.assertTrue(np.all(np.isfinite(got)))
+        np.testing.assert_array_equal(got[24:], got[:24])
+        rerun = alignment_ops.extract_point_features_compiled(vec, vol, k=8)
+        np.testing.assert_array_equal(got, rerun)
+
     def test_extract_point_features_can_force_numpy_fallback(self) -> None:
         vec, _, vol, _, _, _ = _make_alignment_match_inputs(seed=3)
 

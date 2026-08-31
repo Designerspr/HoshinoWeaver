@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 from functools import partial
-from typing import Any, Callable
+from typing import Callable
 
 import cv2
 import numpy as np
 
 from hoshicore._custom_op._dispatch import apply_compiled_threads as _apply_compiled_threads
-from hoshicore._custom_op._dispatch import compiled_build_info as _compiled_build_info
-from hoshicore._custom_op._dispatch import debug_enabled as _debug_enabled
 from hoshicore._custom_op._dispatch import debug_log
 from hoshicore._custom_op._dispatch import fallback_preference as _fallback_preference
 from hoshicore._custom_op._dispatch import load_compiled_module as _load_compiled_module_result

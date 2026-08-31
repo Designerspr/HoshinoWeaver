@@ -5,6 +5,9 @@ import numpy as np
 
 from hoshicore._custom_op import build_info, camera_model_remap
 from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
+from hoshicore._custom_op._dispatch import is_cuda_runtime_unavailable_error
+import hoshicore._custom_op.backend_registry as backend_registry
+import hoshicore._custom_op.cuda_memory as cuda_memory
 import hoshicore._custom_op.ops.remap as remap_ops
 import hoshicore.component.norma.types as norma_types
 from hoshicore.component.norma.types import (
@@ -150,10 +153,8 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         camera = CameraModel(intrinsics=intrinsics)
         image = np.arange(8 * 12, dtype=np.uint16).reshape(8, 12)
 
-        # Force both calls through the pure-Python coordinate-map path so this
-        # exercises map_scale's own semantics rather than whether the fused
-        # custom op happens to short-circuit the call. The fused op does not
-        # accept map_scale yet; once it does, this bypass can be dropped.
+        # Isolate the generic fallback: supported built-in camera pairs prefer
+        # the exact fused path even when the fallback map scale is below 1.
         with mock.patch.object(
                 CameraModel,
                 "_project_image_from_camera_fused",
@@ -324,14 +325,16 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
 
     def test_camera_model_remap_cpu_compiled_uint16_matches_numpy(self) -> None:
-        image = (np.arange(8 * 9 * 2, dtype=np.uint16).reshape(8, 9, 2) * 19)
+        # C3 is a production channel count; see the dispatch test for why C2/C5
+        # cannot be compared against cv2 across architectures.
+        image = (np.arange(8 * 9 * 3, dtype=np.uint16).reshape(8, 9, 3) * 19)
         rotation = np.array([
             [0.9998, -0.0170, 0.0030],
             [0.0170, 0.9998, -0.0020],
@@ -363,8 +366,9 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         np.testing.assert_allclose(got, expected, rtol=0, atol=1)
 
     def test_camera_model_remap_cpu_matches_opencv5_channel_dispatch(self) -> None:
-        # OpenCV 5's exact path handles C1/C3/C4; other channel counts retain the
-        # legacy 1/32 table. These fractional samples distinguish the two paths.
+        # OpenCV 5's exact path handles C1/C3/C4 on every architecture; its 1/32
+        # table fallback for other channel counts is x86_64-only (arm64 is exact
+        # throughout). These fractional samples distinguish the two paths.
         cases = (
             (np.uint8, 255, 0.1, 3, 2),
             (np.uint16, 65535, 0.02, 26, 64),
@@ -392,13 +396,17 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                         if channels == 1
                         else np.repeat(base[:, :, None], channels, axis=2)
                     )
-                    expected = remap_ops.camera_model_remap_numpy(image=image, **kwargs)
                     got = remap_ops.camera_model_remap_cpu_compiled(image=image, **kwargs)
-                    expected_value = exact_value if channels in {1, 3, 4} else table_value
-
-                    np.testing.assert_array_equal(
-                        expected, np.full_like(expected, expected_value))
-                    np.testing.assert_array_equal(got, expected)
+                    if channels in {1, 3, 4}:
+                        expected = remap_ops.camera_model_remap_numpy(
+                            image=image, **kwargs)
+                        np.testing.assert_array_equal(
+                            expected, np.full_like(expected, exact_value))
+                        np.testing.assert_array_equal(got, expected)
+                    else:
+                        # cv2 is not comparable here, so pin the kernel's own contract.
+                        np.testing.assert_array_equal(
+                            got, np.full_like(got, table_value))
 
     def test_camera_model_remap_cuda_matches_opencv5_channel_dispatch(self) -> None:
         if not build_info().get("cuda"):
@@ -432,7 +440,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                     try:
                         got = remap_ops.camera_model_remap_compiled(image=image, **kwargs)
                     except RuntimeError as exc:
-                        if remap_ops._is_cuda_runtime_unavailable_error(exc):
+                        if is_cuda_runtime_unavailable_error(exc):
                             self.skipTest(f"CUDA runtime unavailable: {exc}")
                         raise
 
@@ -630,7 +638,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                     try:
                         got = remap_ops.camera_model_remap_compiled(**kwargs)
                     except RuntimeError as exc:
-                        if remap_ops._is_cuda_runtime_unavailable_error(exc):
+                        if is_cuda_runtime_unavailable_error(exc):
                             self.skipTest(f"CUDA runtime unavailable: {exc}")
                         raise
                     np.testing.assert_allclose(
@@ -672,7 +680,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 
@@ -701,7 +709,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                         try:
                             got = remap_ops.camera_model_remap_compiled(**kwargs)
                         except RuntimeError as exc:
-                            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+                            if is_cuda_runtime_unavailable_error(exc):
                                 self.skipTest(f"CUDA runtime unavailable: {exc}")
                             raise
                         np.testing.assert_array_equal(got, expected)
@@ -718,7 +726,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 
@@ -757,7 +765,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 
@@ -798,7 +806,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
         try:
             got = remap_ops.camera_model_remap_compiled(**kwargs)
         except RuntimeError as exc:
-            if remap_ops._is_cuda_runtime_unavailable_error(exc):
+            if is_cuda_runtime_unavailable_error(exc):
                 self.skipTest(f"CUDA runtime unavailable: {exc}")
             raise
 
@@ -989,7 +997,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 return_value=("cuda", mock.Mock(side_effect=RuntimeError(
                     "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=_cpu_remap_selection()):
                 with mock.patch.object(
@@ -1031,7 +1039,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 return_value=("cuda", mock.Mock(side_effect=RuntimeError(
                     "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=_numpy_remap_selection()):
                 got = camera_model_remap(**kwargs)
@@ -1063,7 +1071,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 return_value=("cuda", mock.Mock(side_effect=RuntimeError(
                     "camera_model_remap cudaMalloc(image): no CUDA-capable device is detected")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=_cpu_remap_selection()):
                 with mock.patch.object(
@@ -1160,7 +1168,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                                                   CustomOpResourceExhaustedError(
                                                       "estimated VRAM is insufficient")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=_cpu_remap_selection()) as resolve:
                 with mock.patch.object(
@@ -1199,7 +1207,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                                                   CustomOpResourceExhaustedError(
                                                       "cudaMalloc output")))):
             with mock.patch.object(
-                    remap_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=_numpy_remap_selection()):
                 got = camera_model_remap(**kwargs)
@@ -1222,7 +1230,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                 "_load_compiled_module_result",
                 return_value=(module, None)):
             with mock.patch.object(
-                    remap_ops,
+                    cuda_memory,
                     "cuda_memory_admission",
                     admission):
                 with self.assertRaisesRegex(
@@ -1423,6 +1431,7 @@ class TestCameraModelRemapCustomOp(unittest.TestCase):
                         image,
                         (width, height),
                         rotation_dst_to_src=rotation,
+                        map_scale=1.0,
                     )
                     expected = dst_camera.project_image_from_camera(
                         src_camera,

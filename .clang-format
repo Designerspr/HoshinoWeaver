@@ -36,3 +36,41 @@ AllowShortBlocksOnASingleLine: Never
 AllowShortFunctionsOnASingleLine: Inline
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
+---
+Language: ObjC
+BasedOnStyle: LLVM
+Standard: c++17
+
+ColumnLimit: 100
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+AccessModifierOffset: -4
+BreakBeforeBraces: Attach
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeIsMainSourceRegex: '.*\.mm$'
+IncludeCategories:
+  - Regex: '^"'
+    Priority: 1
+    CaseSensitive: true
+  - Regex: '^<pybind11/'
+    Priority: 2
+    CaseSensitive: true
+  - Regex: '^<(Metal|Foundation|CoreGraphics)'
+    Priority: 3
+    CaseSensitive: true
+  - Regex: '^<'
+    Priority: 4
+    CaseSensitive: true
+
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false

@@ -30,12 +30,37 @@ class CustomOpCudaRuntimeUnavailableError(CustomOpUnavailableError):
         self.reason_code = reason_code
 
 
+class CustomOpMetalRuntimeUnavailableError(CustomOpUnavailableError):
+    """Raised when the Metal probe reports an explicitly unavailable runtime."""
+
+    def __init__(self, message: str, *, reason_code: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 class CustomOpResourceExhaustedError(RuntimeError):
     """Raised when a native backend lacks resources for the requested input."""
 
 
 class CudaProbeError(RuntimeError):
     """Raised when a structured CUDA runtime probe reports a real error."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str,
+        error_code: int | None,
+        category: str,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.error_code = error_code
+        self.category = category
+
+
+class MetalProbeError(RuntimeError):
+    """Raised when a structured Metal runtime probe reports a real error."""
 
     def __init__(
         self,
@@ -127,10 +152,42 @@ def is_cuda_resource_exhausted_error(exc: RuntimeError) -> bool:
     return exhausted_type is not None and isinstance(exc, exhausted_type)
 
 
+def is_metal_runtime_unavailable_error(exc: RuntimeError) -> bool:
+    if isinstance(exc, CustomOpMetalRuntimeUnavailableError):
+        return True
+    module, _ = load_metal_module()
+    unavailable_type = (
+        getattr(module, "MetalRuntimeUnavailableError", None)
+        if module is not None
+        else None
+    )
+    return unavailable_type is not None and isinstance(exc, unavailable_type)
+
+
+def is_metal_resource_exhausted_error(exc: RuntimeError) -> bool:
+    if isinstance(exc, CustomOpResourceExhaustedError):
+        return True
+    module, _ = load_metal_module()
+    exhausted_type = (
+        getattr(module, "MetalResourceExhaustedError", None)
+        if module is not None
+        else None
+    )
+    return exhausted_type is not None and isinstance(exc, exhausted_type)
+
+
 @lru_cache(maxsize=1)
 def load_compiled_module() -> tuple[Any | None, str | None]:
     try:
         return importlib.import_module("hoshicore._custom_op._C"), None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+@lru_cache(maxsize=1)
+def load_metal_module() -> tuple[Any | None, str | None]:
+    try:
+        return importlib.import_module("hoshicore._custom_op._metal"), None
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"
 
@@ -184,6 +241,50 @@ def cuda_memory_info() -> dict[str, Any]:
         isinstance(payload.get(key), int) for key in ("free_bytes", "total_bytes")
     ):
         raise RuntimeError("available CUDA memory info is missing byte counts")
+    return payload
+
+
+def metal_device_info() -> dict[str, Any]:
+    module, error = load_metal_module()
+    if module is None:
+        return {
+            "available": False,
+            "status": "unavailable",
+            "reason_code": "module_unavailable",
+            "category": "build",
+            "reason": error or "Metal backend unavailable",
+        }
+    if not hasattr(module, "metal_device_info"):
+        return {
+            "available": False,
+            "status": "unavailable",
+            "reason_code": "probe_unavailable",
+            "category": "build",
+            "reason": "compiled backend does not expose Metal device info",
+        }
+    payload = module.metal_device_info()
+    if not isinstance(payload, dict) or not isinstance(payload.get("available"), bool):
+        raise RuntimeError("invalid Metal device info payload")
+    status = payload.get("status")
+    if status not in {"available", "unavailable", "explicitly_unavailable", "error"}:
+        raise RuntimeError("invalid Metal device info status")
+    if payload["available"] != (status == "available"):
+        raise RuntimeError("inconsistent Metal device info availability status")
+    if status == "error":
+        error_code = payload.get("error_code")
+        if error_code is not None and not isinstance(error_code, int):
+            raise RuntimeError("invalid Metal device info error code")
+        raise MetalProbeError(
+            str(payload.get("reason") or "Metal runtime probe failed"),
+            reason_code=str(payload.get("reason_code") or "metal_runtime_error"),
+            error_code=error_code,
+            category=str(payload.get("category") or "runtime"),
+        )
+    if payload["available"] and not all(
+        isinstance(payload.get(key), int)
+        for key in ("recommended_max_working_set_bytes", "current_allocated_bytes")
+    ):
+        raise RuntimeError("available Metal device info is missing byte counts")
     return payload
 
 

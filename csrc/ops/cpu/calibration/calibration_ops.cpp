@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
-#include <string>
 #include <type_traits>
 
 namespace {
@@ -129,7 +128,6 @@ py::array_t<T> calibration_divide_impl(
 
 py::array calibration_subtract_dispatch(const py::array& frame, const py::array& reference) {
     hnw::require_same_dtype(frame, reference, "calibration_subtract");
-    const std::string frame_dtype = py::str(frame.dtype()).cast<std::string>();
 
     if (py::isinstance<py::array_t<unsigned char>>(frame)) {
         return calibration_subtract_impl<unsigned char>(
@@ -158,7 +156,6 @@ py::array calibration_subtract_dispatch(const py::array& frame, const py::array&
 
 py::array calibration_divide_dispatch(const py::array& frame, const py::array& reference) {
     hnw::require_same_dtype(frame, reference, "calibration_divide");
-    const std::string frame_dtype = py::str(frame.dtype()).cast<std::string>();
 
     if (py::isinstance<py::array_t<unsigned char>>(frame)) {
         return calibration_divide_impl<unsigned char>(frame.cast<py::array_t<unsigned char>>(),

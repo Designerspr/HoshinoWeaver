@@ -1,3 +1,4 @@
+import unittest
 from unittest import mock
 
 import numpy as np
@@ -399,7 +400,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
             ):
                 cpu_fallback = mock.Mock(return_value=expected)
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=backend_registry.BackendSelection(
                         backend_registry.BackendCandidate(
@@ -478,7 +479,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                 ),
             ):
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=backend_registry.BackendSelection(
                         None,
@@ -522,7 +523,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                     side_effect=ValueError("bad CPU fallback input")
                 )
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=backend_registry.BackendSelection(
                         backend_registry.BackendCandidate(
@@ -579,7 +580,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
             ):
                 cpu_fallback = mock.Mock(side_effect=RuntimeError("native CPU bug"))
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_runtime_unavailable",
                     return_value=backend_registry.BackendSelection(
                         backend_registry.BackendCandidate(
@@ -721,7 +722,7 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
                 ),
             ):
                 with mock.patch.object(
-                    sigma_clip_chunk_ops,
+                    backend_registry,
                     "resolve_after_resource_exhausted",
                     return_value=cpu_selection,
                 ) as resource_resolver:
@@ -735,3 +736,34 @@ class TestSigmaClipCustomOps(CustomOpsTestCase):
         self.assertIs(result, expected)
         resource_resolver.assert_called_once()
         cpu_backend.assert_called_once()
+
+    @staticmethod
+    def _compiled_module():
+        module, error = sigma_clip_chunk_ops._load_compiled_module_result()
+        if module is None:
+            raise unittest.SkipTest(error or "compiled custom ops unavailable")
+        return module
+
+    def test_sigma_clip_fused_chunk_native_rejects_partial_rgb_pixels(self) -> None:
+        """Native binding validates RGB zero-skip shape without the wrapper."""
+        module = self._compiled_module()
+        stack = np.arange(40, dtype=np.uint16).reshape(4, 10)
+
+        with self.assertRaisesRegex(ValueError, "divisible by channels"):
+            module.sigma_clip_fused_chunk(
+                stack, 3.0, 3.0, 5, None, True, 3
+            )
+
+    def test_sigma_clip_iterative_chunk_native_rejects_partial_rgb_pixels(self) -> None:
+        """Native iterative binding validates RGB zero-skip shape too."""
+        module = self._compiled_module()
+        plane_size = 10
+        stack = np.arange(4 * plane_size, dtype=np.uint16).reshape(4, plane_size)
+        total_sum = np.zeros(plane_size, dtype=np.float64)
+        total_sq = np.zeros(plane_size, dtype=np.float64)
+        total_n = np.zeros(plane_size, dtype=np.float64)
+
+        with self.assertRaisesRegex(ValueError, "divisible by channels"):
+            module.sigma_clip_iterative_chunk(
+                stack, total_sum, total_sq, total_n, 3.0, 3.0, 5, None, True, 3
+            )

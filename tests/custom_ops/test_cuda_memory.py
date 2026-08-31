@@ -343,6 +343,56 @@ class TestCudaMemoryEstimate(unittest.TestCase):
             4 * 32 * 64 * 2 + 3 * 32 * 64 * 8,
         )
 
+    def test_usable_memory_subtracts_headroom_from_free_bytes(self) -> None:
+        total_bytes = 24 * GiB
+        free_bytes = 5 * GiB
+        headroom = cuda_memory._headroom_bytes(total_bytes)
+
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(free_bytes, total_bytes),
+            free_bytes - headroom,
+        )
+
+    def test_usable_memory_clamps_free_bytes_to_total(self) -> None:
+        """Probe quirks may report free above total; the cap must still hold."""
+        total_bytes = 8 * GiB
+        headroom = cuda_memory._headroom_bytes(total_bytes)
+
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(total_bytes + 3 * GiB, total_bytes),
+            total_bytes - headroom,
+        )
+
+    def test_usable_memory_deducts_reservations(self) -> None:
+        total_bytes = 24 * GiB
+        free_bytes = 5 * GiB
+        reserved_bytes = 2 * GiB
+        headroom = cuda_memory._headroom_bytes(total_bytes)
+
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(
+                free_bytes, total_bytes, reserved_bytes
+            ),
+            free_bytes - headroom - reserved_bytes,
+        )
+
+    def test_usable_memory_is_never_negative(self) -> None:
+        total_bytes = 24 * GiB
+        headroom = cuda_memory._headroom_bytes(total_bytes)
+
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(headroom, total_bytes), 0
+        )
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(headroom // 2, total_bytes), 0
+        )
+        self.assertEqual(
+            cuda_memory.cuda_usable_memory_bytes(
+                headroom + GiB, total_bytes, 4 * GiB
+            ),
+            0,
+        )
+
     def test_admission_reserves_and_releases_current_device(self) -> None:
         with mock.patch.object(
                 cuda_memory,
@@ -577,6 +627,38 @@ class TestCudaMemoryEstimate(unittest.TestCase):
                     raise RuntimeError("kernel failure")
             with cuda_memory.cuda_memory_admission(_estimate()) as after:
                 self.assertEqual(after.reserved_bytes, 0)
+
+    def test_run_admitted_cuda_executes_kernel_when_granted(self) -> None:
+        kernel = mock.Mock(return_value="kernel-result")
+        with mock.patch.object(
+                cuda_memory,
+                "cuda_memory_info",
+                return_value=_available_memory_info()):
+            result = cuda_memory.run_admitted_cuda(_estimate(), kernel, 1, 2)
+
+        self.assertEqual(result, "kernel-result")
+        kernel.assert_called_once_with(1, 2)
+
+    def test_run_admitted_cuda_raises_typed_error_without_calling_kernel(
+        self,
+    ) -> None:
+        kernel = mock.Mock()
+        info = _available_memory_info(
+            free_bytes=300 * MiB,
+            total_bytes=2 * 1024 * MiB,
+        )
+        with mock.patch.object(
+                cuda_memory, "cuda_memory_info", return_value=info):
+            with mock.patch.object(
+                    cuda_memory,
+                    "_clear_current_thread_cuda_cache",
+                    return_value=False):
+                with self.assertRaisesRegex(
+                        CustomOpResourceExhaustedError,
+                        "test_cuda_op skipped CUDA"):
+                    cuda_memory.run_admitted_cuda(_estimate(), kernel)
+
+        kernel.assert_not_called()
 
     def test_detection_compiled_path_stops_before_kernel_when_denied(self) -> None:
         image = np.arange(64, dtype=np.float64).reshape(8, 8)
