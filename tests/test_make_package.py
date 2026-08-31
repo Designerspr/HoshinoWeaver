@@ -24,6 +24,11 @@ class TestGeneratedSpec(unittest.TestCase):
     def test_spec_collects_compiled_extension(self) -> None:
         self.assertIn("hoshicore._custom_op._C", self.spec)
 
+    def test_spec_does_not_upx_compress_native_extensions(self) -> None:
+        self.assertIn("'hoshicore/_custom_op/_C*.pyd'", self.spec)
+        self.assertEqual(
+            self.spec.count("upx_exclude=_native_upx_exclude"), 3)
+
     def test_spec_collects_metal_extension_and_shader_library(self) -> None:
         self.assertIn("hoshicore._custom_op._metal", self.spec)
         self.assertIn("_metal_kernels.metallib", self.spec)
