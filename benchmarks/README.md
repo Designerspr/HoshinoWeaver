@@ -1,14 +1,14 @@
 # Norma benchmark
 
 该目录包含 Norma 双帧相机模型对齐的本地开发基准。它直接调用
-`solve_pywt_alignment()`，用于检查默认求解路线的匹配覆盖、收敛误差，
+`solve_staged_alignment()`，用于检查默认求解路线的匹配覆盖、收敛误差，
 以及提供 mask 时的图像域残余位移。
 
 ## 边界
 
 - 算法编排由 `hoshicore.component.norma` 提供；benchmark 不重复实现检测、
   匹配、优化或 refine。
-- benchmark 只接受 `solve_pywt_alignment()` 真实支持的 bootstrap 路径和参数。
+- benchmark 只接受 `solve_staged_alignment()` 真实支持的 bootstrap 路径和参数。
 - 本地数据集放在 `benchmarks/local/`，不进入版本控制。
 - 根目录 `debug_*.py` 和 notebook 是独立诊断工具，不属于 benchmark API，
   也不应被正式测试导入。

@@ -20,9 +20,10 @@ When adding or modifying any feature, check whether the following need updating:
 - `bench/` contains the existing kernel microbenchmarks. `benchmarks/` contains
   the tracked Norma alignment benchmark component; keep local datasets under
   `benchmarks/local/` and out of version control.
-- Root-level `debug_*.py`, notebooks, and local reference files are independent
-  development diagnostics. They are not stable project APIs and must not be
-  imported by the tracked test suite.
+- `tools/debug/` contains tracked developer diagnostics that may call private
+  implementation APIs. Notebooks and local reference files remain independent
+  local diagnostics. None are stable project APIs or may be imported by the
+  tracked test suite.
 - Tests may depend only on tracked production code, tracked test helpers, or a
   tracked benchmark component. A fresh checkout must not require local debug
   scripts or private benchmark datasets to collect and run tests.
