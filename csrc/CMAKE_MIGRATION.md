@@ -29,7 +29,9 @@ csrc/
     HnwOpenMP.cmake
     HnwPython.cmake
     HnwCuda.cmake
-  module.cpp
+  modules/
+    _C.cpp
+    _metal.mm
   common/
   ops/
     fgp/

@@ -116,7 +116,7 @@ target_link_libraries(hnw_ops_cpu_detection PRIVATE hnw_ops_cpu_wavelet)
 
 pybind11_add_module(_C MODULE
     NO_EXTRAS
-    module.cpp
+    modules/_C.cpp
 )
 
 if(HNW_ENABLE_CUDA)
@@ -242,7 +242,7 @@ if(HNW_ENABLE_METAL)
 
     pybind11_add_module(_metal MODULE
         NO_EXTRAS
-        metal/module.mm
+        modules/_metal.mm
         common/metal_runtime.mm
         common/metal_host_io_workspace.mm
         ops/metal/star_shrink/star_shrink_process_ops.mm

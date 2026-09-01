@@ -14,12 +14,15 @@
 
 ```text
 csrc/
-  build_ops.py
+  build_ops.py            # 构建主入口
   CMakePresets.json
   CMakeLists.txt
-  module.cpp
-  common/
-  ops/
+  cmake/                  # CMake 模块
+  common/                 # 跨算子共享的头文件与运行时
+  modules/                # pybind11 扩展入口，文件名 = 产物名
+    _C.cpp
+    _metal.mm
+  ops/                    # 算子实现，按 后端/算子 两级划分
     cpu/
       fgp/
       max/
@@ -28,12 +31,21 @@ csrc/
       sigma_clip/
     cuda/
     metal/
+  tools/                  # 构建与 CI 检查脚本（非编译源码）
+    check_format.py
+    check_objc_syntax.py
+    verify_metal_runtime.py
+    verify_no_metal_fallback.py
+    verify_packaged_custom_ops.py
+    objc_stubs/           # 假 Apple 框架头，仅供 check_objc_syntax.py 离机解析
 ```
 
 职责：
 
-- `module.cpp`
+- `modules/_C.cpp`
   pybind11 模块入口，注册 `_C` 内的算子
+- `modules/_metal.mm`
+  pybind11 模块入口，注册独立 `_metal` extension 内的算子
 - `ops/cpu/<name>/`
   单个算子的 compiled CPU 实现与绑定；OpenMP 是可选并行能力
 - `ops/cuda/<name>/`
@@ -43,6 +55,8 @@ csrc/
   extension，不与 CUDA `_C` 混合
 - `build_ops.py`
   统一本地构建入口
+- `tools/`
+  构建与 CI 检查脚本，以及它们的数据；不参与 `_C` / `_metal` 的编译
 - `CMakeLists.txt` / `CMakePresets.json`
   custom-op 的 CMake/Ninja 构建骨架
 
@@ -121,10 +135,10 @@ python csrc/build_ops.py --dry-run
 
 ```bash
 # 只检查
-python csrc/check_format.py
+python csrc/tools/check_format.py
 
 # 应用格式化
-python csrc/check_format.py --fix
+python csrc/tools/check_format.py --fix
 ```
 
 检查覆盖 `csrc/` 下的 C++/CUDA/Objective-C++/Metal 源码并排除生成的 build tree；
@@ -200,9 +214,9 @@ dumpbin /dependents hoshicore/_custom_op/_C*.pyd
 # 预期：出现 VCOMP140.DLL（正常），不应出现 cudart64_*.dll
 
 # 跨平台最小 frozen-package smoke；会清理 Python/编译器/CUDA 环境路径后启动
-python csrc/verify_packaged_custom_ops.py
+python csrc/tools/verify_packaged_custom_ops.py
 # macOS Metal 发布 gate：必须收集 shader 并真实执行 Metal kernel
-python csrc/verify_packaged_custom_ops.py --require-metal
+python csrc/tools/verify_packaged_custom_ops.py --require-metal
 ```
 
 ### PyInstaller 收集
@@ -317,7 +331,7 @@ deferral reason 保持兼容，但仓库内建候选的 registry 校验不接受
 
 1. 在 `csrc/ops/cpu/<name>/` 新增 CPU `.h/.cpp`
 2. 在 `CMakeLists.txt` 新增 static library target 并链接到 `_C`
-3. 在 `module.cpp` 中注册 `bind_*_ops(m)`
+3. 在 `modules/_C.cpp` 中注册 `bind_*_ops(m)`（Metal 算子则在 `modules/_metal.mm`）
 4. 在 `hoshicore/_custom_op/ops/` 增加 Python 包装与 numpy fallback
 5. 在 `hoshicore/_custom_op/backend_registry.py` 注册 `BackendCandidate`
 6. 在 `hoshicore/_custom_op/api.py` + `__init__.py` 导出
