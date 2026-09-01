@@ -246,6 +246,7 @@ if(HNW_ENABLE_METAL)
         common/metal_runtime.mm
         common/metal_host_io_workspace.mm
         ops/metal/star_shrink/star_shrink_process_ops.mm
+        ops/metal/star_shrink/star_shrink_dog_process_ops.mm
         ops/metal/star_shrink/star_mask_ops.mm
     )
     add_dependencies(_metal hnw_metal_shaders)
