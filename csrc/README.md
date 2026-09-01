@@ -22,7 +22,7 @@ csrc/
   modules/                # pybind11 扩展入口，文件名 = 产物名
     _C.cpp
     _metal.mm
-  ops/                    # 算子实现，按 后端/算子 两级划分
+  ops/                    # 算子实现，按 后端/算法族 两级划分
     cpu/
       fgp/
       max/
@@ -46,12 +46,16 @@ csrc/
   pybind11 模块入口，注册 `_C` 内的算子
 - `modules/_metal.mm`
   pybind11 模块入口，注册独立 `_metal` extension 内的算子
-- `ops/cpu/<name>/`
-  单个算子的 compiled CPU 实现与绑定；OpenMP 是可选并行能力
-- `ops/cuda/<name>/`
-  单个算子的 CUDA 实现与绑定
-- `ops/metal/<name>/`
-  单个算子的 Metal shader 与 Objective-C++ host binding；编译到独立 `_metal`
+- `ops/<backend>/<family>/`
+  第二级是**算法族，不是单个算子**。一个族常注册多个 logical op，因为它们共用
+  kernel、参数结构或内部头；例如 `cpu/fgp/` 有 5 个，三个后端的 `star_shrink/`
+  各有 3 个。拆散会把共享头往上提一层，反而藏起耦合关系。
+- `ops/cpu/<family>/`
+  compiled CPU 实现与绑定；OpenMP 是可选并行能力
+- `ops/cuda/<family>/`
+  CUDA 实现与绑定
+- `ops/metal/<family>/`
+  Metal shader 与 Objective-C++ host binding；编译到独立 `_metal`
   extension，不与 CUDA `_C` 混合
 - `build_ops.py`
   统一本地构建入口
@@ -329,7 +333,7 @@ deferral reason 保持兼容，但仓库内建候选的 registry 校验不接受
 
 最小流程：
 
-1. 在 `csrc/ops/cpu/<name>/` 新增 CPU `.h/.cpp`
+1. 在 `csrc/ops/cpu/<family>/` 新增 CPU `.h/.cpp`（复用已有算法族目录，只有确实是新族才建新目录）
 2. 在 `CMakeLists.txt` 新增 static library target 并链接到 `_C`
 3. 在 `modules/_C.cpp` 中注册 `bind_*_ops(m)`（Metal 算子则在 `modules/_metal.mm`）
 4. 在 `hoshicore/_custom_op/ops/` 增加 Python 包装与 numpy fallback
@@ -344,7 +348,7 @@ backend 只能影响性能，不能影响 public API 可用性。
 
 CUDA 算子沿用同样流程，但额外需要：
 
-1. 在 `csrc/ops/cuda/<name>/` 新增 CUDA `.h/.cpp/.cu`，并在 `CMakeLists.txt` 的 `HNW_ENABLE_CUDA` 分支接入
+1. 在 `csrc/ops/cuda/<family>/` 新增 CUDA `.h/.cpp/.cu`，并在 `CMakeLists.txt` 的 `HNW_ENABLE_CUDA` 分支接入
 2. 保持 CPU fallback 语义不变
 3. `.cpp` 绑定文件需 `#include "common/compat.h"`（MSVC `ssize_t` 兼容）
 4. 在 `BackendCandidate` 中标注对应 backend（如 `cuda_host_io`）和 build flag（如 `cuda`）
