@@ -107,6 +107,11 @@ configs:
     widget: switch
     hidden: true
 
+  allow_large_principal_point_offset:
+    label: "中心偏移"
+    description: "允许共享光心在每个图像轴上最多偏移 50%；关闭时默认限制为 5%。仅在已知裁切或明显偏心时开启。"
+    widget: switch
+
   remap_map_scale:
     hidden: true
 
@@ -159,7 +164,7 @@ layout:
           fallback_focal_equiv_mm,
         ]
     - name: "联合优化"
-      keys: [optimize_focal, optimize_distortion, optimize_principal_point]
+      keys: [optimize_focal, optimize_distortion, optimize_principal_point, allow_large_principal_point_offset]
     - name: "重映射"
       keys: [remap_map_scale]
     - name: "天地分离"
@@ -176,6 +181,7 @@ layout:
       optimize_focal,
       optimize_distortion,
       optimize_principal_point,
+      allow_large_principal_point_offset,
       remap_map_scale,
       mask,
       enable_ground,

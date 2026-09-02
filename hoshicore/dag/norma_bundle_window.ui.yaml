@@ -89,6 +89,11 @@ configs:
     widget: switch
     hidden: true
 
+  allow_large_principal_point_offset:
+    label: "中心偏移"
+    description: "允许共享光心在每个图像轴上最多偏移 50%；关闭时默认限制为 5%。仅在已知裁切或明显偏心时开启。"
+    widget: switch
+
   window_size:
     label: "窗口大小"
     description: "每张输出参与叠加的最大帧数，必须为正奇数；序列两端会自动缩小窗口。"
@@ -197,7 +202,7 @@ layout:
           fallback_focal_equiv_mm,
         ]
     - name: "联合优化"
-      keys: [optimize_focal, optimize_distortion, optimize_principal_point]
+      keys: [optimize_focal, optimize_distortion, optimize_principal_point, allow_large_principal_point_offset]
     - name: "滑动窗口"
       keys: [window_size, ground_window_size, min_contributors,
              remap_map_scale, mask, enable_ground]
@@ -213,6 +218,7 @@ layout:
       optimize_focal,
       optimize_distortion,
       optimize_principal_point,
+      allow_large_principal_point_offset,
       window_size,
       ground_window_size,
       min_contributors,

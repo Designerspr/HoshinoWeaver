@@ -49,6 +49,7 @@ configs:
   src_lens_type: { type: str, default: null }
   focal_length_mm: { type: float, default: null }  # 真实焦距（mm）；与 crop_factor 相乘得等效焦距
   crop_factor: { type: float, default: 1.0 }       # 传感器裁切系数（全画幅=1.0）
+  allow_large_principal_point_offset: { type: bool, default: false }
   output_filename:  { type: str,   required: true }
   mask: { type: str, required: false, default: null }
   enable_ground: { type: bool, default: true }
@@ -181,6 +182,7 @@ nodes:
       src_lens_type: configs.src_lens_type
       focal_length_mm: configs.focal_length_mm
       crop_factor: configs.crop_factor
+      allow_large_principal_point_offset: configs.allow_large_principal_point_offset
     outputs:
       result: { type: sequence }
       aligned_exifs: { type: sequence }

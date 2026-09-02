@@ -64,6 +64,7 @@ class StarAlignmentOp(FilterBaseOp):
         "optimize_focal": {"type": "bool", "default": None},
         "optimize_distortion": {"type": "bool", "default": None},
         "optimize_principal_point": {"type": "bool", "default": None},
+        "allow_large_principal_point_offset": {"type": "bool", "default": False},
     }
     OUTPUTS: dict[str, Any] = {
         "result": {"type": "sequence"},
@@ -127,6 +128,8 @@ class StarAlignmentOp(FilterBaseOp):
             optimize_focal=configs.get('optimize_focal'),
             optimize_distortion=configs.get('optimize_distortion'),
             optimize_principal_point=configs.get('optimize_principal_point'),
+            allow_large_principal_point_offset=bool(
+                configs.get('allow_large_principal_point_offset', False)),
         )
 
         exifs_active = self.inputs['exifs'].active

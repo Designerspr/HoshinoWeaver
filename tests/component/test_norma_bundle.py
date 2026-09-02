@@ -12,6 +12,7 @@ from hoshicore.component.norma.bundle import (
     FrameAlignmentStatus,
     _BundleEdge,
     _build_edges,
+    _camera_from_parameters,
     _camera_parameter_bounds,
     _camera_observability,
     _make_edge,
@@ -50,6 +51,27 @@ def test_camera_parameter_bounds_limit_focal_and_distortion():
     lower, upper = _camera_parameter_bounds(policy)
     np.testing.assert_allclose(lower, [-0.3, -1.0, -1.0, -1.0, -1.0])
     np.testing.assert_allclose(upper, [0.3, 1.0, 1.0, 1.0, 1.0])
+
+
+def test_bundle_principal_point_uses_bounded_image_relative_offsets():
+    camera = _camera()
+    policy = CameraOptimizationPolicy(False, False, True, 0)
+    lower, upper = _camera_parameter_bounds(policy)
+
+    np.testing.assert_allclose(lower, [-0.05, -0.05])
+    np.testing.assert_allclose(upper, [0.05, 0.05])
+    solved = _camera_from_parameters(camera, policy, np.array([0.1, -0.2]))
+    assert solved.intrinsics.principal_point_px == pytest.approx((72.0, 24.0))
+
+
+def test_bundle_principal_point_large_offset_uses_explicit_policy():
+    policy = CameraOptimizationPolicy(
+        False, False, True, 0, principal_point_offset_limit=0.5)
+
+    lower, upper = _camera_parameter_bounds(policy)
+
+    np.testing.assert_allclose(lower, [-0.5, -0.5])
+    np.testing.assert_allclose(upper, [0.5, 0.5])
 
 
 def test_edge_sampling_reserves_spatial_bins_then_caps_deterministically():
@@ -195,7 +217,7 @@ def test_bundle_edge_refines_rotation_without_camera_parameters(monkeypatch):
     assert calls[0][2]["bootstrap_scales"] == (0.7, 1.0, 1.3)
     assert calls[0][2]["same_camera"] is True
     assert calls[0][2]["random_seed"] == 7
-    assert calls[0][2]["residual_space"] == "angular"
+    assert calls[0][2]["residual_space"] == "cross"
 
 
 def test_bundle_scale_votes_reuse_preferred_and_fall_back(monkeypatch):

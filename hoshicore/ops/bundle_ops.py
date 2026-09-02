@@ -324,6 +324,7 @@ class BundleAdjustmentOp(BaseOp):
         "optimize_focal": {"type": "bool", "default": None},
         "optimize_distortion": {"type": "bool", "default": None},
         "optimize_principal_point": {"type": "bool", "default": None},
+        "allow_large_principal_point_offset": {"type": "bool", "default": False},
         "pair_offsets": {"type": "list", "default": [1, 2, 4]},
         "max_pairs_per_edge": {"type": "int", "default": 512},
         "random_seed": {"type": "int", "default": 0},
@@ -409,6 +410,8 @@ class BundleAdjustmentOp(BaseOp):
             optimize_focal=configs.get("optimize_focal"),
             optimize_distortion=configs.get("optimize_distortion"),
             optimize_principal_point=configs.get("optimize_principal_point"),
+            allow_large_principal_point_offset=bool(
+                configs.get("allow_large_principal_point_offset", False)),
         )
         shared_candidate = build_camera_candidate(
             reference_tags, reference_array_shape, "distortion",

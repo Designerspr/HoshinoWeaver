@@ -138,6 +138,11 @@ configs:
         - { key: "camera_setup_mode", neq: "auto" }
     min: 0.5
     max: 4.0
+  allow_large_principal_point_offset:
+    label: "中心偏移"
+    description: "允许光心在每个图像轴上最多偏移 50%；关闭时默认限制为 5%。仅在已知裁切或明显偏心时开启。"
+    widget: switch
+    visible_when: { key: "align_method", eq: "distortion" }
   same_camera:
     hidden: true
   mask:
@@ -172,10 +177,10 @@ route_configs:
 layout:
   groups:
     - name: "对齐设置"
-      keys: [align_base, align_method, camera_setup_mode, lens_type, ref_lens_type, src_lens_type, focal_length_mm, crop_factor, mask, enable_ground]
+      keys: [align_base, align_method, camera_setup_mode, lens_type, ref_lens_type, src_lens_type, focal_length_mm, crop_factor, allow_large_principal_point_offset, mask, enable_ground]
     - name: "输出设置"
       keys: [int_weight]
-  order: [sky_stacker, ground_stacker, align_base, align_method, camera_setup_mode, lens_type, ref_lens_type, src_lens_type, focal_length_mm, crop_factor, mask, enable_ground, int_weight]
+  order: [sky_stacker, ground_stacker, align_base, align_method, camera_setup_mode, lens_type, ref_lens_type, src_lens_type, focal_length_mm, crop_factor, allow_large_principal_point_offset, mask, enable_ground, int_weight]
 
 outputs:
   - "!include": fragments/image_output.ui.yaml

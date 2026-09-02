@@ -8,6 +8,7 @@ from scipy.optimize import least_squares
 
 from hoshicore.component.norma.alignment import (
     AlignmentOptimizationError,
+    _camera_optimization_state,
     _validate_flexible_optimization,
 )
 from hoshicore.component.norma.optimization import (
@@ -17,6 +18,13 @@ from hoshicore.component.norma.optimization import (
     flexible_reproject_error,
     make_flexible_parameter_bounds,
     make_flexible_regularization_weights,
+    pack_flexible_initial_params,
+    unpack_flexible_params,
+)
+from hoshicore.component.norma.types import (
+    FisheyeCameraModel,
+    FisheyeDistortion,
+    Intrinsics,
 )
 
 
@@ -54,6 +62,53 @@ def test_two_image_bounds_match_bundle_camera_limits():
     np.testing.assert_allclose(upper[3:], [0.3, 1.0, 1.0, 1.0, 1.0])
     assert np.all(np.isneginf(lower[:3]))
     assert np.all(np.isposinf(upper[:3]))
+
+
+def test_two_image_principal_point_uses_bounded_image_relative_offsets():
+    state = dataclasses.replace(
+        _perspective_state(),
+        policy=CameraOptimizationPolicy(False, False, True, 0),
+    )
+    ctx = FlexibleOptimizationContext(
+        ref_pts=np.empty((0, 2)), src_pts=np.empty((0, 2)),
+        ref_state=state, src_state=state, same_camera=True)
+    lower, upper = make_flexible_parameter_bounds(ctx)
+
+    np.testing.assert_allclose(lower[3:], [-0.05, -0.05])
+    np.testing.assert_allclose(upper[3:], [0.05, 0.05])
+    packed = pack_flexible_initial_params(np.zeros(3), ctx)
+    packed[3:] = [0.1, -0.2]
+    _, solved, _ = unpack_flexible_params(packed, ctx)
+    assert solved.principal_point_offset_x_px == pytest.approx(120.0)
+    assert solved.principal_point_offset_y_px == pytest.approx(-160.0)
+
+
+def test_two_image_principal_point_large_offset_uses_explicit_policy():
+    state = dataclasses.replace(
+        _perspective_state(),
+        policy=CameraOptimizationPolicy(
+            False, False, True, 0, principal_point_offset_limit=0.5),
+    )
+    ctx = FlexibleOptimizationContext(
+        ref_pts=np.empty((0, 2)), src_pts=np.empty((0, 2)),
+        ref_state=state, src_state=state, same_camera=True)
+
+    lower, upper = make_flexible_parameter_bounds(ctx)
+
+    np.testing.assert_allclose(lower[3:], [-0.5, -0.5])
+    np.testing.assert_allclose(upper[3:], [0.5, 0.5])
+
+
+def test_fixed_camera_keeps_existing_fisheye_distortion_in_residual_state():
+    camera = FisheyeCameraModel(
+        Intrinsics(15.0, 36.0, 24.0, 1200, 800),
+        FisheyeDistortion(0.1, -0.02, 0.003, -0.0004),
+    )
+    state = _camera_optimization_state(
+        camera, CameraOptimizationPolicy(False, False, False, 0))
+
+    np.testing.assert_allclose(
+        state.base_distortion, [0.1, -0.02, 0.003, -0.0004])
 
 
 def test_two_image_validation_rejects_unsuccessful_fit():

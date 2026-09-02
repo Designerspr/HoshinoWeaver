@@ -62,6 +62,7 @@ configs:
   optimize_focal:           { type: bool, default: true }
   optimize_distortion:      { type: bool, default: true }
   optimize_principal_point: { type: bool, default: null }
+  allow_large_principal_point_offset: { type: bool, default: false }
   pair_offsets:             { type: list, default: [1, 2, 4] }
   max_pairs_per_edge:       { type: int, default: 512 }
   random_seed:              { type: int, default: 0 }
@@ -125,6 +126,7 @@ nodes:
       optimize_focal: configs.optimize_focal
       optimize_distortion: configs.optimize_distortion
       optimize_principal_point: configs.optimize_principal_point
+      allow_large_principal_point_offset: configs.allow_large_principal_point_offset
       pair_offsets: configs.pair_offsets
       max_pairs_per_edge: configs.max_pairs_per_edge
       random_seed: configs.random_seed

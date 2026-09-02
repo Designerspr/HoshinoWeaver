@@ -109,3 +109,18 @@ def test_bundle_workflow_ui_matches_meta(name):
         assert set(ui["routes"][route_key]["options"]) == set(
             route["options"])
     assert set(ui["configs"]).issubset(meta["configs"])
+
+
+@pytest.mark.parametrize("name", [
+    "sky_ground_stack",
+    "norma_bundle_stack",
+    "norma_bundle_window",
+])
+def test_alignment_workflow_exposes_large_principal_point_option(name):
+    meta = _load_yaml(str(_DAG_DIR / f"{name}.meta.yaml"))
+    ui = load_ui_yaml(_DAG_DIR / f"{name}.ui.yaml")
+
+    assert meta["configs"]["allow_large_principal_point_offset"] == {
+        "type": "bool", "default": False}
+    assert ui["configs"]["allow_large_principal_point_offset"]["widget"] == (
+        "switch")
