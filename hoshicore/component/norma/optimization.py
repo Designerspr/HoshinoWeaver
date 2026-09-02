@@ -43,6 +43,8 @@ from .projection import (
 
 _FOCAL_SCALE_DELTA_LIMIT = 0.3
 _DISTORTION_ABS_LIMIT = 1.0
+DEFAULT_PRINCIPAL_POINT_OFFSET_LIMIT = 0.05
+LARGE_PRINCIPAL_POINT_OFFSET_LIMIT = 0.5
 
 
 @dataclasses.dataclass(frozen=True)
@@ -56,8 +58,9 @@ class CameraOptimizationPolicy:
 
     optimize_focal: bool = True
     optimize_distortion: bool = True
-    optimize_principal_point: bool = False
+    optimize_principal_point: bool = True
     n_dist: int = 4
+    principal_point_offset_limit: float = DEFAULT_PRINCIPAL_POINT_OFFSET_LIMIT
 
 
 @dataclasses.dataclass(frozen=True)
@@ -103,7 +106,7 @@ class FlexibleOptimizationContext:
     robust_scale: Optional[float] = None
     robust_scale_method: str = "median"
     robust_scale_multiplier: float = 2.0
-    residual_space: str = "angular"  # "angular" | "cross" | "pixel"
+    residual_space: str = "cross"  # "angular" | "cross" | "pixel"
 
 
 def _camera_param_width(state: CameraOptimizationState) -> int:
@@ -157,6 +160,14 @@ def make_flexible_parameter_bounds(
             width = state.policy.n_dist
             lower[offset:offset + width] = -_DISTORTION_ABS_LIMIT
             upper[offset:offset + width] = _DISTORTION_ABS_LIMIT
+            offset += width
+        if state.policy.optimize_principal_point:
+            limit = float(state.policy.principal_point_offset_limit)
+            if not 0.0 < limit <= LARGE_PRINCIPAL_POINT_OFFSET_LIMIT:
+                raise ValueError(
+                    "principal_point_offset_limit must be in (0, 0.5]")
+            lower[offset:offset + 2] = -limit
+            upper[offset:offset + 2] = limit
     return lower, upper
 
 
@@ -227,8 +238,11 @@ def _unpack_camera_params(
     pp_x = 0.0
     pp_y = 0.0
     if state.policy.optimize_principal_point:
-        pp_x = float(arr[offset])
-        pp_y = float(arr[offset + 1])
+        # The optimizer uses image-relative offsets so principal-point columns
+        # have comparable scale across resolutions.  The solved result remains
+        # expressed in pixels for camera construction and diagnostics.
+        pp_x = float(arr[offset]) * state.img_w
+        pp_y = float(arr[offset + 1]) * state.img_h
         offset += 2
 
     return CameraSolvedParams(

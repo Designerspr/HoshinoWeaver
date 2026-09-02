@@ -114,8 +114,8 @@ def _pack_camera_parameters(camera: BaseCameraModel,
                             policy: CameraOptimizationPolicy) -> NDArray[np.float64]:
     """Pack shared camera variables before the per-frame rotation variables.
 
-    Focal length and principal point use offsets from the initial camera;
-    distortion coefficients use their current model values directly.
+    Focal length and principal point use relative offsets from the initial
+    camera; distortion coefficients use their current model values directly.
     """
     parts: list[NDArray[np.float64]] = []
     if policy.optimize_focal:
@@ -141,8 +141,12 @@ def _camera_parameter_bounds(
         lower.extend([-_DISTORTION_ABS_LIMIT] * policy.n_dist)
         upper.extend([_DISTORTION_ABS_LIMIT] * policy.n_dist)
     if policy.optimize_principal_point:
-        lower.extend([-np.inf, -np.inf])
-        upper.extend([np.inf, np.inf])
+        limit = float(policy.principal_point_offset_limit)
+        if not 0.0 < limit <= 0.5:
+            raise ValueError(
+                "principal_point_offset_limit must be in (0, 0.5]")
+        lower.extend([-limit] * 2)
+        upper.extend([limit] * 2)
     return np.asarray(lower, dtype=np.float64), np.asarray(
         upper, dtype=np.float64)
 
@@ -171,7 +175,8 @@ def _camera_from_parameters(camera: BaseCameraModel,
     if policy.optimize_principal_point:
         cx, cy = camera.intrinsics.principal_point_px
         intrinsics = intrinsics.with_principal_point(
-            cx + float(values[offset]), cy + float(values[offset + 1]))
+            cx + float(values[offset]) * intrinsics.image_width_px,
+            cy + float(values[offset + 1]) * intrinsics.image_height_px)
     return camera.with_intrinsics(intrinsics).with_distortion(distortion)
 
 
@@ -295,7 +300,7 @@ def _make_edge(first: BundleFrame, second: BundleFrame,
             same_camera=True,
             use_asterism_bootstrap=True,
             random_seed=random_seed,
-            residual_space="angular",
+            residual_space="cross",
         )
         if len(match.pair_idx) < 6:
             raise ValueError(f"only {len(match.pair_idx)} matched stars")

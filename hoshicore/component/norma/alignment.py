@@ -494,13 +494,13 @@ def _default_optimization_policy(
         return CameraOptimizationPolicy(
             optimize_focal=True,
             optimize_distortion=True,
-            optimize_principal_point=False,
+            optimize_principal_point=True,
             n_dist=3 if n_dist is None else n_dist,
         )
     return CameraOptimizationPolicy(
         optimize_focal=True,
         optimize_distortion=True,
-        optimize_principal_point=False,
+        optimize_principal_point=True,
         n_dist=4 if n_dist is None else n_dist,
     )
 
@@ -517,7 +517,10 @@ def _camera_optimization_state(
         n_dist: int,
     ) -> NDArray[np.float64]:
         if n_dist <= 0:
-            return np.zeros(0, dtype=np.float64)
+            # A fixed-camera solve must still evaluate the initialized lens
+            # model.  ``n_dist`` controls which prefix may move; it does not
+            # disable distortion already present on the camera.
+            return camera.distortion.to_cv2().copy()
         if camera.distortion.is_zero:
             return np.zeros(n_dist, dtype=np.float64)
         if isinstance(camera, FisheyeCameraModel):
