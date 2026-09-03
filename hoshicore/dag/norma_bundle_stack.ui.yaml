@@ -148,6 +148,16 @@ configs:
     hidden: true
   max_pairs_per_edge:
     hidden: true
+  edge_topology:
+    label: "建边拓扑"
+    description: "稠密：为 pair_offsets 中每个间隔连接全部符合位置的帧对，边数随间隔数线性增长。多尺度：稀疏交错起点的多尺度拓扑，边数恒定在约 2 倍帧数附近，帧数较多时求解显著更快，但长距离约束更稀疏。"
+    widget: select
+    options:
+      - { value: "dense", label: "稠密（默认）" }
+      - { value: "multiscale", label: "多尺度（稀疏，长序列更快）" }
+    hidden: true
+  max_pair_offset:
+    hidden: true
 
 route_configs:
   "!include": fragments/stacker_route_configs.ui.yaml
@@ -164,7 +174,13 @@ layout:
           fallback_focal_equiv_mm,
         ]
     - name: "联合优化"
-      keys: [optimize_focal, optimize_distortion, optimize_principal_point, allow_large_principal_point_offset]
+      keys:
+        [
+          optimize_focal,
+          optimize_distortion,
+          optimize_principal_point,
+          allow_large_principal_point_offset,
+        ]
     - name: "重映射"
       keys: [remap_map_scale]
     - name: "天地分离"

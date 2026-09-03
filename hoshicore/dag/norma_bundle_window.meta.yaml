@@ -46,7 +46,9 @@ configs:
   optimize_principal_point: { type: bool, default: null }
   allow_large_principal_point_offset: { type: bool, default: false }
   pair_offsets:             { type: list, default: [1, 2, 4] }
-  max_pairs_per_edge:       { type: int, default: 512 }
+  max_pairs_per_edge:       { type: int, default: 128 }
+  edge_topology:            { type: str, default: "multiscale" }
+  max_pair_offset:          { type: int, default: null }
   random_seed:              { type: int, default: 0 }
   window_size:              { type: int, default: 5 }
   min_contributors:         { type: int, default: 2 }
@@ -106,6 +108,8 @@ nodes:
       allow_large_principal_point_offset: configs.allow_large_principal_point_offset
       pair_offsets: configs.pair_offsets
       max_pairs_per_edge: configs.max_pairs_per_edge
+      edge_topology: configs.edge_topology
+      max_pair_offset: configs.max_pair_offset
       random_seed: configs.random_seed
     outputs: { alignment_plan: { type: object } }
 

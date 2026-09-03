@@ -103,6 +103,21 @@ def _arguments() -> argparse.Namespace:
               "including shared camera parameters for each pair"))
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument("--max-nfev", type=int, default=300)
+    parser.add_argument(
+        "--max-pairs-per-edge", type=int, default=512,
+        help="Cap matched pairs sampled per BA graph edge")
+    parser.add_argument(
+        "--camera-solve-frames", type=int, default=None,
+        help="Solve the shared camera on an evenly spaced subset of this many "
+             "frames first, then refine poses over the whole sequence")
+    parser.add_argument(
+        "--edge-topology", choices=("dense", "multiscale"), default="multiscale",
+        help=("dense: every (pos, pos+offset) pair per --pair-offsets entry. "
+              "multiscale: sparse interleaved-start dyadic topology, "
+              "~2N edges regardless of scale count (--pair-offsets is ignored)"))
+    parser.add_argument(
+        "--max-pair-offset", type=int, default=None,
+        help="Cap the maximum frame-index gap an edge may span (multiscale only)")
     parser.add_argument("--map-scale", type=float, default=0.5)
     parser.add_argument(
         "--image-scale", type=float, default=1.0,
@@ -369,7 +384,11 @@ def main() -> int:
     stage_started = time.perf_counter()
     plan = build_bundle_plan(
         frames, args.reference_index, pair_offsets=args.pair_offsets,
-        random_seed=args.random_seed, max_nfev=args.max_nfev)
+        random_seed=args.random_seed, max_nfev=args.max_nfev,
+        max_pairs_per_edge=args.max_pairs_per_edge,
+        camera_solve_frames=args.camera_solve_frames,
+        edge_topology=args.edge_topology,
+        max_pair_offset=args.max_pair_offset)
     ba_seconds = time.perf_counter() - stage_started
 
     # Solve the diagnostic graph independently. Offset-1 edges form the chain;

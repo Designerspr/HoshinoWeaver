@@ -180,8 +180,11 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
     assert captured["kwargs"] == {
         "reference_frame_index": expected_reference,
         "pair_offsets": (1, 2),
-        "max_pairs_per_edge": 512,
+        "max_pairs_per_edge": 128,
         "random_seed": 7,
+        "camera_solve_frames": None,
+        "edge_topology": "dense",
+        "max_pair_offset": None,
     }
     assert captured["output"] == {"alignment_plan": "plan"}
     op.tracker.create_bar.assert_called_once_with(

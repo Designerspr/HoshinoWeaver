@@ -13,7 +13,7 @@ from ..component.data_container import FloatImage
 from ..component.merger import MaxMerger, MeanMerger
 from ..component.norma.bundle import (BAAlignmentPlan, BundleAdjustmentError,
                                       BundleFrame, FrameAlignmentStatus,
-                                      build_bundle_plan)
+                                      build_bundle_plan, estimate_edge_count)
 from ..component.norma.bundle_window import (BundleWindowSpec,
                                              build_bundle_window_schedule,
                                              build_identity_window_schedule,
@@ -326,8 +326,11 @@ class BundleAdjustmentOp(BaseOp):
         "optimize_principal_point": {"type": "bool", "default": None},
         "allow_large_principal_point_offset": {"type": "bool", "default": False},
         "pair_offsets": {"type": "list", "default": [1, 2, 4]},
-        "max_pairs_per_edge": {"type": "int", "default": 512},
+        "max_pairs_per_edge": {"type": "int", "default": 128},
         "random_seed": {"type": "int", "default": 0},
+        "camera_solve_frames": {"type": "int", "default": 32},
+        "edge_topology": {"type": "str", "default": "dense"},
+        "max_pair_offset": {"type": "int", "default": None},
     }
     OUTPUTS: dict[str, Any] = {
         "alignment_plan": {"type": "object"},
@@ -351,9 +354,11 @@ class BundleAdjustmentOp(BaseOp):
             configs.get("pair_offsets") or (1, 2, 4)
             if int(value) > 0
         }))
+        edge_topology = configs.get("edge_topology") or "dense"
+        max_pair_offset = configs.get("max_pair_offset")
         if self.length is not None:
-            edge_count = sum(
-                max(self.length - offset, 0) for offset in pair_offsets)
+            edge_count = estimate_edge_count(
+                self.length, pair_offsets, edge_topology, max_pair_offset)
             self.tracker.create_bar(
                 self.name, self.length + edge_count + 1,
                 desc=self.display_name)
@@ -434,7 +439,7 @@ class BundleAdjustmentOp(BaseOp):
 
             edge_completed = report_edge_completed
         try:
-            configured_max_pairs = configs.get("max_pairs_per_edge", 512)
+            configured_max_pairs = configs.get("max_pairs_per_edge", 128)
             max_pairs_per_edge = (
                 None if configured_max_pairs is None
                 or int(configured_max_pairs) <= 0
@@ -445,7 +450,10 @@ class BundleAdjustmentOp(BaseOp):
                 pair_offsets=pair_offsets,
                 max_pairs_per_edge=max_pairs_per_edge,
                 random_seed=configs.get("random_seed", 0),
-                edge_completed=edge_completed)
+                camera_solve_frames=configs.get("camera_solve_frames"),
+                edge_completed=edge_completed,
+                edge_topology=edge_topology,
+                max_pair_offset=max_pair_offset)
         except BundleAdjustmentError:
             raise
         except Exception as exc:

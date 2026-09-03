@@ -322,3 +322,97 @@ def test_bundle_plan_jointly_recovers_relative_rotations(monkeypatch):
     assert plan.accepted_edge_count == 2
     assert plan.frame(3).rotation_ref_to_src is None
     assert plan.rejected_edge_count == 1
+
+
+def test_sample_camera_frames_keeps_endpoints_and_reference():
+    """Sampling must keep endpoints + reference, spread evenly, sorted."""
+    camera = _camera()
+    candidate = AlignmentCameraCandidate(
+        camera, CameraOptimizationPolicy(True, True, False, 4), "manual")
+    stars = DetectedStars(np.empty((0, 2)), np.empty(0))
+    frames = [BundleFrame(index, stars, candidate) for index in range(40)]
+
+    # reference at an interior index must survive sampling
+    sampled = bundle_module._sample_camera_frames(frames, 12, 27)
+    indices = [frame.index for frame in sampled]
+    assert indices == sorted(indices)
+    assert indices[0] == 0
+    assert indices[-1] == 39
+    assert 27 in indices
+    assert len(sampled) <= 14
+    # uniform-ish spread: gap between consecutive samples is small relative
+    # to the full span for an evenly sampled interior
+    assert max(indices[i + 1] - indices[i] for i in range(len(indices) - 1)) <= 7
+
+    # small sequences are passed through untouched
+    short = [BundleFrame(index, stars, candidate) for index in range(5)]
+    assert bundle_module._sample_camera_frames(short, 12, 2) == short
+
+
+def test_remap_frames_contiguous_and_traceable():
+    camera = _camera()
+    candidate = AlignmentCameraCandidate(
+        camera, CameraOptimizationPolicy(True, True, False, 4), "manual")
+    stars = DetectedStars(np.empty((0, 2)), np.empty(0))
+    original = [BundleFrame(index * 3, stars, candidate) for index in range(6)]
+
+    remapped, mapping = bundle_module._remap_frames(original)
+    assert [frame.index for frame in remapped] == list(range(6))
+    assert [mapping[local] for local in range(6)] == [0, 3, 6, 9, 12, 15]
+    # original frames remain untouched (frozen dataclass replace)
+    assert original[0].index == 0
+    assert original[1].index == 3
+
+
+def test_dense_edge_pairs_matches_old_behavior():
+    pairs = bundle_module._dense_edge_pairs(6, (1, 2, 4))
+    assert pairs == [
+        (0, 1), (0, 2), (0, 4),
+        (1, 2), (1, 3), (1, 5),
+        (2, 3), (2, 4),
+        (3, 4), (3, 5),
+        (4, 5),
+    ]
+
+
+@pytest.mark.parametrize("n", [10, 23, 100, 341])
+@pytest.mark.parametrize("max_offset", [None, 32, 64])
+def test_multiscale_edge_pairs_stays_sparse_and_connected(n, max_offset):
+    """~2N edges, every non-endpoint node reaches the minimum degree."""
+    pairs = bundle_module._multiscale_edge_pairs(n, max_offset)
+    assert len(pairs) == len(set(pairs))
+    for a, b in pairs:
+        assert 0 <= a < b < n
+
+    degree = [0] * n
+    for a, b in pairs:
+        degree[a] += 1
+        degree[b] += 1
+    # Total edge count stays close to 2N regardless of how many dyadic
+    # scales are available.
+    assert len(pairs) <= 2.2 * n
+    # Every node except the two true sequence endpoints reaches min_degree;
+    # endpoints are structurally short by one edge (they extend one way).
+    for index in range(1, n - 1):
+        assert degree[index] >= 4, f"node {index} has degree {degree[index]}"
+    assert degree[0] >= 3
+    assert degree[n - 1] >= 3
+
+    if max_offset is not None:
+        assert max(b - a for a, b in pairs) <= max_offset
+
+
+def test_multiscale_edge_pairs_respects_max_offset_cap():
+    uncapped = bundle_module._multiscale_edge_pairs(200, None)
+    capped = bundle_module._multiscale_edge_pairs(200, 16)
+    assert max(b - a for a, b in uncapped) > 16
+    assert max(b - a for a, b in capped) <= 16
+
+
+def test_select_edge_pairs_dense_vs_multiscale():
+    dense = bundle_module._select_edge_pairs(50, (1, 2, 4), "dense", None)
+    multiscale = bundle_module._select_edge_pairs(50, (), "multiscale", None)
+    assert dense == bundle_module._dense_edge_pairs(50, (1, 2, 4))
+    assert multiscale == bundle_module._multiscale_edge_pairs(50, None)
+    with pytest.raises(BundleAdjustmentError):
+        bundle_module._select_edge_pairs(50, (), "bogus", None)
