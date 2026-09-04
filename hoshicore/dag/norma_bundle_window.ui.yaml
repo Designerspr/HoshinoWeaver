@@ -7,7 +7,7 @@ inputs:
 
 routes:
   window_stacker:
-    label: "窗口叠加算法"
+    label: "星空叠加算法"
     widget: tabs
     options:
       mean:
@@ -24,7 +24,7 @@ routes:
         description: "迭代排除异常值后求平均。适合有卫星/飞机线或其他异常值干扰，且叠加图像张数较多(>10张)的场景。"
 
   ground_window_stacker:
-    label: "地景窗口叠加算法"
+    label: "地景叠加算法"
     widget: tabs
     visible_when:
       all:
@@ -95,7 +95,7 @@ configs:
     widget: switch
 
   window_size:
-    label: "窗口大小"
+    label: "星空窗口大小"
     description: "每张输出参与叠加的最大帧数，必须为正奇数；序列两端会自动缩小窗口。"
     widget: slider
     min: 1
