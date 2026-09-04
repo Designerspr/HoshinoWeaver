@@ -143,6 +143,21 @@ configs:
     step: 0.1
     hidden: true
 
+  enable_star_shrink:
+    label: "缩星"
+    description: "缩小星点，使轨迹更稀疏。"
+    widget: switch
+  star_shrink_mode:
+    label: "缩星力度"
+    widget: select
+    visible_when: { key: "enable_star_shrink", eq: true }
+    options:
+      - { value: "light",      label: "轻度" }
+      - { value: "moderate",   label: "适中" }
+      - { value: "strong",     label: "较强" }
+      - { value: "aggressive", label: "强力" }
+      - { value: "removal",    label: "去星" }
+
   distortion:
     hidden: true
   pair_offsets:
@@ -228,6 +243,12 @@ layout:
           remap_map_scale,
           mask,
           enable_ground,
+        ]
+    - name: "后处理"
+      keys:
+        [
+          enable_star_shrink,
+          star_shrink_mode
         ]
   order:
     [

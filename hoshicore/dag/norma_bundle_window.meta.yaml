@@ -62,6 +62,8 @@ configs:
   output_dtype:             { type: str, default: "uint16" }
   jpg_quality:              { type: int, default: 85 }
   png_compressing:          { type: int, default: 7 }
+  enable_star_shrink:     { type: bool, default: false }
+  star_shrink_mode:       { type: str,  default: "moderate" }
 
 nodes:
   ba_data_loader:
@@ -208,10 +210,21 @@ nodes:
       aligned_exifs: { type: sequence }
       center_indices: { type: sequence }
 
+  star_shrink:
+    op: StarShrinkOp
+    enable: configs.enable_star_shrink
+    bypass: data
+    inputs:
+      data: window_filter.result
+    configs:
+      mode: configs.star_shrink_mode
+    outputs:
+      result: { type: sequence }
+
   batch_saver:
     op: BatchImageSaveOp
     inputs:
-      data: window_filter.result
+      data: star_shrink.result
       frame_indices: window_filter.center_indices
       exifs: window_filter.aligned_exifs
     configs:
