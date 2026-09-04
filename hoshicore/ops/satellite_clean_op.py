@@ -9,13 +9,17 @@ from loguru import logger
 
 from ..component.data_container import FloatImage
 from ..component.norma.geometry_view import GeometryView, StarDetectionCache
-from ..component.norma.alignment import match_star_pairs
+from ..component.norma.alignment import match_star_pairs_asterism, optimize_alignment
 from ..component.norma.frame_align import build_camera
+from ..component.norma.optimization import CameraOptimizationPolicy
 from ..component.norma.types import CameraModel
 from ..component.queue import StreamExhausted
 from .._custom_op.ops.median import median_reduce_chunk
 from ..engine.registry import register_op
 from .base import BaseOp
+
+
+_ROTATION_ONLY_POLICY = CameraOptimizationPolicy(False, False, False, 0)
 
 
 @dataclasses.dataclass
@@ -305,8 +309,16 @@ class SatelliteCleanOp(BaseOp):
         if prev_geo is None or curr_geo is None:
             return None
         try:
-            match = match_star_pairs(prev_geo, curr_geo)
-            return match.rotation
+            match = match_star_pairs_asterism(prev_geo, curr_geo)
+            alignment = optimize_alignment(
+                match,
+                prev_geo.camera,
+                curr_geo.camera,
+                same_camera=True,
+                ref_policy=_ROTATION_ONLY_POLICY,
+                src_policy=_ROTATION_ONLY_POLICY,
+            )
+            return np.asarray(alignment.rotation_ref_to_src, dtype=np.float64)
         except Exception as e:
             logger.warning(
                 f"Satellite clean: rotation match failed ({e}), frame link broken")
