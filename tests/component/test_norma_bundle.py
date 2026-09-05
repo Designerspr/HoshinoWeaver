@@ -18,6 +18,7 @@ from hoshicore.component.norma.bundle import (
     _make_edge,
     _sample_edge_pairs,
     _solve_bundle_parameters,
+    _solve_rotations_only,
     _spatial_pair_bins,
     build_bundle_plan,
 )
@@ -308,7 +309,7 @@ def test_bundle_plan_jointly_recovers_relative_rotations(monkeypatch):
     monkeypatch.setattr(bundle_module, "_make_edge", fake_edge)
     stars = DetectedStars(np.empty((0, 2)), np.empty(0))
     frames = [BundleFrame(index, stars, candidate) for index in range(4)]
-    plan = build_bundle_plan(frames, 0, pair_offsets=(1,))
+    plan = build_bundle_plan(frames, 0, pair_offsets=(1,), edge_topology='dense')
     assert [item.status for item in plan.frames] == [
         FrameAlignmentStatus.SOLVED,
         FrameAlignmentStatus.SOLVED,
@@ -322,6 +323,52 @@ def test_bundle_plan_jointly_recovers_relative_rotations(monkeypatch):
     assert plan.accepted_edge_count == 2
     assert plan.frame(3).rotation_ref_to_src is None
     assert plan.rejected_edge_count == 1
+
+
+def test_solve_rotations_only_recovers_fixed_camera_poses(monkeypatch):
+    from scipy import sparse
+
+    camera = _camera()
+    true_rotations = {0: np.eye(3), 1: _rotation_z(0.04), 2: _rotation_z(0.09)}
+    rays = np.array([[-0.2, -0.1, 1.0], [0.1, -0.2, 1.0], [0.2, 0.1, 1.0],
+                     [-0.1, 0.2, 1.0], [0.05, 0.08, 1.0], [-0.18, 0.14, 1.0]])
+    rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+
+    edges = []
+    for first_index, second_index in ((0, 1), (1, 2)):
+        first_pts = camera.project(
+            (true_rotations[first_index] @ rays.T).T)
+        second_pts = camera.project(
+            (true_rotations[second_index] @ rays.T).T)
+        relative = true_rotations[second_index] @ true_rotations[first_index].T
+        edges.append(_BundleEdge(
+            first_index, second_index, first_pts, second_pts, relative))
+
+    from scipy.optimize import least_squares as real_least_squares
+
+    captured_jacobians = []
+
+    def spying_least_squares(fun, x0, *, jac, **kwargs):
+        matrix = jac(x0)
+        captured_jacobians.append(matrix)
+        return real_least_squares(fun, x0, jac=jac, **kwargs)
+
+    monkeypatch.setattr(
+        "scipy.optimize.least_squares", spying_least_squares)
+
+    rotations, retained, condition = _solve_rotations_only(
+        edges, {0: np.eye(3)}, {0, 1, 2}, camera, max_nfev=100)
+
+    assert condition is None
+    assert retained == edges
+    np.testing.assert_allclose(rotations[0], np.eye(3), atol=1e-8)
+    np.testing.assert_allclose(rotations[1], true_rotations[1], atol=1e-5)
+    np.testing.assert_allclose(rotations[2], true_rotations[2], atol=1e-5)
+
+    assert len(captured_jacobians) == 1
+    matrix = captured_jacobians[0]
+    assert sparse.issparse(matrix)
+    assert matrix.shape == (2 * 6 * 3, 2 * 3)
 
 
 def test_sample_camera_frames_keeps_endpoints_and_reference():

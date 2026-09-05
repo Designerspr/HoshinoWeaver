@@ -185,6 +185,7 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
         "camera_solve_frames": None,
         "edge_topology": "dense",
         "max_pair_offset": None,
+        "max_nfev": 2000,
     }
     assert captured["output"] == {"alignment_plan": "plan"}
     op.tracker.create_bar.assert_called_once_with(

@@ -331,6 +331,7 @@ class BundleAdjustmentOp(BaseOp):
         "camera_solve_frames": {"type": "int", "default": 32},
         "edge_topology": {"type": "str", "default": "dense"},
         "max_pair_offset": {"type": "int", "default": None},
+        "max_nfev": {"type": "int", "default": 2000},
     }
     OUTPUTS: dict[str, Any] = {
         "alignment_plan": {"type": "object"},
@@ -453,7 +454,8 @@ class BundleAdjustmentOp(BaseOp):
                 camera_solve_frames=configs.get("camera_solve_frames"),
                 edge_completed=edge_completed,
                 edge_topology=edge_topology,
-                max_pair_offset=max_pair_offset)
+                max_pair_offset=max_pair_offset,
+                max_nfev=configs.get("max_nfev", 2000))
         except BundleAdjustmentError:
             raise
         except Exception as exc:
