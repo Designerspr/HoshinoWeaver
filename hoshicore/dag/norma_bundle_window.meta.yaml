@@ -49,6 +49,7 @@ configs:
   max_pairs_per_edge:       { type: int, default: 128 }
   edge_topology:            { type: str, default: "multiscale" }
   max_pair_offset:          { type: int, default: null }
+  max_nfev:                 { type: int, default: 2000 }
   random_seed:              { type: int, default: 0 }
   window_size:              { type: int, default: 5 }
   min_contributors:         { type: int, default: 2 }
@@ -64,6 +65,8 @@ configs:
   png_compressing:          { type: int, default: 7 }
   enable_star_shrink:     { type: bool, default: false }
   star_shrink_mode:       { type: str,  default: "moderate" }
+  enable_frame_rotation_export_save: { type: bool, default: false }
+  frame_rotations_output_path:       { type: str, default: null }
 
 nodes:
   ba_data_loader:
@@ -112,6 +115,7 @@ nodes:
       max_pairs_per_edge: configs.max_pairs_per_edge
       edge_topology: configs.edge_topology
       max_pair_offset: configs.max_pair_offset
+      max_nfev: configs.max_nfev
       random_seed: configs.random_seed
     outputs: { alignment_plan: { type: object } }
 
@@ -242,6 +246,22 @@ nodes:
       window_report: window_stack.window_report
     outputs: { summary: { type: str } }
 
+  frame_rotation_export:
+    op: BundleFrameRotationExportOp
+    configs:
+      alignment_plan: bundle_adjust.alignment_plan
+    outputs: { export: { type: object } }
+
+  frame_rotation_export_save:
+    op: BundleFrameRotationExportSaveOp
+    enable: configs.enable_frame_rotation_export_save
+    configs:
+      export: frame_rotation_export.export
+      output_path: configs.frame_rotations_output_path
+    outputs: { result: { type: str } }
+
 outputs:
   result: batch_saver.result
   summary: report_display.summary
+  frame_rotations: frame_rotation_export.export
+  frame_rotations_path: { src: frame_rotation_export_save.result, required: false }
