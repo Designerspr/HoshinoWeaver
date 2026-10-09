@@ -58,7 +58,7 @@ Align and stack multiple starfield images by detected star positions to produce 
 
 ### Running a Release Build
 
-The current latest version is `v1.0.0-rc "Vega"`. Download it from the [official website](https://hoshinoweaver.springcitystudio.top/) or the [GitHub Releases page](https://github.com/S-T-A-R-Laboratory/HoshinoWeaver/releases). After installation, double-click `HoshinoWeaver.exe` to launch the GUI.
+The current latest version is `v1.1.0 "Lyra"`. Download it from the [official website](https://hoshinoweaver.springcitystudio.top/) or the [GitHub Releases page](https://github.com/S-T-A-R-Laboratory/HoshinoWeaver/releases). After installation, double-click `HoshinoWeaver.exe` to launch the GUI.
 
 > [!NOTE]
 > 

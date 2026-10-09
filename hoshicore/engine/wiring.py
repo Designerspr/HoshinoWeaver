@@ -589,6 +589,8 @@ async def run_from_yaml(
 
     spec = flatten_sub_dags(spec, dag_search_paths=dag_search_paths)
     dag = validate_and_build_order(spec)
+    # Preflight and runtime planning need the same YAML defaults as wiring.
+    global_configs = _resolve_configs(dag.global_configs, global_configs)
 
     # ── 预检 ──
     preflight_report, check_results = run_preflight_checks(

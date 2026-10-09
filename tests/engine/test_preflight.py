@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -18,6 +19,53 @@ from hoshicore.engine.preflight import (
 from hoshicore.ops.base import BaseOp
 from hoshicore.ops.sigma_clip_ops import DiskBufferWriterOp
 from hoshicore.ops.trailstacker import MeanStackerOp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route,runtime,settings,sky_window,ground_window", [
+    ("mean", {}, {}, 5, 5),
+    ("sigma_clip", {}, {}, 5, 5),
+    ("mean", {"window_size": 9},
+     {"window_size": 7, "ground_window_size": 3}, 9, 3),
+])
+async def test_yaml_defaults_reach_preflight_and_execution(
+        tmp_path, monkeypatch, route, runtime, settings, sky_window, ground_window):
+    import hoshicore.engine.wiring as wiring
+    from hoshicore.engine.registry import REGISTERED_OP
+
+    frame = tmp_path / "frame.tif"
+    tifffile.imwrite(frame, np.zeros((10, 10, 3), dtype=np.uint16))
+    pipeline = (Path(__file__).resolve().parents[2] / "hoshicore" / "dag"
+                / "norma_bundle_window.meta.yaml")
+    monkeypatch.setattr(wiring, "_load_default_settings", lambda: settings)
+    captured = {}
+    original_preflight = wiring.run_preflight_checks
+
+    def checked_preflight(dag, configs, inputs, **kwargs):
+        captured.update(configs)
+        for node, window in (("window_stack", sky_window),
+                             ("ground_window_stack", ground_window)):
+            spec = dag.nodes[node]
+            resolved = _resolve_node_configs(spec, configs, REGISTERED_OP[spec["op"]])
+            assert resolved["window_size"] == window
+        return original_preflight(dag, configs, inputs, **kwargs)
+
+    async def checked_run_dag(dag, inputs, configs, *args, **kwargs):
+        assert configs["window_size"] == sky_window
+        assert configs["ground_window_size"] == ground_window
+        assert configs["output_template"] == "frame_{index:05d}.png"
+        if route == "sigma_clip":
+            assert configs["window_stacker.sigma_clip.max_iter"] == 5
+        return {"preflight_configs": captured}
+
+    monkeypatch.setattr(wiring, "run_preflight_checks", checked_preflight)
+    monkeypatch.setattr(wiring, "run_dag", checked_run_dag)
+    result = await wiring.run_from_yaml(
+        str(pipeline), {"fnames": [str(frame)]},
+        {"output_dir": str(tmp_path / "output"), **runtime},
+        progress=False,
+        route_choices={"window_stacker": route, "ground_window_stacker": route})
+    assert result["preflight_configs"]["window_size"] == sky_window
 
 
 class _FixedMemOp(BaseOp):
