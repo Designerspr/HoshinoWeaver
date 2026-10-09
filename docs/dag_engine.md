@@ -35,6 +35,7 @@ execute(ops, feeders, output_queues)
 - **命名空间**：子图节点展开后以 `parent.child` 点分隔命名，`rsplit(".", 1)` 解析 link
 - **`__inactive__`**：标记子图可选输入未被父图布线，布线阶段跳过并设 `queue.active = False`
 - **Config 解析优先级**（高→低）：用户显式输入 > `default_settings.yaml` > YAML `default` > Op `CONFIGS.default`
+- **预检与规划**：在调用 preflight / runtime planner 前合并并展平 YAML 配置默认值，使资源估算与实际布线使用相同的有效配置。
 - **Auto-inject**：YAML 未布线但 Op 声明了 default 的 config 自动注入 feeder，避免 `pre_execute()` 挂起
 
 ## 运行时执行模型

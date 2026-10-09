@@ -7,6 +7,7 @@ workflow is executed and no local dataset is required.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,15 +16,19 @@ from benchmarks import benchmark_workflow as bench_cli
 from benchmarks.workflow_bench import (ResourceSamples, SuiteError,
                                        build_launcher_command, case_paths,
                                        effective_configs, format_config_value,
+                                       failure_log_tail,
                                        load_suite, materialize_run, parse_log,
                                        parse_printed_log_path, plan_case,
                                        probe_storage_paths, resolve_inputs,
+                                       run_case,
                                        select_cases, substitute_placeholders,
-                                       summarize_resources, summarize_run_results)
+                                       summarize_resources, summarize_run_results,
+                                       validate_case)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_SUITE = PROJECT_ROOT / "benchmarks" / "workflow_bench.example.json"
 STACK_YAML = PROJECT_ROOT / "hoshicore" / "dag" / "stack.meta.yaml"
+WINDOW_YAML = PROJECT_ROOT / "hoshicore" / "dag" / "norma_bundle_window.meta.yaml"
 
 
 def _write_suite(tmp_path: Path, payload: dict) -> Path:
@@ -224,6 +229,55 @@ def test_output_filename_defaults_under_run_output_root(tmp_path):
     assert planned.expected_outputs == (output,)
 
 
+@pytest.mark.parametrize("explicit_output_dir", [False, True])
+def test_sequence_output_uses_pipeline_schema(tmp_path, explicit_output_dir):
+    configs = {"output_template": "frame_{index:05d}_{frame_index:05d}.png"}
+    if explicit_output_dir:
+        configs["output_dir"] = "{output_root}/{case_id}"
+    planned = _planned(tmp_path, case_overrides={
+        "pipeline": str(WINDOW_YAML), "routes": {}, "configs": configs,
+        "expected_outputs": ["{output_root}/{case_id}/frame_00000_00000.png"],
+    })
+    output_dir = planned.paths["output_root"] / planned.case.id
+    assert Path(planned.configs["output_dir"]) == output_dir
+    assert "output_filename" not in planned.configs
+    assert not any(arg.startswith("output_filename=") for arg in planned.command)
+    assert f"output_dir={planned.configs['output_dir']}" in planned.command
+    assert planned.configs["output_template"] == configs["output_template"]
+    assert planned.expected_outputs == (output_dir / "frame_00000_00000.png",)
+    validate_case(planned.case, pipeline_path=planned.pipeline_path,
+                  routes=planned.case.routes, configs=planned.configs)
+
+
+def test_sequence_output_without_expected_files_does_not_assume_filename(tmp_path):
+    planned = _planned(tmp_path, case_overrides={
+        "pipeline": str(WINDOW_YAML), "routes": {}, "configs": {},
+    })
+    assert "output_filename" not in planned.configs
+    assert planned.expected_outputs == ()
+
+
+def test_explicit_unknown_output_config_is_still_rejected(tmp_path):
+    planned = _planned(tmp_path, case_overrides={
+        "pipeline": str(WINDOW_YAML), "routes": {},
+        "configs": {"output_filename": "{output_root}/wrong.tif"},
+    })
+    with pytest.raises(SuiteError, match="output_filename"):
+        validate_case(planned.case, pipeline_path=planned.pipeline_path,
+                      routes=planned.case.routes, configs=planned.configs)
+
+
+def test_pipeline_without_image_output_does_not_receive_output_config(tmp_path):
+    pipeline = tmp_path / "no_output.yaml"
+    pipeline.write_text("inputs:\n  fnames: {type: sequence, required: true}\n"
+                        "configs: {}\n", encoding="utf-8")
+    planned = _planned(tmp_path, case_overrides={
+        "pipeline": str(pipeline), "routes": {}, "configs": {},
+    })
+    assert planned.configs == {}
+    assert planned.expected_outputs == ()
+
+
 def test_temp_path_injected_only_for_disk_buffers(tmp_path):
     disk = _planned(tmp_path, case_overrides={"configs": {
         "buffer_mode": "disk"}})
@@ -377,6 +431,44 @@ def test_probe_storage_paths_handles_missing_path(tmp_path):
 
 
 # ── CLI surface ───────────────────────────────────────────────────────────
+
+def test_failed_process_exposes_diagnostics_in_results_and_terminal(tmp_path, capsys):
+    launcher = tmp_path / "failed_launcher.py"
+    launcher.write_text("import sys\n"
+                        "print('TypeError: invalid window size', file=sys.stderr)\n"
+                        "sys.exit(1)\n", encoding="utf-8")
+    planned = _planned(tmp_path)
+    command = list(planned.command)
+    command[2] = str(launcher)
+    planned = replace(planned, launcher_path=launcher, command=tuple(command))
+    result = run_case(planned)
+    assert result["status"] == "pipeline_failed"
+    assert result["exit_code"] == 1
+    assert result["error_tail"] == "TypeError: invalid window size"
+    assert Path(result["stderr_path"]).is_file()
+    bench_cli._print_failure_details(result)
+    output = capsys.readouterr().out
+    assert "TypeError: invalid window size" in output
+    assert result["stderr_path"] in output
+    assert "missing output:" in output
+
+def test_failure_diagnostics_fall_back_and_limit_tail(tmp_path):
+    empty = tmp_path / "stderr.txt"
+    empty.write_text("", encoding="utf-8")
+    log = tmp_path / "launcher.log"
+    log.write_text("\n".join(str(i) for i in range(100)), encoding="utf-8")
+    assert failure_log_tail((tmp_path / "missing", empty, log)).splitlines() == [
+        str(i) for i in range(80, 100)]
+    assert failure_log_tail((tmp_path / "missing", empty)) is None
+
+
+def test_missing_outputs_are_reported_for_successful_process(capsys):
+    bench_cli._print_failure_details({
+        "status": "success", "expectation_met": False,
+        "output_files": [{"path": "frame_00000.png", "exists": False}],
+    })
+    assert "missing output: frame_00000.png" in capsys.readouterr().out
+
 
 def test_dry_run_reports_and_creates_nothing(tmp_path):
     output_dir = tmp_path / "dry_out"

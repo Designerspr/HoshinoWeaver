@@ -157,6 +157,7 @@ def _case_headline(result: Mapping[str, Any]) -> str:
     phases = result.get("phases") or {}
     parts = [
         f"status={result.get('status')}",
+        f"exit_code={result.get('exit_code')}",
         f"wall={_format_seconds(result.get('wall_seconds'))}",
         f"pipeline={_format_seconds(phases.get('pipeline_seconds'))}",
         f"exec={_format_seconds(phases.get('execution_seconds'))}",
@@ -165,6 +166,21 @@ def _case_headline(result: Mapping[str, Any]) -> str:
         f"rss_peak={_format_bytes(resources.get('rss_peak_bytes'))}",
     ]
     return "  ".join(parts)
+
+
+def _print_failure_details(record: Mapping[str, Any]) -> None:
+    if record.get("status") == "success" and record.get("expectation_met"):
+        return
+    for entry in record.get("output_files", []):
+        if not entry.get("exists"):
+            print(f"  missing output: {entry.get('path')}")
+    for key in ("log_path", "stderr_path", "stdout_path"):
+        if record.get(key):
+            print(f"  {key}: {record[key]}")
+    if record.get("error_tail"):
+        print("  launcher diagnostics (last 20 lines):")
+        for line in record["error_tail"].splitlines():
+            print(f"    {line}")
 
 
 # ── reporting ──────────────────────────────────────────────────────────────
@@ -431,7 +447,9 @@ def _dry_run(suite: SuiteSpec, cases: Sequence[CaseSpec],
         for entry in planned.inputs.entries:
             print(f"    - {entry.name}: {len(entry.files)} file(s) "
                   f"from {entry.source} {entry.source_path or ''}")
-        print(f"  output      : {planned.configs.get('output_filename')}")
+        output_path = (planned.configs.get("output_filename")
+                       or planned.configs.get("output_dir"))
+        print(f"  output      : {output_path}")
         print(f"  buffer_mode : {planned.configs.get('buffer_mode')} "
               f"temp_path={planned.configs.get('temp_path')}")
         print(f"  command     : {' '.join(planned.command)}")
@@ -519,6 +537,7 @@ def _run_suite(suite: SuiteSpec, cases: Sequence[CaseSpec],
                 record["warnings"] = list(record.get("warnings", [])) + warnings
             runs.append(record)
             print(f"  {_case_headline(record)}")
+            _print_failure_details(record)
             for warning in record.get("warnings", []):
                 print(f"  WARNING: {warning}")
 

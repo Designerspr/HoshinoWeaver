@@ -532,8 +532,14 @@ def case_paths(case: CaseSpec, run_index: int, *, output_dir: Path,
 
 
 def effective_configs(case: CaseSpec, paths: Mapping[str, Path],
-                      run_index: int) -> dict[str, Any]:
+                      run_index: int, *,
+                      pipeline_path: Path | None = None) -> dict[str, Any]:
     """Configs for one run, including the injected output/cache defaults."""
+    from hoshicore.engine.inspect import inspect_yaml
+
+    schema = inspect_yaml(str(pipeline_path or _resolve_user_path(case.pipeline)),
+                          route_choices=dict(case.routes) or None)
+    declared_configs = {param.name for param in schema.configs}
     mapping = {
         "case_id": case.id,
         "run_index": str(run_index),
@@ -542,13 +548,14 @@ def effective_configs(case: CaseSpec, paths: Mapping[str, Path],
         "run_dir": str(paths["run_dir"]),
     }
     configs: dict[str, Any] = dict(case.configs)
-    if "output_filename" not in configs:
-        filename = f"{case.id}.{DEFAULT_OUTPUT_EXTENSION}"
-        configs["output_filename"] = str(
-            paths["output_root"] / substitute_placeholders(filename, mapping))
-    else:
-        configs["output_filename"] = substitute_placeholders(
-            str(configs["output_filename"]), mapping)
+    if "output_filename" in declared_configs:
+        configs.setdefault("output_filename", str(
+            paths["output_root"] / f"{case.id}.{DEFAULT_OUTPUT_EXTENSION}"))
+    if "output_dir" in declared_configs:
+        configs.setdefault("output_dir", str(paths["output_root"] / case.id))
+    for key in ("output_filename", "output_dir"):
+        if key in configs:
+            configs[key] = substitute_placeholders(str(configs[key]), mapping)
     buffer_mode = configs.get("buffer_mode")
     if buffer_mode in ("disk", "replay") and not configs.get("temp_path"):
         configs["temp_path"] = str(paths["cache_root"])
@@ -1231,6 +1238,22 @@ def parse_printed_log_path(stdout_path: Path) -> str | None:
     return found or None
 
 
+def failure_log_tail(paths: Sequence[Path]) -> str | None:
+    """Read a bounded tail from the first non-empty diagnostic file."""
+    for path in paths:
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - 8192))
+                lines = handle.read().decode("utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        tail = "\n".join(lines[-20:]).strip()
+        if tail:
+            return tail
+    return None
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Planning and execution
 # ────────────────────────────────────────────────────────────────────────────
@@ -1292,7 +1315,8 @@ def plan_case(case: CaseSpec, *, suite_path: Path, output_dir: Path,
     resolution = resolve_inputs(case, require_exists=require_inputs)
     paths = case_paths(case, run_index, output_dir=output_dir,
                        working_dir=working)
-    configs = effective_configs(case, paths, run_index)
+    configs = effective_configs(case, paths, run_index,
+                                pipeline_path=pipeline_path)
     payloads = {
         entry.name: f"@{paths['run_dir'] / ('inputs_' + entry.name + '.txt')}"
         for entry in resolution.entries
@@ -1311,7 +1335,8 @@ def plan_case(case: CaseSpec, *, suite_path: Path, output_dir: Path,
     }
     expected_values = (case.expected_outputs or
                        ((str(configs["output_filename"]),)
-                        if case.expect_success else ()))
+                        if case.expect_success and "output_filename" in configs
+                        else ()))
     expected = tuple(
         path if path.is_absolute() else working / path
         for path in (Path(substitute_placeholders(item, mapping))
@@ -1435,6 +1460,9 @@ def run_case(planned: PlannedRun, *,
         "phases_source": "unavailable",
         "resources": {},
         "log_path": str(log_path),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "error_tail": None,
         "log_path_printed": None,
         "preflight_policy": case.preflight,
         "preflight_log_lines": [],
@@ -1535,6 +1563,9 @@ def run_case(planned: PlannedRun, *,
         result["status"] = "success"
     else:
         result["status"] = "pipeline_failed"
+    if result["status"] != "success":
+        result["error_tail"] = failure_log_tail(
+            (stderr_path, log_path, stdout_path))
     result["expectation_met"] = bool(
         (result["status"] == "success") == case.expect_success
         and (result["outputs_met"] is not False))
