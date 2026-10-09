@@ -596,8 +596,8 @@ class DynamicConfigPanel(QWidget):
             if spec.key in _bound_pair_targets:
                 continue
             if spec.hidden:
-                if spec.default is not None:
-                    result[spec.key] = spec.default
+                # Leave hidden values to backend default resolution. Dedicated
+                # panels (such as OutputPanel) submit their own overrides.
                 continue
             if spec.key in self._config_getters:
                 val = self._config_getters[spec.key]()

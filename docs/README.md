@@ -78,6 +78,8 @@ GUI 入口为 `HoshinoWeaver desktop.py`，界面代码位于 `ui/`，使用 PyS
 - `hoshicore/dag/base/<name>.yaml`：可复用子图；节点 `op` 可引用算子类名或子图文件名。
 - `<name>.ui.yaml`：前端标签、控件、取值范围和分组等显示提示，与 Meta YAML 配对。
 
+动态参数面板不提交标记为 `hidden: true` 的配置，包括其 YAML 默认值；后端按全局设置、工作流 YAML 默认值、Op 默认值的优先级解析，与 CLI 未传对应 `--config` 时一致。输出路径、位深等配置由专门的输出面板提交。`visible_when` 仅控制显示，不改变参数提交规则。
+
 ---
 
 ## 2. 核心概念
