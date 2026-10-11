@@ -554,6 +554,23 @@ class TestBackendRegistry(CustomOpsTestCase):
                 "star_mask_dog", cpu, map_backend, lambda fn: fn()
             )
 
+    def test_fallback_helper_propagates_untyped_accelerator_errors(self) -> None:
+        metal, _ = self._fallback_helper_selections()
+        metal_entry = mock.Mock(side_effect=RuntimeError("Metal kernel failed"))
+        cpu_entry = mock.Mock(return_value="unexpected fallback")
+
+        def map_backend(selection):
+            if selection.candidate.backend == "metal_host_io":
+                return "metal", metal_entry
+            return "cpu", cpu_entry
+
+        with self.assertRaisesRegex(RuntimeError, "Metal kernel failed"):
+            backend_registry.run_with_accelerator_fallback(
+                "star_mask_dog", metal, map_backend, lambda fn: fn()
+            )
+        metal_entry.assert_called_once()
+        cpu_entry.assert_not_called()
+
     def test_fallback_helper_retries_the_mapped_fallback_once(self) -> None:
         metal, cpu = self._fallback_helper_selections()
         metal_entry = mock.Mock(

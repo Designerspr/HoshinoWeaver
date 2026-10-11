@@ -12,6 +12,7 @@ from hoshicore._custom_op._dispatch import cuda_memory_info
 from hoshicore._custom_op._dispatch import CustomOpResourceExhaustedError
 from hoshicore._custom_op.backend_registry import BackendSelection
 from hoshicore._custom_op.backend_registry import registered_backend_candidates
+import hoshicore._custom_op.backend_registry as backend_registry
 import hoshicore._custom_op.ops.filter as filter_ops
 import hoshicore._custom_op.ops.detection as detection_ops
 import hoshicore._custom_op.ops.median as median_ops
@@ -51,6 +52,51 @@ def _naive_median_filter_2d(image: np.ndarray, ksize: int) -> np.ndarray:
 
 
 class TestFilterMedianCustomOps(CustomOpsTestCase):
+    def test_median_reduce_chunk_float_nan_matches_numpy(self) -> None:
+        module, reason = median_ops._load_compiled_module_result()
+        if module is None:
+            self.skipTest(reason or "compiled backend unavailable")
+        for dtype in (np.float32, np.float64):
+            for values in ([0, 0, np.nan, 1], [np.nan, 1, 2], [1, np.nan, np.nan, 2]):
+                stack = np.array(values, dtype=dtype).reshape(len(values), 1, 1)
+                with self.subTest(dtype=dtype, values=values):
+                    self.assertTrue(np.isnan(np.median(stack, axis=0)[0, 0]))
+                    self.assertTrue(np.isnan(module.median_reduce_chunk(stack)[0, 0]))
+
+    def test_median_reduce_chunk_metal_capacity_gate(self) -> None:
+        class CpuModule:
+            def median_reduce_chunk(self):
+                return None
+
+        class MetalModule:
+            def median_reduce_chunk_metal(self):
+                return None
+
+            def build_info(self):
+                return {"metal": True}
+
+        def resolve_with_metal(*args, **kwargs):
+            return backend_registry.resolve_backend(
+                *args, metal_probe=lambda: {"available": True}, **kwargs
+            )
+
+        boundary = np.iinfo(np.uint32).max // 128
+        with mock.patch.object(
+            median_ops, "_load_compiled_module_result", return_value=(CpuModule(), None)
+        ), mock.patch.object(
+            backend_registry, "load_metal_module", return_value=(MetalModule(), None)
+        ), mock.patch.object(
+            median_ops, "_resolve_backend", side_effect=resolve_with_metal
+        ):
+            at_limit = median_ops._resolve_median_selection(
+                "auto", 128, boundary, np.dtype(np.uint8)
+            )
+            over_limit = median_ops._resolve_median_selection(
+                "auto", 128, boundary + 1, np.dtype(np.uint8)
+            )
+        self.assertEqual(at_limit.backend, "metal_host_io")
+        self.assertEqual(over_limit.backend, "openmp_cpu")
+
     def test_median_reduce_chunk_cuda_matches_numpy_exactly(self) -> None:
         if not cuda_memory_info().get("available"):
             self.skipTest("CUDA device unavailable")
@@ -71,13 +117,24 @@ class TestFilterMedianCustomOps(CustomOpsTestCase):
         stack = np.arange(16 * 256 * 256, dtype=np.uint16).reshape(16, 256, 256)
         cuda_candidate = registered_backend_candidates("median_reduce_chunk")[0]
         selection = BackendSelection(cuda_candidate, object())
-        with mock.patch.object(median_ops, "_select_median_backend", return_value=selection):
-            with mock.patch.object(
+        with (
+            mock.patch.object(backend_registry, "load_metal_module", return_value=(None, None)),
+            mock.patch.object(median_ops, "_select_median_backend", return_value=selection),
+            mock.patch.object(
                 median_ops,
                 "median_reduce_chunk_cuda",
                 side_effect=CustomOpResourceExhaustedError("test CUDA OOM"),
-            ):
-                got = median_reduce_chunk(stack)
+            ) as cuda,
+            mock.patch.object(
+                median_ops, "median_reduce_chunk_compiled",
+                wraps=median_ops.median_reduce_chunk_compiled,
+            ) as cpu,
+            mock.patch.object(median_ops, "median_reduce_chunk_metal") as metal,
+        ):
+            got = median_reduce_chunk(stack)
+        cuda.assert_called_once()
+        cpu.assert_called_once()
+        metal.assert_not_called()
         expected = median_ops.median_reduce_chunk_compiled(stack)
         np.testing.assert_array_equal(got, expected)
 
@@ -121,13 +178,24 @@ class TestFilterMedianCustomOps(CustomOpsTestCase):
         frames = [np.full((7, 11), frame, dtype=np.uint16) for frame in range(16)]
         cuda_candidate = registered_backend_candidates("median_reduce_chunk")[0]
         selection = BackendSelection(cuda_candidate, object())
-        with mock.patch.object(median_ops, "_resolve_median_selection", return_value=selection):
-            with mock.patch.object(
+        with (
+            mock.patch.object(backend_registry, "load_metal_module", return_value=(None, None)),
+            mock.patch.object(median_ops, "_resolve_median_selection", return_value=selection),
+            mock.patch.object(
                 median_ops,
                 "median_reduce_frames_cuda",
                 side_effect=CustomOpResourceExhaustedError("test CUDA OOM"),
-            ):
-                got = median_ops.median_reduce_frames(frames)
+            ) as cuda,
+            mock.patch.object(
+                median_ops, "median_reduce_chunk_compiled",
+                wraps=median_ops.median_reduce_chunk_compiled,
+            ) as cpu,
+            mock.patch.object(median_ops, "median_reduce_frames_metal") as metal,
+        ):
+            got = median_ops.median_reduce_frames(frames)
+        cuda.assert_called_once()
+        cpu.assert_called_once()
+        metal.assert_not_called()
         np.testing.assert_array_equal(got, np.full((7, 11), 7, dtype=np.uint16))
 
     def test_median_reduce_frames_cuda_matches_stacked_result(self) -> None:

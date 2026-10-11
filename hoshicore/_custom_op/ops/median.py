@@ -25,6 +25,7 @@ _debug_log = partial(debug_log, "median")
 
 
 _SUPPORTED_DTYPES = (np.uint8, np.uint16, np.float32, np.float64)
+_METAL_MAX_STACK_ELEMENTS = (1 << 32) - 1
 
 
 def _validate_stack(stack: np.ndarray) -> np.ndarray:
@@ -140,11 +141,17 @@ def _resolve_median_selection(
     preference: str, n_frames: int, plane_size: int, dtype: np.dtype
 ) -> BackendSelection:
     use_gpu = dtype in (np.uint8, np.uint16) and 8 <= n_frames <= 128 and plane_size >= 65536
+    if not use_gpu:
+        excluded = ("cuda_host_io", "metal_host_io")
+    elif n_frames * plane_size > _METAL_MAX_STACK_ELEMENTS:
+        excluded = ("metal_host_io",)
+    else:
+        excluded = ()
     selection = _resolve_backend(
         "median_reduce_chunk",
         preference,
         load_module=_load_compiled_module_result,
-        exclude_backends=() if use_gpu else ("cuda_host_io", "metal_host_io"),
+        exclude_backends=excluded,
     )
     if selection.reason:
         _debug_log(f"compiled backend unavailable, reason: {selection.reason}")

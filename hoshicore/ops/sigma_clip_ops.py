@@ -822,8 +822,10 @@ class MedianReduceOp(ChunkIteratorBaseOp):
 
     @classmethod
     def chunk_cost_per_row(cls, n_frames, row_bytes, dtype_bytes):
-        _ = dtype_bytes
-        return (2 * n_frames + 1) * row_bytes
+        float64_row = row_bytes // dtype_bytes * 8
+        # Current and prefetched chunks, NumPy's stack and partition copy,
+        # plus the float64 median output bound all supported backends.
+        return 4 * n_frames * row_bytes + float64_row
 
     def _init_chunk_state(self, configs, row_start, row_end, w):
         return {'result': None}
