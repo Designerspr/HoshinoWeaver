@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from scipy.optimize import least_squares
+from scipy.spatial.transform import Rotation
 
 from hoshicore.component.norma.alignment import (
     AlignmentOptimizationError,
@@ -23,6 +24,8 @@ from hoshicore.component.norma.optimization import (
     CameraOptimizationPolicy,
     CameraOptimizationState,
     FlexibleOptimizationContext,
+    compute_flexible_residual_diagnostics,
+    estimate_robust_scale_from_initial_residual,
     flexible_reproject_error,
     make_flexible_parameter_bounds,
     make_flexible_regularization_weights,
@@ -349,6 +352,66 @@ def test_fisheye_focal_prior_is_context_weight():
     weights = make_flexible_regularization_weights(ctx, x0)
 
     np.testing.assert_allclose(weights, np.array([0.0, 0.0, 0.0, 1.0]))
+
+
+@pytest.mark.parametrize("residual_space", ["cross", "angular", "pixel"])
+@pytest.mark.parametrize("same_camera,ref_delta,src_delta,mixed", [
+    (True, .2, .2, False), (True, -.2, -.2, False),
+    (False, .2, -.1, True), (False, None, .2, True),
+    (False, .2, None, False), (True, None, None, False),
+])
+def test_pair_focal_compensation_respects_projection_units_weights_and_priors(
+        residual_space, same_camera, ref_delta, src_delta, mixed):
+    ref_camera = _camera()
+    src_camera = (FisheyeCameraModel(Intrinsics(16., 36., 24., 2400, 1600))
+                  if mixed else ref_camera)
+    ref_policy = CameraOptimizationPolicy(ref_delta is not None, False, False, 0)
+    src_policy = CameraOptimizationPolicy(src_delta is not None, False, False, 0)
+    ref_pts = np.array([[480., 340.], [720., 460.]])
+    src_pts = ref_pts * (2 if mixed else 1) + [2., -1.]
+    ctx = FlexibleOptimizationContext(
+        ref_pts, src_pts, _camera_optimization_state(ref_camera, ref_policy),
+        _camera_optimization_state(src_camera, src_policy), same_camera=same_camera,
+        pts_weight=np.array([.7, 1.3]), residual_space=residual_space)
+    x = pack_flexible_initial_params(np.array([.01, -.02, .03]), ctx)
+    offset = 3
+    if ref_delta is not None:
+        x[offset] = ref_delta
+        offset += 1
+    if not same_camera and src_delta is not None:
+        x[offset] = src_delta
+    ctx.params0 = np.zeros_like(x)
+    ctx.reg_weight = np.arange(1, len(x) + 1, dtype=float) * .03
+    solved_ref = ref_camera.with_focal_length(20. * (1 + (ref_delta or 0)))
+    solved_src = src_camera.with_focal_length(
+        src_camera.intrinsics.focal_length_mm * (1 + (src_delta or 0)))
+    ref_rays = solved_ref.unproject(ref_pts) @ Rotation.from_rotvec(x[:3]).as_matrix().T
+    src_rays = solved_src.unproject(src_pts)
+    raw_angles = np.arccos(np.clip(np.sum(ref_rays * src_rays, axis=1), -1, 1))
+    if residual_space == "pixel":
+        expected_data = (solved_src.project(ref_rays) - src_pts).reshape(-1)
+        components = 2
+        scale = 1.
+    elif residual_space == "angular":
+        expected_data = raw_angles
+        components = 1
+    else:
+        expected_data = np.cross(ref_rays, src_rays).reshape(-1)
+        components = 3
+    def mean_pixel_focal(cameras):
+        return np.mean([value for camera in cameras
+                        for value in (camera.intrinsics.K[0, 0], camera.intrinsics.K[1, 1])])
+    if residual_space != "pixel":
+        scale = mean_pixel_focal([solved_ref, solved_src]) / mean_pixel_focal([ref_camera, src_camera])
+    expected_data = expected_data * scale * np.repeat(ctx.pts_weight, components)
+    actual = flexible_reproject_error(x, ctx)
+    np.testing.assert_allclose(actual[:len(expected_data)], expected_data, atol=1e-12)
+    np.testing.assert_allclose(actual[len(expected_data):], ctx.reg_weight * x)
+    diagnostics = compute_flexible_residual_diagnostics(x, ctx)
+    assert diagnostics['raw_angle_p90_rad'] == pytest.approx(np.percentile(raw_angles, 90))
+    if residual_space == "cross":
+        expected_huber_scale = np.clip(np.median(raw_angles) * scale * 2, 1e-6, .1)
+        assert estimate_robust_scale_from_initial_residual(x, ctx) == pytest.approx(expected_huber_scale)
 
 
 # ---------------------------------------------------------------------------

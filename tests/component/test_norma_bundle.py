@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 import hoshicore.component.norma.bundle as bundle_module
 from hoshicore.component.norma.bundle import (
@@ -25,7 +26,9 @@ from hoshicore.component.norma.bundle import (
 from hoshicore.component.norma.detection import DetectedStars
 from hoshicore.component.norma.frame_align import AlignmentCameraCandidate
 from hoshicore.component.norma.optimization import CameraOptimizationPolicy
-from hoshicore.component.norma.types import CameraModel, Distortion, Intrinsics
+from hoshicore.component.norma.types import (
+    CameraModel, Distortion, FisheyeCameraModel, FisheyeDistortion, Intrinsics,
+)
 
 
 def _rotation_z(angle: float) -> np.ndarray:
@@ -188,6 +191,132 @@ def test_plan_frame_access():
     assert plan.frame(0).status == FrameAlignmentStatus.SOLVED
     with pytest.raises(IndexError):
         plan.frame(1)
+
+
+@pytest.mark.parametrize("wall_column,wall_direction", [(0, -1), (0, 1), (5, 1)])
+def test_camera_boundary_rejected_without_expansion(
+        monkeypatch, wall_column, wall_direction):
+    camera = _camera()
+    policy = CameraOptimizationPolicy(True, True, True, 4)
+    points = np.tile(np.array([[1., 1.], [118., 1.], [1., 78.], [118., 78.]]), (6, 1))
+    edge = _BundleEdge(0, 1, points, points + .2, np.eye(3))
+    calls = []
+
+    def fake_fit(fun, x0, *, args, bounds, jac, **kwargs):
+        calls.append((x0.copy(), tuple(v.copy() for v in bounds)))
+        values = x0.copy()
+        active = np.zeros_like(values, dtype=int)
+        active[wall_column] = wall_direction
+        values[wall_column] = bounds[0 if wall_direction < 0 else 1][wall_column]
+        return SimpleNamespace(success=True, x=values, active_mask=active,
+            message="ok", jac=np.ones((72, len(values))))
+
+    monkeypatch.setattr(bundle_module, "least_squares", fake_fit)
+    monkeypatch.setattr(bundle_module, "_camera_observability", lambda *args: 1.0)
+    with pytest.raises(BundleAdjustmentError, match="bounds"):
+        _solve_bundle_parameters([edge], 0, {0, 1}, camera, policy, 10)
+    assert len(calls) == 1
+    np.testing.assert_allclose(calls[0][1][0][:7], [-.3, -1, -1, -1, -1, -.05, -.05])
+
+
+def test_interior_solution_uses_one_compensated_fit(monkeypatch):
+    camera = _camera()
+    points = np.tile(np.array([[1., 1.], [118., 1.], [1., 78.], [118., 78.]]), (6, 1))
+    edge = _BundleEdge(0, 1, points, points.copy(), np.eye(3))
+    calls = []
+    def fit(fun, x0, **kwargs):
+        calls.append(x0)
+        return SimpleNamespace(success=True, x=x0, active_mask=np.zeros_like(x0),
+            message="ok", jac=np.ones((72, len(x0))))
+    monkeypatch.setattr(bundle_module, "least_squares", fit)
+    monkeypatch.setattr(bundle_module, "_camera_observability", lambda *args: 1.0)
+    _solve_bundle_parameters([edge], 0, {0, 1}, camera,
+        CameraOptimizationPolicy(True, True, False, 4), 10)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("fisheye,policy,focal_delta", [
+    (False, CameraOptimizationPolicy(True, True, True, 4), .15),
+    (False, CameraOptimizationPolicy(True, True, True, 4), -.15),
+    (True, CameraOptimizationPolicy(True, True, True, 4), .15),
+    (False, CameraOptimizationPolicy(True, False, False, 0), .15),
+    (False, CameraOptimizationPolicy(False, True, True, 4), None),
+    (False, CameraOptimizationPolicy(False, False, False, 0), None),
+])
+def test_first_bundle_fit_residual_scale_and_complete_jacobian(
+        monkeypatch, fisheye, policy, focal_delta):
+    camera = _camera()
+    if fisheye:
+        camera = FisheyeCameraModel(camera.intrinsics, FisheyeDistortion())
+    points = np.tile(np.array([[1., 1.], [118., 1.], [1., 78.], [118., 78.]]), (6, 1))
+    edge = _BundleEdge(0, 1, points, points + .2, np.eye(3))
+    camera_width = len(_camera_parameter_bounds(policy)[0])
+    calls = []
+
+    def fit(fun, x0, *, args, jac, bounds, **kwargs):
+        calls.append(True)
+        values = x0.copy()
+        if camera_width:
+            values[:camera_width] = .001
+        if focal_delta is not None:
+            assert bounds[0][0] == -.3 and bounds[1][0] == .3
+            values[0] = focal_delta
+        values[camera_width:] = [.01, -.02, .03]
+        solved_camera = _camera_from_parameters(camera, policy, values[:camera_width])
+        relative = Rotation.from_rotvec(values[camera_width:]).as_matrix()
+        raw = np.cross(
+            solved_camera.unproject(points) @ relative.T,
+            solved_camera.unproject(points + .2)).reshape(-1)
+        expected_scale = 1 if focal_delta is None else 1 + focal_delta
+        np.testing.assert_allclose(fun(values, *args), raw * expected_scale, atol=1e-12)
+        analytical = jac(values, *args)
+        for column in range(len(values)):
+            plus, minus = values.copy(), values.copy()
+            plus[column] += 1e-6
+            minus[column] -= 1e-6
+            numerical = (fun(plus, *args) - fun(minus, *args)) / 2e-6
+            np.testing.assert_allclose(analytical[:, column], numerical, atol=1e-5, rtol=1e-4)
+        return SimpleNamespace(success=True, x=x0, active_mask=np.zeros_like(x0),
+                               message="ok", jac=np.ones((72, len(x0))))
+
+    monkeypatch.setattr(bundle_module, "least_squares", fit)
+    monkeypatch.setattr(bundle_module, "_camera_observability", lambda *args: 1.0)
+    _solve_bundle_parameters([edge], 0, {0, 1}, camera, policy, 10)
+    assert len(calls) == 1
+
+
+def test_outlier_refit_preserves_focal_scale_initial_noise_and_bounds(monkeypatch):
+    camera = _camera()
+    policy = CameraOptimizationPolicy(True, False, False, 0)
+    points = np.tile(np.array([[1., 1.], [118., 1.], [1., 78.], [118., 78.]]), (6, 1))
+    edges = [_BundleEdge(first, second, points, points + .2, np.eye(3))
+             for first, second in [(0, 1), (1, 2), (0, 2)]]
+    calls = []
+
+    def fit(fun, x0, *, args, bounds, f_scale, **kwargs):
+        values = x0.copy()
+        values[0] = .15
+        solved_camera = camera.with_focal_length(23.)
+        raw = np.cross(solved_camera.unproject(points),
+                       solved_camera.unproject(points + .2)).reshape(-1)
+        expected = np.tile(raw * 1.15, len(args[0]))
+        np.testing.assert_allclose(fun(values, *args), expected, atol=1e-12)
+        assert bounds[0][0] == -.3 and bounds[1][0] == .3
+        calls.append((x0.copy(), f_scale, len(args[0])))
+        return SimpleNamespace(success=True, x=values, active_mask=np.zeros_like(x0),
+                               message="ok", jac=np.ones((len(expected), len(x0))))
+
+    monkeypatch.setattr(bundle_module, "least_squares", fit)
+    monkeypatch.setattr(bundle_module, "_camera_observability", lambda *args: 1.0)
+    monkeypatch.setattr(bundle_module, "_edge_residuals",
+                        lambda edge, *args: np.full(24, .1 if edge is edges[2] else .001))
+    solved, _, retained, _ = _solve_bundle_parameters(edges, 0, {0, 1, 2}, camera, policy, 10)
+    assert retained == edges[:2]
+    assert solved.intrinsics.focal_length_mm == pytest.approx(23.)
+    assert len(calls) == 2
+    assert calls[1][0][0] == .15
+    assert calls[0][1] == calls[1][1]
+    assert [call[2] for call in calls] == [3, 2]
 
 
 def test_bundle_edge_refines_rotation_without_camera_parameters(monkeypatch):

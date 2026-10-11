@@ -782,14 +782,34 @@ def _solve_bundle_parameters(
             row_offset += rows
         return matrix
 
+    def solver_residual(parameters, observations):
+        raw = residual(parameters, observations)
+        # Angular noise shrinks as focal grows. Keep its approximate pixel
+        # scale from the first fit through outlier refits.
+        # With focal fixed, the scale is one and column zero may be a different
+        # camera parameter or a pose variable.
+        return raw * (1.0 + parameters[0]) if policy.optimize_focal else raw
+
+    def solver_jacobian(parameters, observations):
+        matrix = jacobian(parameters, observations)
+        if policy.optimize_focal:
+            matrix *= 1.0 + parameters[0]
+            matrix[:, 0] += residual(parameters, observations)
+        return matrix
+
     # First pass uses every successfully matched edge in the component. Huber
     # loss limits individual bad pairs before edge-level rejection is possible.
-    initial_residual = residual(x0, edges)
+    initial_residual = solver_residual(x0, edges)
     scale = max(float(np.median(np.abs(initial_residual))) * 2.0, 1e-6)
+
+    def fit_parameters(values, selected_edges):
+        return least_squares(
+            solver_residual, values, jac=solver_jacobian, args=(selected_edges,), method="trf",
+            loss="huber", f_scale=scale, max_nfev=max_nfev,
+            bounds=parameter_bounds())
+
     started = time.perf_counter()
-    fit = least_squares(
-        residual, x0, jac=jacobian, args=(edges,), method="trf", loss="huber",
-        f_scale=scale, max_nfev=max_nfev, bounds=parameter_bounds())
+    fit = fit_parameters(x0, edges)
     _log_solve_summary("_solve_bundle_parameters[global]", fit,
                        n_vars=len(x0), n_edges=len(edges),
                        elapsed_seconds=time.perf_counter() - started)
@@ -824,10 +844,7 @@ def _solve_bundle_parameters(
         initial = {index: rotations[index] for index in component}
         x0 = pack_with_poses(fit.x[:len(camera0)], initial)
         started = time.perf_counter()
-        fit = least_squares(
-            residual, x0, jac=jacobian, args=(retained,), method="trf",
-            loss="huber", f_scale=scale, max_nfev=max_nfev,
-            bounds=parameter_bounds())
+        fit = fit_parameters(x0, retained)
         _log_solve_summary("_solve_bundle_parameters[refined]", fit,
                            n_vars=len(x0), n_edges=len(retained),
                            elapsed_seconds=time.perf_counter() - started)
@@ -1371,4 +1388,3 @@ def build_bundle_plan(
         by_index, reference_frame_index, all_edges, retained, camera,
         rotations, reference.candidate.optimization_policy, None,
         "staged", None)
-

@@ -20,6 +20,11 @@ is requested, the rotated ref rays are projected through the source camera and
 compared to source pixels. Projection dispatch is per camera, so
 perspective/fisheye mixed pairs use the same solver path.
 
+Angular and cross data residuals are scaled by the current / initial mean
+pixel focal length of the two cameras. This compensates the approximate 1/f
+angular noise scale from the first fit. Pixel data residuals and regularization 
+retain their existing units.
+
 Robust loss is delegated to ``scipy.optimize.least_squares``.  When
 ``robust_scale`` is not provided, it is estimated once from the initial residual
 vector and then kept fixed for the solve.
@@ -326,6 +331,14 @@ def _flexible_regularization(
     return np.zeros(0, dtype=np.float64)
 
 
+def _initial_pixel_focal_scale(ctx: FlexibleOptimizationContext) -> float:
+    """Mean fx/fy of both cameras before their focal deltas are applied."""
+    return 0.25 * sum(
+        state.base_focal * (state.img_w / state.sensor_w_mm
+                            + state.img_h / state.sensor_h_mm)
+        for state in (ctx.ref_state, ctx.src_state))
+
+
 def _compute_flexible_residual_components(
     params_flat: NDArray[np.float64],
     ctx: FlexibleOptimizationContext,
@@ -340,6 +353,10 @@ def _compute_flexible_residual_components(
 
     dot = np.sum(ref_rotated * src_vecs, axis=1)
     raw_angle = np.arccos(np.clip(dot, -1.0, 1.0))
+
+    K1 = _camera_matrix_from_state(ctx.ref_state, ref_params)
+    K2 = _camera_matrix_from_state(ctx.src_state, src_params)
+    pixel_scale = float((K1[0, 0] + K1[1, 1] + K2[0, 0] + K2[1, 1]) * 0.25)
 
     if ctx.residual_space == "pixel":
         src_pred = _project_by_state(ref_rotated, ctx.src_state, src_params)
@@ -360,6 +377,13 @@ def _compute_flexible_residual_components(
         raise ValueError(
             f"Unsupported residual_space: {ctx.residual_space!r}")
 
+    if (ctx.residual_space != "pixel"
+            and (ref_params.focal_scale != 0.0 or src_params.focal_scale != 0.0)):
+        # Use both cameras' pixel focal lengths so independent focal blocks,
+        # mixed projections, and unequal resolutions share the same symmetric
+        # scale convention. A shared focal delta reduces this to 1 + delta.
+        data_residual *= pixel_scale / _initial_pixel_focal_scale(ctx)
+
     if ctx.pts_weight is not None:
         if ctx.residual_space == "angular":
             data_residual = data_residual * ctx.pts_weight
@@ -370,9 +394,6 @@ def _compute_flexible_residual_components(
 
     reg_residual = _flexible_regularization(params_flat, ctx)
 
-    K1 = _camera_matrix_from_state(ctx.ref_state, ref_params)
-    K2 = _camera_matrix_from_state(ctx.src_state, src_params)
-    pixel_scale = float((K1[0, 0] + K1[1, 1] + K2[0, 0] + K2[1, 1]) * 0.25)
     return raw_angle, data_residual, reg_residual, pixel_scale
 
 
@@ -473,10 +494,11 @@ def estimate_robust_scale_from_initial_residual(
         return 1.0
     if ctx.robust_scale is not None:
         return float(ctx.robust_scale)
-    raw_angle, data_residual, _, _ = _compute_flexible_residual_components(
+    raw_angle, data_residual, _, pixel_scale = _compute_flexible_residual_components(
         x0, ctx)
     scale_residual = (
-        raw_angle if ctx.residual_space == "cross" else data_residual)
+        raw_angle * (pixel_scale / _initial_pixel_focal_scale(ctx))
+        if ctx.residual_space == "cross" else data_residual)
     return estimate_robust_scale(
         scale_residual,
         method=ctx.robust_scale_method,
