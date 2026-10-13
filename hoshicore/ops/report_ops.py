@@ -152,6 +152,8 @@ class BundleCameraSummary:
     camera_solve_mode: str
     camera_fallback_reason: Optional[str]
     focal_metadata_ratio: Optional[float] = None
+    star_detection_profile: str = "strict"
+    star_recovery_probe_fractions: tuple[float, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -190,6 +192,8 @@ def build_bundle_frame_rotation_export(
         camera_solve_mode=plan.camera_solve_mode,
         camera_fallback_reason=plan.camera_fallback_reason,
         focal_metadata_ratio=plan.focal_metadata_ratio,
+        star_detection_profile=plan.star_detection_profile,
+        star_recovery_probe_fractions=plan.star_recovery_probe_fractions,
     )
 
     def _readonly(rotation: Optional[NDArray[np.float64]]):

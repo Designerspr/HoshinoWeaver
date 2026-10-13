@@ -852,6 +852,7 @@ def align_frame_camera_model(
     matching_path: str = DEFAULT_MATCHING_PATH,
     ref_refine_geo: Optional[GeometryView] = None,
     star_detection_mode: str = "auto",
+    star_detection_recovery: bool = True,
 ) -> np.ndarray:
     """Camera-model alignment with explicit ref-to-src remap construction."""
     ref_camera = ref_candidate.camera
@@ -870,7 +871,9 @@ def align_frame_camera_model(
             f"Unknown matching_path {matching_path!r}; expected one of "
             f"{MATCHING_PATHS}")
 
-    source_detection = StarDetectionCache.from_image(frame, star_detection_mode=star_detection_mode)
+    source_detection = StarDetectionCache.from_image(
+        frame, star_detection_mode=star_detection_mode,
+        star_detection_recovery=star_detection_recovery)
     source_stars = (source_detection.pywt_stars
                     if matching_path in BOOTSTRAP_MATCHING_PATHS
                     else source_detection.median_stars)

@@ -19,6 +19,9 @@ int_weight:
 star_detection_mode:
   enabled: true
   value: native_relaxed
+star_detection_recovery:
+  enabled: true
+  value: true
 buffer_mode:
   enabled: true
   value: memory

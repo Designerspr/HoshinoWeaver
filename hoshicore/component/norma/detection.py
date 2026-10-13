@@ -292,6 +292,8 @@ def _filter_star_candidates(
     areas: NDArray[np.float64],
     intensities: NDArray[np.float64],
     eccentricities: NDArray[np.float64],
+    *,
+    max_eccentricity: float = .8,
 ) -> DetectedStars:
     if len(positions) == 0:
         return _empty_detected_stars()
@@ -301,7 +303,7 @@ def _filter_star_candidates(
         intensities, STAR_FILTER_PERCENTILE)
     valid_stars = np.logical_and(
         areas > MIN_STAR_AREA,
-        eccentricities < .8,
+        eccentricities < max_eccentricity,
     )
     valid_stars = np.logical_and(
         valid_stars,
@@ -455,6 +457,11 @@ def _detect_star_points_contour(
     gaussian_ksize: int = 9,
     sigma: float = 2,
     min_star_points: int = 400,
+    *,
+    response_percentile: float = 99.5,
+    max_eccentricity: float = .8,
+    candidate_observer=None,
+    resize_selection_percentile: float | None = None,
 ) -> DetectedStars:
     img_shape = img_gray.shape
     if img_gray.dtype != np.float64:
@@ -485,12 +492,19 @@ def _detect_star_points_contour(
 
     while True:
         img_rec = _wavelet_dec_rec(img_blr, resize_factor=resize_factor) * mask
-        bw = ((img_rec > np.percentile(img_rec[mask], 99.5)) * mask).astype(
+        bw = ((img_rec > np.percentile(img_rec[mask], response_percentile)) * mask).astype(
             np.uint8) * 255
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         contours = _find_star_contours(bw)
         logger.debug(f"{len(contours)} star points detected")
-        if len(contours) < min_star_points and resize_factor < 1:
+        resize_count = len(contours)
+        if (resize_factor < 1 and resize_selection_percentile is not None
+                and resize_selection_percentile != response_percentile):
+            selection_bw = ((img_rec > np.percentile(img_rec[mask], resize_selection_percentile))
+                            * mask).astype(np.uint8) * 255
+            selection_bw = cv2.morphologyEx(selection_bw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            resize_count = len(_find_star_contours(selection_bw))
+        if resize_count < min_star_points and resize_factor < 1:
             logger.debug(
                 "Not enough points, resize factor is now increasing by 2")
             resize_factor *= 2
@@ -508,7 +522,10 @@ def _detect_star_points_contour(
         return _empty_detected_stars()
 
     candidates = _measure_contour_candidates(contours, img_rec, bw)
-    detected = _filter_star_candidates(*candidates)
+    if candidate_observer is not None:
+        candidate_observer(candidates)
+    detected = (_filter_star_candidates(*candidates) if max_eccentricity == .8
+                else _filter_star_candidates(*candidates, max_eccentricity=max_eccentricity))
     logger.debug(f"Final star points = {len(detected.positions)}")
     return detected
 
@@ -690,6 +707,7 @@ def _detect_star_points_native_hybrid(
     sigma: float = 2,
     min_star_points: int = 400,
     mode: str = "auto",
+    candidate_observer=None,
 ) -> DetectedStars:
     """Run fused native pixel processing with exact OpenCV contour geometry.
 
@@ -732,6 +750,8 @@ def _detect_star_points_native_hybrid(
             f"Not enough points: expected {min_star_points}, got {candidate_count}"
         )
     logger.debug(f"final resize factor = {resize_factor:.3f}")
+    if candidate_observer is not None:
+        candidate_observer(candidates)
     detected = _filter_star_candidates(*candidates)
     logger.debug(f"Final native hybrid star points = {len(detected.positions)}")
     return detected
@@ -745,6 +765,7 @@ def detect_star_points(
     sigma: float = 2,
     min_star_points: int = 400,
     mode: str = "auto",
+    candidate_observer=None,
 ) -> DetectedStars:
     """Detect stars with native pixel work plus exact host contour geometry.
 
@@ -758,6 +779,8 @@ def detect_star_points(
         "sigma": sigma,
         "min_star_points": min_star_points,
     }
+    if candidate_observer is not None:
+        kwargs["candidate_observer"] = candidate_observer
     if mode not in {"auto", "native_relaxed", "contour"}:
         raise ValueError(f"Invalid star_detection_mode: {mode!r}")
     logger.debug("Star detection mode: {}", mode)

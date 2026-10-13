@@ -3,6 +3,7 @@ from functools import cached_property
 from typing import Optional
 
 import numpy as np
+from loguru import logger
 from numpy.typing import NDArray
 
 from hoshicore._custom_op.ops.detection import GraySource
@@ -11,6 +12,9 @@ from hoshicore._custom_op import detection_gray_f64, detection_gray_u16
 from .detection import DetectedStars, detect_star_points, detect_star_points_median
 from .matching import adaptive_k, extract_point_features
 from .types import BaseCameraModel
+from .wavelet_recovery import (WaveletRecoveryProbe,
+                               detect_recovered_wavelet_stars,
+                               probe_wavelet_recovery)
 
 
 def to_gray_f64(arr: np.ndarray) -> NDArray[np.float64]:
@@ -35,13 +39,18 @@ class StarDetectionCache:
     This object is intentionally image-backed. A long-lived reference cache
     avoids repeating detection across source frames; source caches are normally
     discarded after one alignment.
+
+    Wavelet results are selected using the image's shape-filter statistics
+    before returning observations to feature consumers. Sequence callers can
+    disable this decision and lock a single profile across their frames.
     """
 
     def __init__(self, gray: Optional[NDArray[np.float64]] = None,
                  mask: Optional[np.ndarray] = None,
                  median_threshold_ratio: float = 1.0,
                  star_detection_mode: str = "auto", *,
-                 image: Optional[np.ndarray] = None):
+                 image: Optional[np.ndarray] = None,
+                 star_detection_recovery: bool = True):
         if (gray is None) == (image is None):
             raise ValueError("StarDetectionCache needs exactly one of gray or image")
         self._gray = gray
@@ -49,25 +58,57 @@ class StarDetectionCache:
         self._mask = mask
         self._median_threshold_ratio = median_threshold_ratio
         self._star_detection_mode = star_detection_mode
+        self._star_detection_recovery = star_detection_recovery
+        self.star_detection_profile = "strict"
+        self.star_recovery_stats = None
 
     @classmethod
     def from_image(cls, image: np.ndarray, mask: Optional[np.ndarray] = None,
                    median_threshold_ratio: float = 1.0,
-                   star_detection_mode: str = "auto") -> "StarDetectionCache":
+                   star_detection_mode: str = "auto", *,
+                   star_detection_recovery: bool = True) -> "StarDetectionCache":
         return cls(mask=mask, median_threshold_ratio=median_threshold_ratio,
-                   star_detection_mode=star_detection_mode, image=image)
+                   star_detection_mode=star_detection_mode, image=image,
+                   star_detection_recovery=star_detection_recovery)
 
     @cached_property
     def gray(self) -> NDArray[np.float64]:
         """Host gray, converted from the image only when a detector needs it."""
         return self._gray if self._gray is not None else to_gray_f64(self._image)
 
+    def _make_wavelet_source(self) -> NDArray[np.float64] | GraySource:
+        # From an image, the CUDA detector converts the gray on the device.
+        return (self.gray if self._image is None
+                else GraySource(self._image, to_gray_f64, host_gray=lambda: self.gray))
+
+    def probe_wavelet_recovery(self, *, only_if_needed: bool = False) -> WaveletRecoveryProbe:
+        """Prepare observations and stats using this cache's input and backend.
+
+        Sequence callers request both profiles and retain only the returned
+        compact observations. Single-image callers may prepare recovery only
+        when the image satisfies the gate.
+        """
+        return probe_wavelet_recovery(
+            self._make_wavelet_source(), self._mask,
+            mode=self._star_detection_mode, only_if_needed=only_if_needed)
+
+    @cached_property
+    def recovered_pywt_stars(self) -> DetectedStars:
+        """Detect with the relaxed profile selected by a sequence caller."""
+        return detect_recovered_wavelet_stars(self.gray, self._mask)
+
     @cached_property
     def pywt_stars(self) -> DetectedStars:
-        # From an image, the CUDA detector converts the gray on the device.
-        source = (self.gray if self._image is None
-                  else GraySource(self._image, to_gray_f64, host_gray=lambda: self.gray))
-        return detect_star_points(source, self._mask,
+        if self._star_detection_recovery:
+            probe = self.probe_wavelet_recovery(only_if_needed=True)
+            self.star_recovery_stats = probe.stats
+            self.star_detection_profile = "relaxed" if probe.stats.needs_recovery else "strict"
+            logger.debug(
+                "Wavelet recovery: image profile={} eligible={} strict={} recoverable={} fraction={:.4f}",
+                self.star_detection_profile, probe.stats.eligible, probe.stats.strict,
+                probe.stats.recoverable, probe.stats.recoverable_fraction)
+            return probe.relaxed_stars if probe.stats.needs_recovery else probe.strict_stars
+        return detect_star_points(self._make_wavelet_source(), self._mask,
                                   mode=self._star_detection_mode)
 
     @cached_property

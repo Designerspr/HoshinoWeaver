@@ -46,6 +46,7 @@ class StarAlignmentOp(FilterBaseOp):
     }
     CONFIGS: dict[str, Any] = {
         "star_detection_mode": {"type": "str", "default": "auto"},
+        "star_detection_recovery": {"type": "bool", "default": True},
         "reference":        {"type": "image",  "required": True},
         "reference_exif":   {"type": "exif",   "default": None},
         "method":           {"type": "str",    "default": "distortion"},
@@ -75,7 +76,12 @@ class StarAlignmentOp(FilterBaseOp):
     @classmethod
     def estimate_resources(cls, configs, frame_bytes, n_frames,
                            dtype_bytes=None):
-        _ = dtype_bytes
+        if (configs.get("star_detection_recovery", True)
+                and configs.get("method", "distortion") != "homography"
+                and configs.get("matching_path", DEFAULT_MATCHING_PATH) != MATCHING_PATH_MEDIAN):
+            # Current-frame wavelet work plus the reference's cached gray.
+            element_bytes = max(1, int(dtype_bytes or 1))
+            return (frame_bytes * max(2, (72 + element_bytes - 1) // element_bytes), 0)
         # 持有 1 张参考帧 + 1 张当前帧的对齐输出
         # TODO: 对齐本身资源未计算
         return (2 * frame_bytes, 0)
@@ -176,7 +182,8 @@ class StarAlignmentOp(FilterBaseOp):
                 f"EXIF; set camera_setup_mode='manual' to use them")
         ref_detection = await self._run_cpu(
             StarDetectionCache.from_image, ref_arr,
-            star_detection_mode=configs.get("star_detection_mode", "auto"))
+            star_detection_mode=configs.get("star_detection_mode", "auto"),
+            star_detection_recovery=configs.get("star_detection_recovery", True))
         if method == "homography" or matching_path == MATCHING_PATH_MEDIAN:
             ref_stars = await self._run_cpu(
                 lambda: ref_detection.median_stars)
@@ -243,7 +250,8 @@ class StarAlignmentOp(FilterBaseOp):
                          guided_refine=guided_refine,
                          matching_path=matching_path,
                          ref_refine_geo=ref_refine_geo,
-                         star_detection_mode=configs.get("star_detection_mode", "auto"))
+                         star_detection_mode=configs.get("star_detection_mode", "auto"),
+                         star_detection_recovery=configs.get("star_detection_recovery", True))
                 else:
                     aligned_arr = await self._run_cpu(
                         align_frame_homography,

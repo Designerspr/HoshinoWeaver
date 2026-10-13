@@ -46,6 +46,57 @@ class _Camera:
         return image + 10
 
 
+@pytest.mark.parametrize("recovery_enabled", [False, True])
+def test_pair_alignment_passes_recovery_switch_to_reference_and_source(
+        monkeypatch, recovery_enabled):
+    import hoshicore.ops.alignment_ops as module
+    from hoshicore.component.norma.detection import DetectedStars
+
+    op = module.StarAlignmentOp("pair")
+    op.length = 1
+    op.tracker = Mock()
+    op.inputs["exifs"] = SimpleNamespace(active=False)
+    reference = np.zeros((8, 12), np.uint16)
+    source = np.ones_like(reference)
+    camera = CameraModel(Intrinsics(20, 36, 24, 12, 8), Distortion())
+    candidate = SimpleNamespace(camera=camera, init_source="manual")
+    stars = DetectedStars(np.array([[3., 4.]]), np.ones(1))
+    observed = {}
+
+    async def ready(value):
+        return value
+
+    async def run_cpu(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    async def broadcast(outputs):
+        observed["outputs"] = outputs
+
+    def cache(image, **kwargs):
+        assert image is reference
+        observed["reference_switch"] = kwargs["star_detection_recovery"]
+        return SimpleNamespace(pywt_stars=stars)
+
+    def align(frame, ref_geo, *args, **kwargs):
+        assert frame is source and ref_geo.stars is stars
+        observed["source_switch"] = kwargs["star_detection_recovery"]
+        return frame.copy()
+
+    monkeypatch.setattr(op, "_async_convert_inputs", lambda: {"data": ready(source)})
+    monkeypatch.setattr(op, "_run_cpu", run_cpu)
+    monkeypatch.setattr(op, "_broadcast_outputs", broadcast)
+    monkeypatch.setattr(module, "build_camera_candidate", lambda *args: candidate)
+    monkeypatch.setattr(module.StarDetectionCache, "from_image", staticmethod(cache))
+    monkeypatch.setattr(module, "align_frame_camera_model", align)
+    asyncio.run(op._async_filter({
+        "reference": reference,
+        "method": "distortion",
+        "star_detection_recovery": recovery_enabled,
+    }))
+    assert observed["reference_switch"] is recovery_enabled
+    assert observed["source_switch"] is recovery_enabled
+    np.testing.assert_array_equal(observed["outputs"]["result"], source)
+
 class _WindowCamera:
     def __init__(self):
         self.intrinsics = SimpleNamespace(
@@ -168,7 +219,7 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
     monkeypatch.setattr(op, "_broadcast_outputs", broadcast)
     monkeypatch.setattr(
         bundle_ops.StarDetectionCache, "from_image",
-        staticmethod(lambda image, mask, star_detection_mode="auto": (
+        staticmethod(lambda image, mask, **kwargs: (
             detection_masks.append(mask)
             or SimpleNamespace(pywt_stars=object()))))
     monkeypatch.setattr(bundle_ops, "build_camera_candidate", build_candidate)
@@ -176,6 +227,7 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
 
     configs = {
         "method": "distortion",
+        "star_detection_recovery": False,
         "camera_setup_mode": camera_setup_mode,
         "focal_length_mm": 14.0,
         "crop_factor": 1.0,
@@ -213,6 +265,55 @@ def test_bundle_adjustment_uses_reference_camera_for_every_frame(
     op.tracker.reset_bar.assert_not_called()
     assert op.tracker.update.call_count == 10
     op.tracker.close_bar.assert_called_once_with("bundle")
+
+
+@pytest.mark.parametrize("profile", ["strict", "relaxed"])
+def test_auto_recovery_locks_one_profile_for_all_frames(monkeypatch, profile):
+    from hoshicore.component.norma.detection import DetectedStars
+    from hoshicore.component.norma.wavelet_recovery import WaveletRecoveryProbe, WaveletRecoveryStats
+    op = BundleAdjustmentOp("bundle")
+    op.length = 4
+    op.display_name = "Bundle"
+    op.tracker = Mock()
+    op.inputs["exifs"] = SimpleNamespace(active=False)
+    position = 0
+    observed = {}
+    def stars(x):return DetectedStars(np.array([[x, 2.]]), np.ones(1))
+    async def ready(value):return value
+    def inputs():
+        nonlocal position
+        image = np.full((8, 12), position, np.uint8)
+        position += 1
+        return {"data": ready(image)}
+    async def run_cpu(function, *args, **kwargs):return function(*args, **kwargs)
+    async def broadcast(outputs):observed.update(outputs)
+    def cache(image, mask, **kwargs):
+        assert kwargs["star_detection_recovery"] is False
+        index = int(image[0, 0])
+        needs_recovery = index > 0 if profile == "relaxed" else index == 2
+        stats = (WaveletRecoveryStats(128, 64, 64) if needs_recovery
+                 else WaveletRecoveryStats(128, 120, 8))
+        return SimpleNamespace(
+            pywt_stars=stars(100+index),
+            recovered_pywt_stars=stars(200+index),
+            probe_wavelet_recovery=lambda: WaveletRecoveryProbe(
+                stars(100+index), stars(200+index), stats))
+    def build(frames, **kwargs):
+        observed["positions"] = [f.stars.positions[0, 0] for f in frames]
+        for _ in range(5):kwargs["edge_completed"]()
+        return _plan(_Camera([]), [_frame(i) for i in range(4)])
+    monkeypatch.setattr(op, "_async_convert_inputs", inputs)
+    monkeypatch.setattr(op, "_run_cpu", run_cpu)
+    monkeypatch.setattr(op, "_broadcast_outputs", broadcast)
+    monkeypatch.setattr(bundle_ops.StarDetectionCache, "from_image", staticmethod(cache))
+    monkeypatch.setattr(bundle_ops, "build_camera_candidate", lambda *args: object())
+    monkeypatch.setattr(bundle_ops, "build_bundle_plan", build)
+    asyncio.run(op._async_execute({"star_detection_recovery": True}))
+    offset = 200 if profile == "relaxed" else 100
+    assert observed["positions"] == [offset + index for index in range(4)]
+    assert observed["alignment_plan"].star_detection_profile == profile
+    expected = (.0625, .5, .5) if profile == "relaxed" else (.0625, .0625, .5)
+    assert observed["alignment_plan"].star_recovery_probe_fractions == expected
 
 
 def test_bundle_reference_remap_streams_in_order_and_skips_excluded(monkeypatch):

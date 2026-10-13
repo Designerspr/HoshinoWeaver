@@ -22,6 +22,8 @@ from ..component.norma.bundle_window import (BundleWindowSpec,
 from ..component.norma.frame_align import (CameraInitializationPolicy,
                                            build_camera_candidate)
 from ..component.norma.geometry_view import StarDetectionCache
+from ..component.norma.wavelet_recovery import (
+    RECOVERY_PROBE_FRAMES, select_wavelet_recovery)
 from ..component.norma.intrinsics_from_exif import lens_type_from_exif
 from ..component.queue import StreamExhausted
 from ..engine.registry import register_op
@@ -315,6 +317,7 @@ class BundleAdjustmentOp(BaseOp):
     }
     CONFIGS: dict[str, Any] = {
         "star_detection_mode": {"type": "str", "default": "auto"},
+        "star_detection_recovery": {"type": "bool", "default": True},
         "mask": {"type": "image", "default": None},
         "reference_frame_index": {"type": "int", "default": None},
         "method": {"type": "str", "default": "distortion"},
@@ -344,9 +347,15 @@ class BundleAdjustmentOp(BaseOp):
     @classmethod
     def estimate_resources(cls, configs, frame_bytes, n_frames,
                            dtype_bytes=None):
-        _ = (configs, dtype_bytes, n_frames)
+        _ = n_frames
         # Only compact star observations survive collection; pixel memory is
         # bounded by the frame currently being detected.
+        if configs.get("star_detection_recovery", True):
+            # Recovery materializes float64 gray/wavelet work even when the
+            # strict detector stays native. Treat all source elements as gray
+            # pixels conservatively because this interface has no channel count.
+            element_bytes = max(1, int(dtype_bytes or 1))
+            return (frame_bytes * max(2, (64 + element_bytes - 1) // element_bytes), 0)
         return (frame_bytes * 2, 0)
 
     async def _async_execute(self, configs: dict[str, Any]) -> None:
@@ -390,6 +399,24 @@ class BundleAdjustmentOp(BaseOp):
         detection_mask = None
         detection_mask_shape = None
         observations = []
+        recovery_enabled = configs.get("star_detection_recovery", True)
+        recovery_probes = []
+        recovery_profile = None if recovery_enabled else "strict"
+
+        def lock_recovery_profile():
+            nonlocal recovery_profile
+            recovery_profile = select_wavelet_recovery([probe.stats for probe in recovery_probes])
+            for position, probe in enumerate(recovery_probes):
+                index, _, shape, tags = observations[position]
+                stars = (probe.relaxed_stars if recovery_profile == "relaxed"
+                         else probe.strict_stars)
+                observations[position] = (index, stars, shape, tags)
+            logger.info(
+                "Wavelet recovery: sequence profile={}, probes={} (eligible/strict/recoverable/fraction)",
+                recovery_profile,
+                [(p.stats.eligible, p.stats.strict, p.stats.recoverable,
+                  round(p.stats.recoverable_fraction, 4)) for p in recovery_probes])
+
         for index in self._input_range():
             data = self._async_convert_inputs()
             try:
@@ -411,12 +438,24 @@ class BundleAdjustmentOp(BaseOp):
                 detection_mask_shape = array.shape[:2]
             detection = await self._run_cpu(
                 StarDetectionCache.from_image, array, detection_mask,
-                star_detection_mode=configs.get("star_detection_mode", "auto"))
-            stars = await self._run_cpu(lambda: detection.pywt_stars)
+                star_detection_mode=configs.get("star_detection_mode", "auto"),
+                star_detection_recovery=False)
+            if recovery_profile is None:
+                probe = await self._run_cpu(detection.probe_wavelet_recovery)
+                recovery_probes.append(probe)
+                stars = probe.strict_stars
+            elif recovery_profile == "relaxed":
+                stars = await self._run_cpu(lambda: detection.recovered_pywt_stars)
+            else:
+                stars = await self._run_cpu(lambda: detection.pywt_stars)
             observations.append((index, stars, array.shape, tags))
+            if recovery_profile is None and len(recovery_probes) == RECOVERY_PROBE_FRAMES:
+                lock_recovery_profile()
             self.tracker.update(self.name)
         if not observations:
             raise BundleAdjustmentError("cannot bundle-adjust an empty sequence")
+        if recovery_profile is None:
+            lock_recovery_profile()
         reference_index = (
             observations[len(observations) // 2][0]
             if configured_reference is None else int(configured_reference))
@@ -496,6 +535,10 @@ class BundleAdjustmentOp(BaseOp):
             # completing the one-step optimization phase.
             await asyncio.sleep(0)
             self.tracker.update(self.name)
+        if recovery_enabled:
+            plan = dataclasses.replace(
+                plan, star_detection_profile=recovery_profile,
+                star_recovery_probe_fractions=tuple(p.stats.recoverable_fraction for p in recovery_probes))
         await self._broadcast_outputs({"alignment_plan": plan})
         if self.length is not None:
             self.tracker.close_bar(self.name)

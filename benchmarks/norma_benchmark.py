@@ -32,6 +32,7 @@ from hoshicore.component.norma.matching import evaluate_rotation
 
 LENS_TYPES = {"perspective", "fisheye", "ideal"}
 ALIGNMENT_OPTIONS = {
+    "star_detection_recovery",
     "matching_path", "same_camera", "bootstrap_scales", "guided_refine",
     "guided_refine_radius_px", "median_threshold_ratio", "remap_map_scale",
     "lens_type", "ref_lens_type", "src_lens_type", "focal_length_mm",
@@ -321,11 +322,13 @@ def run_case(case: dict[str, Any], defaults: dict[str, Any], base_dir: Path,
         ref_detection = StarDetectionCache.from_image(
             reference,
             median_threshold_ratio=float(
-                config.get("median_threshold_ratio", 1.0)))
+                config.get("median_threshold_ratio", 1.0)),
+            star_detection_recovery=bool(config.get("star_detection_recovery", True)))
         src_detection = StarDetectionCache.from_image(
             source,
             median_threshold_ratio=float(
-                config.get("median_threshold_ratio", 1.0)))
+                config.get("median_threshold_ratio", 1.0)),
+            star_detection_recovery=bool(config.get("star_detection_recovery", True)))
         ref_bootstrap_stars = ref_detection.pywt_stars
         src_bootstrap_stars = src_detection.pywt_stars
         bootstrap_detection_seconds = time.perf_counter() - t0
@@ -449,6 +452,10 @@ def run_case(case: dict[str, Any], defaults: dict[str, Any], base_dir: Path,
             "success": True,
             "matching_path": config["matching_path"],
             "refine_status": solved.refine_status,
+            "star_detection_profiles": {
+                "reference": ref_detection.star_detection_profile,
+                "source": src_detection.star_detection_profile,
+            },
             "star_counts": {
                 "reference": int(len(ref_geo.positions)),
                 "source": int(len(src_geo.positions)),

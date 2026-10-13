@@ -25,6 +25,11 @@ star_detection_mode:
     - {value: "native_relaxed", label: "原生宽松（诊断）"}
     - {value: "contour", label: "OpenCV（对照）"}
 
+star_detection_recovery:
+  label: "自动恢复变形星点"
+  description: "边角星点变形时，根据候选形态过滤比例自动恢复变形星点。"
+  widget: switch
+
 auto_fallback:
   label: "资源不足自动降级"
   description: "预检发现资源不足时，自动降低缓冲策略并继续执行"

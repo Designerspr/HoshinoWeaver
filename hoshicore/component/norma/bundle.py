@@ -82,6 +82,8 @@ class BAAlignmentPlan:
     # far from 1.0 marks metadata that no longer matches the pixels (post-capture
     # crop or resample), so the shared camera's absolute scale is unverified.
     focal_metadata_ratio: Optional[float] = None
+    star_detection_profile: str = "strict"
+    star_recovery_probe_fractions: tuple[float, ...] = ()
 
     def frame(self, index: int) -> FrameAlignment:
         if index < 0 or index >= len(self.frames):

@@ -6,6 +6,7 @@ inputs:
 
 configs:
   star_detection_mode: { type: str, default: "auto" }
+  star_detection_recovery: { type: bool, default: true }
   mask:              { type: image, default: null }
   loader_type:       { type: str,  default: "img_file_list" }
   loader_configs:    { type: dict, default: {} }
@@ -63,6 +64,7 @@ nodes:
       reference_exif: reference_exif_loader.result
       method: configs.align_method
       star_detection_mode: configs.star_detection_mode
+      star_detection_recovery: configs.star_detection_recovery
       camera_setup_mode: configs.camera_setup_mode
       same_camera: configs.same_camera
       matching_path: configs.matching_path

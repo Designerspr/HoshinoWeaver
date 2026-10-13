@@ -52,6 +52,7 @@ async def test_hidden_configs_use_backend_defaults_like_cli(
     raw_settings = {
         "star_detection_mode": {"enabled": enabled, "value": "native_relaxed"},
         "int_weight": {"enabled": enabled, "value": False},
+        "star_detection_recovery": {"enabled": True, "value": False},
     }
     monkeypatch.setattr(wiring, "_read_raw_settings", lambda path=None: raw_settings)
     captured = []
@@ -74,6 +75,7 @@ async def test_hidden_configs_use_backend_defaults_like_cli(
     for configs in captured:
         assert configs["star_detection_mode"] == expected_mode
         assert configs["int_weight"] is expected_weight
+        assert configs["star_detection_recovery"] is False
     assert {key: captured[0][key] for key in hidden_keys} == {
         key: captured[1][key] for key in hidden_keys}
     panel.deleteLater()

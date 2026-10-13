@@ -1125,7 +1125,8 @@ class TestStarDetectCustomOps(unittest.TestCase):
                             star_detection, "_detect_star_points_native_hybrid",
                             side_effect=CustomOpUnavailableError("no native backend")) as native:
                         cache = geometry_view.StarDetectionCache.from_image(
-                            image, mask, star_detection_mode=mode)
+                            image, mask, star_detection_mode=mode,
+                            star_detection_recovery=False)
                         convert.assert_not_called()
                         got = cache.pywt_stars
                         self.assertIs(cache.pywt_stars, got)
@@ -1155,9 +1156,20 @@ class TestStarDetectCustomOps(unittest.TestCase):
         from hoshicore.component.norma.geometry_view import StarDetectionCache
         with mock.patch("hoshicore.component.norma.geometry_view.detect_star_points") as detect:
             cache = StarDetectionCache.from_image(
+                np.zeros((16, 16)), star_detection_mode="native_relaxed",
+                star_detection_recovery=False)
+            self.assertIs(cache.pywt_stars, detect.return_value)
+        self.assertEqual(detect.call_args.kwargs["mode"], "native_relaxed")
+
+    def test_recovery_cache_passes_explicit_mode(self) -> None:
+        from hoshicore.component.norma.geometry_view import StarDetectionCache
+
+        with mock.patch.object(star_detection, "detect_star_points") as detect:
+            cache = StarDetectionCache.from_image(
                 np.zeros((16, 16)), star_detection_mode="native_relaxed")
             self.assertIs(cache.pywt_stars, detect.return_value)
         self.assertEqual(detect.call_args.kwargs["mode"], "native_relaxed")
+        self.assertTrue(callable(detect.call_args.kwargs["candidate_observer"]))
 
     def test_star_detect_cuda_external_empty_mask_is_not_relaxed(self) -> None:
         if not build_info().get("cuda"):

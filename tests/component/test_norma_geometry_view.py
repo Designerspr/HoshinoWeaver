@@ -36,7 +36,7 @@ def test_detection_cache_keeps_pywt_and_median_results_lazy_and_separate(
         lambda gray, mask=None, threshold_ratio=1.0:
         calls.append("median") or stars(2.0))
 
-    cache = StarDetectionCache(np.zeros((8, 12), dtype=np.float64))
+    cache = StarDetectionCache(np.zeros((8, 12), dtype=np.float64), star_detection_recovery=False)
     pywt = cache.pywt_stars
     assert cache.pywt_stars is pywt
     assert calls == ["pywt"]
@@ -78,7 +78,8 @@ def test_detection_cache_from_image_converts_gray_only_on_demand(monkeypatch, mo
         median_grays.append(gray) or stars(2.0))
 
     image = np.full((8, 12, 3), 1000, dtype=np.uint16)
-    cache = StarDetectionCache.from_image(image, star_detection_mode=mode)
+    cache = StarDetectionCache.from_image(
+        image, star_detection_mode=mode, star_detection_recovery=False)
     cache.pywt_stars
     # The pywt detector receives the image; its CUDA backend converts on device.
     assert isinstance(sources[0], GraySource) and sources[0].raw is image
