@@ -278,6 +278,7 @@ def huber_weighted_accumulate_numpy(
     ref_std: np.ndarray,
     huber_c: float,
     weight: Any = None,
+    skip_zero_rgb: bool = False,
 ) -> Any:
     weighted_sum, weight_total = _validate_huber_target(base)
     fresh_arr = _validate_fresh(
@@ -309,6 +310,9 @@ def huber_weighted_accumulate_numpy(
             huber_weight = huber_weight * scalar_weight
         else:
             huber_weight = huber_weight * np.asarray(weight)
+    if skip_zero_rgb and fresh_arr.ndim >= 3 and fresh_arr.shape[-1] >= 3:
+        huber_weight = np.where(
+            np.all(fresh_arr[..., :3] == 0, axis=-1, keepdims=True), 0, huber_weight)
     weighted_sum += np.multiply(fresh_arr, huber_weight, dtype=weighted_sum.dtype)
     weight_total += huber_weight.astype(weight_total.dtype, copy=False)
     return base
@@ -321,6 +325,7 @@ def huber_weighted_accumulate_compiled(
     ref_std: np.ndarray,
     huber_c: float,
     weight: Any = None,
+    skip_zero_rgb: bool = False,
 ) -> Any:
     module, _ = _load_compiled_module_result()
     if module is None:
@@ -352,6 +357,7 @@ def huber_weighted_accumulate_compiled(
         ref_std_arr,
         float(huber_c),
         scalar_weight,
+        *([True] if skip_zero_rgb else []),
     )
     return base
 
@@ -359,7 +365,7 @@ def huber_weighted_accumulate_compiled(
 @lru_cache(maxsize=2)
 def _select_huber_backend(
     preference: str,
-) -> tuple[str, Callable[[Any, np.ndarray, np.ndarray, np.ndarray, float, Any], Any]]:
+) -> tuple[str, Callable[..., Any]]:
     available, compiled_error = _compiled_backend_available(
         "huber_weighted_accumulate",
         preference,
@@ -380,6 +386,7 @@ def huber_weighted_accumulate(
     ref_std: np.ndarray,
     huber_c: float,
     weight: Any = None,
+    skip_zero_rgb: bool = False,
 ) -> Any:
     scalar_weight = _validate_scalar_weight(
         weight,
@@ -393,9 +400,11 @@ def huber_weighted_accumulate(
             ref_std,
             huber_c,
             weight,
+            **({'skip_zero_rgb': True} if skip_zero_rgb else {}),
         )
     _, backend = _select_huber_backend(_fallback_preference())
-    return backend(base, fresh, ref_mean, ref_std, huber_c, scalar_weight)
+    return backend(base, fresh, ref_mean, ref_std, huber_c, scalar_weight,
+                   **({'skip_zero_rgb': True} if skip_zero_rgb else {}))
 
 
 def _validate_huber_chunk_inputs(
@@ -439,6 +448,8 @@ def huber_weighted_chunk_numpy(
     ref_std: np.ndarray,
     huber_c: float,
     weights: np.ndarray | None = None,
+    skip_zero_rgb: bool = False,
+    channels: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     stack_arr, ref_mean_arr, ref_std_arr, weights_arr = _validate_huber_chunk_inputs(
         stack, ref_mean, ref_std, weights)
@@ -459,6 +470,12 @@ def huber_weighted_chunk_numpy(
         )
     else:
         final_weight = huber_weight
+    if skip_zero_rgb:
+        _validate_huber_rgb_channels(stack_arr, channels)
+        pixels = stack_arr.reshape(stack_arr.shape[0], -1, channels)
+        zero_rgb = np.all(pixels[..., :3] == 0, axis=-1, keepdims=True)
+        final_weight = np.where(
+            zero_rgb, 0, final_weight.reshape(pixels.shape)).reshape(stack_arr.shape)
     weighted_sum = np.sum(
         np.multiply(stack_arr, final_weight, dtype=np.float64),
         axis=0,
@@ -468,18 +485,28 @@ def huber_weighted_chunk_numpy(
     return weighted_sum, weight_total
 
 
+def _validate_huber_rgb_channels(stack: np.ndarray, channels: int) -> None:
+    if channels < 3 or stack.shape[1] % channels:
+        raise ValueError("huber_weighted_chunk: skip_zero_rgb requires channels >= 3 "
+                         "and plane_size divisible by channels")
+
+
 def huber_weighted_chunk_compiled_cuda(
     stack: np.ndarray,
     ref_mean: np.ndarray,
     ref_std: np.ndarray,
     huber_c: float,
     weights: np.ndarray | None = None,
+    skip_zero_rgb: bool = False,
+    channels: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     module, _ = _load_compiled_module_result()
     if module is None or not hasattr(module, "huber_weighted_chunk_cuda"):
         raise RuntimeError("compiled CUDA custom op backend is unavailable")
     stack_arr, ref_mean_arr, ref_std_arr, weights_arr = _validate_huber_chunk_inputs(
         stack, ref_mean, ref_std, weights)
+    if skip_zero_rgb:
+        _validate_huber_rgb_channels(stack_arr, channels)
     model = cuda_chunk_memory_model(
         "huber_weighted_chunk",
         n_frames=stack_arr.shape[0],
@@ -496,6 +523,7 @@ def huber_weighted_chunk_compiled_cuda(
         ref_std_arr,
         float(huber_c),
         weights_arr,
+        *([True, channels] if skip_zero_rgb else []),
     )
 
 
@@ -530,13 +558,16 @@ def huber_weighted_chunk(
     ref_std: np.ndarray,
     huber_c: float,
     weights: np.ndarray | None = None,
+    skip_zero_rgb: bool = False,
+    channels: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     selection = _select_huber_chunk_backend(_fallback_preference())
     backend_name, backend = _huber_chunk_backend(selection)
+    kwargs = {'skip_zero_rgb': True, 'channels': channels} if skip_zero_rgb else {}
     if backend_name != "cuda":
-        return backend(stack, ref_mean, ref_std, huber_c, weights)
+        return backend(stack, ref_mean, ref_std, huber_c, weights, **kwargs)
     try:
-        return backend(stack, ref_mean, ref_std, huber_c, weights)
+        return backend(stack, ref_mean, ref_std, huber_c, weights, **kwargs)
     except RuntimeError as exc:
         resolve_after_cuda_failure(
             "huber_weighted_chunk",
@@ -544,7 +575,7 @@ def huber_weighted_chunk(
             load_module=_load_compiled_module_result,
             log=_debug_log,
         )
-    return huber_weighted_chunk_numpy(stack, ref_mean, ref_std, huber_c, weights)
+    return huber_weighted_chunk_numpy(stack, ref_mean, ref_std, huber_c, weights, **kwargs)
 
 
 def try_huber_weighted_chunk_native(
@@ -553,13 +584,16 @@ def try_huber_weighted_chunk_native(
     ref_std: np.ndarray,
     huber_c: float,
     weights: np.ndarray | None = None,
+    skip_zero_rgb: bool = False,
+    channels: int = 1,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     selection = _select_huber_chunk_backend(_fallback_preference())
     backend_name, backend = _huber_chunk_backend(selection)
     if backend_name != "cuda":
         return None
     try:
-        return backend(stack, ref_mean, ref_std, huber_c, weights)
+        return backend(stack, ref_mean, ref_std, huber_c, weights,
+                       **({'skip_zero_rgb': True, 'channels': channels} if skip_zero_rgb else {}))
     except RuntimeError as exc:
         resolve_after_cuda_failure(
             "huber_weighted_chunk",

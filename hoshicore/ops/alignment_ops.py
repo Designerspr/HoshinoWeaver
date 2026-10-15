@@ -19,7 +19,8 @@ from ..component.norma.frame_align import (AlignmentError,
                                            MATCHING_PATH_MEDIAN,
                                            align_frame_camera_model,
                                            align_frame_homography,
-                                           build_camera_candidate)
+                                           build_camera_candidate,
+                                           prepare_spatial_mask)
 from ..component.norma.geometry_view import GeometryView, StarDetectionCache
 from ..component.norma.intrinsics_from_exif import lens_type_from_exif
 from ..component.queue import StreamExhausted
@@ -48,6 +49,7 @@ class StarAlignmentOp(FilterBaseOp):
         "star_detection_mode": {"type": "str", "default": "auto"},
         "star_detection_recovery": {"type": "bool", "default": True},
         "reference":        {"type": "image",  "required": True},
+        "mask":             {"type": "image",  "default": None},
         "reference_exif":   {"type": "exif",   "default": None},
         "method":           {"type": "str",    "default": "distortion"},
         "camera_setup_mode": {"type": "str",   "default": None},
@@ -147,6 +149,10 @@ class StarAlignmentOp(FilterBaseOp):
         # stream. This removes the previous first-frame/fallback mode.
         reference = configs['reference']
         ref_arr = reference.data if isinstance(reference, FloatImage) else reference
+        configured_mask = configs.get("mask")
+        target_mask = (None if configured_mask is None else
+                       prepare_spatial_mask(configured_mask, ref_arr.shape))
+        source_mask = None
 
         ref_exif_obj = configs.get('reference_exif')
         ref_exif_tags = (ref_exif_obj.exif
@@ -225,6 +231,10 @@ class StarAlignmentOp(FilterBaseOp):
                     pass
 
             frame_arr = frame.data if isinstance(frame, FloatImage) else frame
+            mask_kwargs = {}
+            if configured_mask is not None:
+                if source_mask is None or source_mask.shape != frame_arr.shape[:2]:
+                    source_mask = prepare_spatial_mask(configured_mask, frame_arr.shape)
 
             # 对齐
             try:
@@ -244,14 +254,24 @@ class StarAlignmentOp(FilterBaseOp):
                 if ref_camera and src_camera and method != "homography":
                     aligned_arr = await self._run_cpu(
                         align_frame_camera_model,
-                        frame_arr, ref_geo, ref_arr,
-                        ref_candidate, src_candidate, same_camera,
-                         bootstrap_scales_tuple, remap_map_scale,
-                         guided_refine=guided_refine,
-                         matching_path=matching_path,
-                         ref_refine_geo=ref_refine_geo,
-                         star_detection_mode=configs.get("star_detection_mode", "auto"),
-                         star_detection_recovery=configs.get("star_detection_recovery", True))
+                        frame_arr,
+                        ref_geo,
+                        ref_arr,
+                        ref_candidate,
+                        src_candidate,
+                        same_camera,
+                        bootstrap_scales_tuple,
+                        remap_map_scale,
+                        guided_refine=guided_refine,
+                        matching_path=matching_path,
+                        ref_refine_geo=ref_refine_geo,
+                        star_detection_mode=configs.get(
+                            "star_detection_mode", "auto"),
+                        star_detection_recovery=configs.get(
+                            "star_detection_recovery", True),
+                        source_mask=source_mask,
+                        target_mask=target_mask,
+                    )
                 else:
                     aligned_arr = await self._run_cpu(
                         align_frame_homography,
@@ -261,6 +281,8 @@ class StarAlignmentOp(FilterBaseOp):
                         float(fallback_focal_equiv_mm),
                         src_camera,
                         star_detection_mode=configs.get("star_detection_mode", "auto"),
+                        source_mask=source_mask,
+                        target_mask=target_mask,
                     )
 
                 aligned = (FloatImage(data=aligned_arr, dtype=frame.dtype)

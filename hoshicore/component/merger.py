@@ -369,7 +369,8 @@ class HuberWeightedMerger(BaseMerger):
     def merge(self,
               new_img: np.ndarray,
               weight: Optional[Union[float, NDArray]] = None,
-              spatial_mask: Optional[np.ndarray] = None):
+              spatial_mask: Optional[np.ndarray] = None,
+              skip_zero_rgb: bool = False):
         _ = spatial_mask
         raw = new_img
         if self._source_dtype is None:
@@ -397,6 +398,7 @@ class HuberWeightedMerger(BaseMerger):
             self._ref_std,
             self.huber_c,
             weight,
+            skip_zero_rgb=skip_zero_rgb,
         )
 
     @property

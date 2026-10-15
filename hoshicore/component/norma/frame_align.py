@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from loguru import logger
 
+from ..data_container import FloatImage
 from .alignment import (AlignmentResult, match_star_pairs,
                          match_star_pairs_asterism, optimize_alignment,
                          run_guided_refine_stage)
@@ -780,13 +781,57 @@ def solve_staged_alignment(
     )
 
 
+def prepare_spatial_mask(mask, image_shape: tuple[int, ...]) -> np.ndarray:
+    """Threshold before nearest-neighbor resizing to the image's spatial size."""
+    array = mask.data if isinstance(mask, FloatImage) else np.asarray(mask)
+    if array.ndim == 3:
+        if array.shape[2] not in (1, 3, 4):
+            raise ValueError("spatial mask must have 1, 3, or 4 channels")
+        array = array[..., 0]
+    if array.ndim != 2:
+        raise ValueError("spatial mask must be a 2D image")
+    threshold = (np.iinfo(array.dtype).max * 0.5
+                 if np.issubdtype(array.dtype, np.integer) else 0.5)
+    binary = array > threshold
+    if binary.shape != image_shape[:2]:
+        binary = cv2.resize(binary.astype(np.uint8),
+                            (image_shape[1], image_shape[0]),
+                            interpolation=cv2.INTER_NEAREST).astype(bool)
+    return np.ascontiguousarray(binary)
+
+
+def remap_image_with_mask(
+    image: np.ndarray,
+    remap: Callable[[np.ndarray], np.ndarray],
+    source_mask: Optional[np.ndarray] = None,
+    target_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Remap an image and independently sample its binary source coverage.
+
+    The callable must return a fresh array and use the same geometry, linear
+    interpolation and zero border for image and float32 coverage. Only complete
+    source coverage inside target_mask is retained; other samples are zeroed.
+    No mask metadata is added to the returned image.
+    """
+    result = remap(image)
+    if source_mask is not None:
+        coverage = remap(source_mask.astype(np.float32))
+        valid = coverage >= 1.0
+        if target_mask is not None:
+            valid &= target_mask
+        result[~valid] = 0
+    return result
+
+
 def align_frame_homography(
         frame: np.ndarray,
         ref_geo: GeometryView,
         reference: np.ndarray,
         fallback_focal_equiv_mm: float = 20.0,
         src_camera: BaseCameraModel | None = None,
-        star_detection_mode: str = "auto") -> np.ndarray:
+        star_detection_mode: str = "auto", *,
+        source_mask: Optional[np.ndarray] = None,
+        target_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Fixed-camera fast path: unit-ray match → rotation-derived H → warpPerspective。
 
     Args:
@@ -795,7 +840,7 @@ def align_frame_homography(
         reference: 参考帧原始数组（用于获取输出尺寸）。
 
     Returns:
-        对齐后的图像数组。
+        对齐后的图像数组。提供 source_mask 时会将不完整覆盖或目标 mask 外的像素置零。
 
     Raises:
         AlignmentError: 星点不足或匹配失败。
@@ -811,7 +856,7 @@ def align_frame_homography(
         logger.debug(
             "align_frame_homography: identical star geometry; bypassing matching and warp"
         )
-        return frame.copy()
+        return remap_image_with_mask(frame, np.copy, source_mask, target_mask)
 
     try:
         match = match_star_pairs(ref_geo, src_geo)
@@ -835,7 +880,10 @@ def align_frame_homography(
         pts_src_pred,
         reference.shape,
     )
-    return cv2.warpPerspective(frame, H, (w, h))
+    warp = partial(cv2.warpPerspective, M=H, dsize=(w, h),
+                   flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                   borderValue=0)
+    return remap_image_with_mask(frame, warp, source_mask, target_mask)
 
 
 def align_frame_camera_model(
@@ -853,8 +901,14 @@ def align_frame_camera_model(
     ref_refine_geo: Optional[GeometryView] = None,
     star_detection_mode: str = "auto",
     star_detection_recovery: bool = True,
+    source_mask: Optional[np.ndarray] = None,
+    target_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Camera-model alignment with explicit ref-to-src remap construction."""
+    """Align an image; source_mask opts into an independent validity remap.
+
+    Samples outside complete source coverage or target_mask are zeroed in the
+    output array.
+    """
     ref_camera = ref_candidate.camera
     src_camera = src_candidate.camera
     ref_projection = "fisheye" if isinstance(
@@ -883,7 +937,7 @@ def align_frame_camera_model(
         logger.debug(
             "align_frame_camera_model: identical star geometry; bypassing bootstrap, optimization, and remap"
         )
-        return frame.copy()
+        return remap_image_with_mask(frame, np.copy, source_mask, target_mask)
 
     if matching_path in BOOTSTRAP_MATCHING_PATHS:
         try:
@@ -1004,10 +1058,9 @@ def align_frame_camera_model(
             "align_frame_camera_model: residual: no finite projected points")
 
     h, w = reference.shape[:2]
-    return cam1.project_image_from_camera(
-        cam2,
-        frame,
-        (w, h),
-        rotation_dst_to_src=rotation_ref_to_src,
-        map_scale=remap_map_scale,
-    )
+    def remap(image):
+        return cam1.project_image_from_camera(
+            cam2, image, (w, h),
+            rotation_dst_to_src=rotation_ref_to_src,
+            map_scale=remap_map_scale)
+    return remap_image_with_mask(frame, remap, source_mask, target_mask)

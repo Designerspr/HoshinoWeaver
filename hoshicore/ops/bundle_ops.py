@@ -3,6 +3,7 @@ import asyncio
 import dataclasses
 import enum
 from collections import Counter
+from functools import partial
 from typing import Any, Optional
 
 import cv2
@@ -20,7 +21,9 @@ from ..component.norma.bundle_window import (BundleWindowSpec,
                                              build_identity_window_schedule,
                                              build_identity_window_spec)
 from ..component.norma.frame_align import (CameraInitializationPolicy,
-                                           build_camera_candidate)
+                                           build_camera_candidate,
+                                           prepare_spatial_mask,
+                                           remap_image_with_mask)
 from ..component.norma.geometry_view import StarDetectionCache
 from ..component.norma.wavelet_recovery import (
     RECOVERY_PROBE_FRAMES, select_wavelet_recovery)
@@ -273,34 +276,6 @@ def _sigma_clip_bundle_window(
     return np.rint(mean).clip(0, np.iinfo(stack.dtype).max).astype(stack.dtype)
 
 
-def _prepare_detection_mask(mask: Any,
-                            image_shape: tuple[int, ...]) -> np.ndarray:
-    """Convert a static workflow mask to a binary detector-sized mask."""
-    array = mask.data if isinstance(mask, FloatImage) else np.asarray(mask)
-    if array.ndim == 3:
-        if array.shape[2] not in (1, 3, 4):
-            raise ValueError("BA detection mask must have 1, 3, or 4 channels")
-        array = array[..., 0]
-    if array.ndim != 2:
-        raise ValueError("BA detection mask must be a 2D image")
-
-    if np.issubdtype(array.dtype, np.bool_):
-        binary = array
-    elif np.issubdtype(array.dtype, np.integer):
-        binary = array > (np.iinfo(array.dtype).max * 0.5)
-    else:
-        binary = array > 0.5
-
-    target_shape = image_shape[:2]
-    if binary.shape != target_shape:
-        binary = cv2.resize(
-            binary.astype(np.uint8),
-            (target_shape[1], target_shape[0]),
-            interpolation=cv2.INTER_NEAREST,
-        ).astype(bool)
-    return np.ascontiguousarray(binary, dtype=bool)
-
-
 @register_op()
 class BundleAdjustmentOp(BaseOp):
     """Collect a same-camera sequence and emit its geometry-only BA plan.
@@ -433,7 +408,7 @@ class BundleAdjustmentOp(BaseOp):
             tags = exif_obj.exif if exif_obj is not None else None
             if (configured_mask is not None
                     and detection_mask_shape != array.shape[:2]):
-                detection_mask = _prepare_detection_mask(
+                detection_mask = prepare_spatial_mask(
                     configured_mask, array.shape)
                 detection_mask_shape = array.shape[:2]
             detection = await self._run_cpu(
@@ -555,6 +530,7 @@ class BundleReferenceRemapOp(FilterBaseOp):
     }
     CONFIGS: dict[str, Any] = {
         "alignment_plan": {"type": "object", "required": True},
+        "mask": {"type": "image", "default": None},
         "remap_map_scale": {"type": "float", "default": 0.5},
     }
     OUTPUTS: dict[str, Any] = {
@@ -592,6 +568,9 @@ class BundleReferenceRemapOp(FilterBaseOp):
                           intrinsics.image_width_px)
         output_size = (intrinsics.image_width_px,
                        intrinsics.image_height_px)
+        configured_mask = configs.get("mask")
+        mask = (None if configured_mask is None else
+                prepare_spatial_mask(configured_mask, expected_shape))
 
         for index in self._input_range():
             data = self._async_convert_inputs()
@@ -629,17 +608,16 @@ class BundleReferenceRemapOp(FilterBaseOp):
                 raise ValueError(
                     f"solved frame {index} has no reference-relative pose")
 
-            if index == plan.reference_frame_index:
+            if index == plan.reference_frame_index and mask is None:
                 output = frame
             else:
+                remap = (np.copy if index == plan.reference_frame_index else
+                         partial(plan.shared_camera.project_image_from_camera,
+                                 plan.shared_camera, output_size=output_size,
+                                 rotation_dst_to_src=entry.rotation_ref_to_src,
+                                 map_scale=map_scale))
                 aligned = await self._run_cpu(
-                    plan.shared_camera.project_image_from_camera,
-                    plan.shared_camera,
-                    array,
-                    output_size,
-                    rotation_dst_to_src=entry.rotation_ref_to_src,
-                    map_scale=map_scale,
-                )
+                    remap_image_with_mask, array, remap, mask, mask)
                 output = (FloatImage(data=aligned, dtype=frame.dtype)
                           if isinstance(frame, FloatImage) else aligned)
             await self._broadcast_outputs(
@@ -821,7 +799,7 @@ class _BundleWindowStackOp(BaseOp):
                 expected_shape = array.shape[:2]
                 output_size = (expected_shape[1], expected_shape[0])
                 if configured_mask is not None:
-                    participation_mask = _prepare_detection_mask(
+                    participation_mask = prepare_spatial_mask(
                         configured_mask, array.shape)
             elif array.shape[:2] != expected_shape:
                 raise ValueError(
@@ -839,7 +817,7 @@ class _BundleWindowStackOp(BaseOp):
                     "window input frames must use one container representation")
 
             if configured_mask is not None and participation_mask is None:
-                participation_mask = _prepare_detection_mask(
+                participation_mask = prepare_spatial_mask(
                     configured_mask, array.shape)
             frame_cache[index] = (frame, array, exif_obj)
 
@@ -995,7 +973,7 @@ class WindowFrameMaskedBlendOp(BaseOp):
                     blended = sky_array
                 else:
                     if mask_shape != sky_array.shape[:2]:
-                        runtime_mask = _prepare_detection_mask(
+                        runtime_mask = prepare_spatial_mask(
                             configured_mask, sky_array.shape)
                         mask_shape = sky_array.shape[:2]
                     assert runtime_mask is not None

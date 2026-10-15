@@ -15,11 +15,11 @@ namespace {
 constexpr int THREADS_PER_BLOCK = 256;
 
 template <typename T>
-__global__ void huber_weighted_chunk_kernel(const T* stack, const double* ref_mean,
-                                            const double* ref_std, const double* weights,
-                                            double* weighted_sum, double* weight_total,
-                                            const int64_t n_frames, const int64_t plane_size,
-                                            const double huber_c) {
+__global__ void
+huber_weighted_chunk_kernel(const T* stack, const double* ref_mean, const double* ref_std,
+                            const double* weights, double* weighted_sum, double* weight_total,
+                            const int64_t n_frames, const int64_t plane_size, const double huber_c,
+                            const bool skip_zero_rgb, const int channels) {
     const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= plane_size) {
         return;
@@ -31,6 +31,12 @@ __global__ void huber_weighted_chunk_kernel(const T* stack, const double* ref_me
     double sum = 0.0;
     double total = 0.0;
     for (int64_t frame = 0; frame < n_frames; ++frame) {
+        if (skip_zero_rgb) {
+            const int64_t rgb = frame * plane_size + idx - idx % channels;
+            if (stack[rgb] == 0 && stack[rgb + 1] == 0 && stack[rgb + 2] == 0) {
+                continue;
+            }
+        }
         const float value = static_cast<float>(stack[frame * plane_size + idx]);
         const float residual = (value - mean) / (std_val + 1.0e-10f);
         const float abs_residual = fabsf(residual);
@@ -51,7 +57,8 @@ void launch_huber_weighted_chunk_cuda_impl(const T* stack_host, const double* re
                                            const double* ref_std_host, const double* weights_host,
                                            double* weighted_sum_host, double* weight_total_host,
                                            const int64_t n_frames, const int64_t plane_size,
-                                           const double huber_c, const char* op_name) {
+                                           const double huber_c, const bool skip_zero_rgb,
+                                           const int channels, const char* op_name) {
     if (n_frames <= 0 || plane_size <= 0) {
         throw std::invalid_argument("huber_weighted_chunk_cuda: stack dimensions must be positive");
     }
@@ -103,7 +110,8 @@ void launch_huber_weighted_chunk_cuda_impl(const T* stack_host, const double* re
             static_cast<int>((plane_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
         huber_weighted_chunk_kernel<T><<<blocks, THREADS_PER_BLOCK, 0, stream>>>(
             static_cast<const T*>(stack_device), ref_mean_device, ref_std_device, weights_device,
-            weighted_sum_device, weight_total_device, n_frames, plane_size, huber_c);
+            weighted_sum_device, weight_total_device, n_frames, plane_size, huber_c, skip_zero_rgb,
+            channels);
         hnw::cuda::throw_if_failed(cudaGetLastError(), op_name);
 
         hnw::cuda::throw_if_failed(cudaMemcpyAsync(weighted_sum_host, weighted_sum_device,
@@ -126,18 +134,22 @@ void launch_huber_weighted_chunk_cuda_u8(const uint8_t* stack_host, const double
                                          const double* ref_std_host, const double* weights_host,
                                          double* weighted_sum_host, double* weight_total_host,
                                          const int64_t n_frames, const int64_t plane_size,
-                                         const double huber_c) {
+                                         const double huber_c, const bool skip_zero_rgb,
+                                         const int channels) {
     launch_huber_weighted_chunk_cuda_impl<uint8_t>(
         stack_host, ref_mean_host, ref_std_host, weights_host, weighted_sum_host, weight_total_host,
-        n_frames, plane_size, huber_c, "huber_weighted_chunk_cuda kernel launch");
+        n_frames, plane_size, huber_c, skip_zero_rgb, channels,
+        "huber_weighted_chunk_cuda kernel launch");
 }
 
 void launch_huber_weighted_chunk_cuda_u16(const uint16_t* stack_host, const double* ref_mean_host,
                                           const double* ref_std_host, const double* weights_host,
                                           double* weighted_sum_host, double* weight_total_host,
                                           const int64_t n_frames, const int64_t plane_size,
-                                          const double huber_c) {
+                                          const double huber_c, const bool skip_zero_rgb,
+                                          const int channels) {
     launch_huber_weighted_chunk_cuda_impl<uint16_t>(
         stack_host, ref_mean_host, ref_std_host, weights_host, weighted_sum_host, weight_total_host,
-        n_frames, plane_size, huber_c, "huber_weighted_chunk_cuda kernel launch");
+        n_frames, plane_size, huber_c, skip_zero_rgb, channels,
+        "huber_weighted_chunk_cuda kernel launch");
 }

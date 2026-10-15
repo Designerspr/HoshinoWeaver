@@ -757,6 +757,8 @@ class HuberMeanIteratorOp(ChunkIteratorBaseOp):
             state['ref_std'],
             self._configs['huber_c'],
             weights_arr,
+            **({'skip_zero_rgb': True, 'channels': first_data.shape[2]}
+               if first_data.ndim == 3 and first_data.shape[2] >= 3 else {}),
         )
         if result is None:
             return False
@@ -770,7 +772,9 @@ class HuberMeanIteratorOp(ChunkIteratorBaseOp):
         return True
 
     def _merge_chunk(self, state, chunk_data, chunk_weight, frame_idx):
-        state['merger'].merge(chunk_data, chunk_weight)
+        state['merger'].merge(
+            chunk_data, chunk_weight,
+            skip_zero_rgb=chunk_data.ndim == 3 and chunk_data.shape[2] >= 3)
 
     def _check_convergence(self, state, pass_idx):
         return state['_done'] or pass_idx >= 0

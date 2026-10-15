@@ -17,7 +17,8 @@ void huber_weighted_accumulate_inplace_kernel(py::buffer_info& weighted_sum_info
                                               const py::buffer_info& fresh_info,
                                               const py::buffer_info& ref_mean_info,
                                               const py::buffer_info& ref_std_info,
-                                              const double huber_c, const double frame_weight) {
+                                              const double huber_c, const double frame_weight,
+                                              const bool skip_zero_rgb) {
     auto* HNW_RESTRICT weighted_sum_ptr = static_cast<double*>(weighted_sum_info.ptr);
     auto* HNW_RESTRICT weight_total_ptr = static_cast<double*>(weight_total_info.ptr);
     const auto* HNW_RESTRICT fresh_ptr = static_cast<const FreshT*>(fresh_info.ptr);
@@ -25,6 +26,8 @@ void huber_weighted_accumulate_inplace_kernel(py::buffer_info& weighted_sum_info
     const auto* HNW_RESTRICT ref_std_ptr = static_cast<const float*>(ref_std_info.ptr);
     const ssize_t total = fresh_info.size;
     const float huber_c_f = static_cast<float>(huber_c);
+    const ssize_t channels = fresh_info.ndim >= 3 ? fresh_info.shape.back() : 1;
+    const bool skip_rgb = skip_zero_rgb && channels >= 3;
 
     py::gil_scoped_release release;
 #if defined(_OPENMP) && HNW_ENABLE_OMP_SIMD
@@ -33,6 +36,12 @@ void huber_weighted_accumulate_inplace_kernel(py::buffer_info& weighted_sum_info
 #pragma omp parallel for schedule(static)
 #endif
     for (ssize_t i = 0; i < total; ++i) {
+        if (skip_rgb) {
+            const ssize_t rgb = i - i % channels;
+            if (fresh_ptr[rgb] == 0 && fresh_ptr[rgb + 1] == 0 && fresh_ptr[rgb + 2] == 0) {
+                continue;
+            }
+        }
         const double pixel_value = static_cast<double>(fresh_ptr[i]);
         const float residual_value = static_cast<float>(fresh_ptr[i]);
         const float residual = (residual_value - ref_mean_ptr[i]) / (ref_std_ptr[i] + 1.0e-10f);
@@ -51,7 +60,7 @@ void dispatch_huber_weighted_accumulate(
     const py::array_t<FreshT, py::array::c_style | py::array::forcecast>& fresh,
     const py::array_t<float, py::array::c_style | py::array::forcecast>& ref_mean,
     const py::array_t<float, py::array::c_style | py::array::forcecast>& ref_std,
-    const double huber_c, const double frame_weight) {
+    const double huber_c, const double frame_weight, const bool skip_zero_rgb) {
     auto weighted_sum_t = weighted_sum.cast<hnw::MutableCArray<double>>();
     auto weight_total_t = weight_total.cast<hnw::MutableCArray<double>>();
     auto weighted_sum_info = weighted_sum_t.request();
@@ -61,7 +70,7 @@ void dispatch_huber_weighted_accumulate(
     auto ref_std_info = ref_std.request();
     huber_weighted_accumulate_inplace_kernel<FreshT>(weighted_sum_info, weight_total_info,
                                                      fresh_info, ref_mean_info, ref_std_info,
-                                                     huber_c, frame_weight);
+                                                     huber_c, frame_weight, skip_zero_rgb);
 }
 
 void validate_huber_shapes(const py::array& weighted_sum, const py::array& weight_total,
@@ -82,7 +91,7 @@ void validate_huber_shapes(const py::array& weighted_sum, const py::array& weigh
 void huber_weighted_accumulate_dispatch(py::array weighted_sum, py::array weight_total,
                                         const py::array& fresh, const py::array& ref_mean,
                                         const py::array& ref_std, double huber_c,
-                                        const py::object& weight_obj) {
+                                        const py::object& weight_obj, const bool skip_zero_rgb) {
     validate_huber_shapes(weighted_sum, weight_total, fresh, ref_mean, ref_std);
     double frame_weight = 1.0;
     if (!weight_obj.is_none()) {
@@ -96,42 +105,42 @@ void huber_weighted_accumulate_dispatch(py::array weighted_sum, py::array weight
         dispatch_huber_weighted_accumulate<uint8_t>(
             weighted_sum, weight_total,
             fresh.cast<py::array_t<uint8_t, py::array::c_style | py::array::forcecast>>(),
-            ref_mean_t, ref_std_t, huber_c, frame_weight);
+            ref_mean_t, ref_std_t, huber_c, frame_weight, skip_zero_rgb);
         return;
     }
     if (py::isinstance<py::array_t<uint16_t>>(fresh)) {
         dispatch_huber_weighted_accumulate<uint16_t>(
             weighted_sum, weight_total,
             fresh.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>(),
-            ref_mean_t, ref_std_t, huber_c, frame_weight);
+            ref_mean_t, ref_std_t, huber_c, frame_weight, skip_zero_rgb);
         return;
     }
     if (py::isinstance<py::array_t<uint32_t>>(fresh)) {
         dispatch_huber_weighted_accumulate<uint32_t>(
             weighted_sum, weight_total,
             fresh.cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(),
-            ref_mean_t, ref_std_t, huber_c, frame_weight);
+            ref_mean_t, ref_std_t, huber_c, frame_weight, skip_zero_rgb);
         return;
     }
     if (py::isinstance<py::array_t<uint64_t>>(fresh)) {
         dispatch_huber_weighted_accumulate<uint64_t>(
             weighted_sum, weight_total,
             fresh.cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(),
-            ref_mean_t, ref_std_t, huber_c, frame_weight);
+            ref_mean_t, ref_std_t, huber_c, frame_weight, skip_zero_rgb);
         return;
     }
     if (py::isinstance<py::array_t<float>>(fresh)) {
         dispatch_huber_weighted_accumulate<float>(
             weighted_sum, weight_total,
             fresh.cast<py::array_t<float, py::array::c_style | py::array::forcecast>>(), ref_mean_t,
-            ref_std_t, huber_c, frame_weight);
+            ref_std_t, huber_c, frame_weight, skip_zero_rgb);
         return;
     }
     if (py::isinstance<py::array_t<double>>(fresh)) {
         dispatch_huber_weighted_accumulate<double>(
             weighted_sum, weight_total,
             fresh.cast<py::array_t<double, py::array::c_style | py::array::forcecast>>(),
-            ref_mean_t, ref_std_t, huber_c, frame_weight);
+            ref_mean_t, ref_std_t, huber_c, frame_weight, skip_zero_rgb);
         return;
     }
     throw std::invalid_argument("huber_weighted_accumulate: unsupported fresh dtype");
@@ -142,6 +151,6 @@ void huber_weighted_accumulate_dispatch(py::array weighted_sum, py::array weight
 void bind_huber_accumulate_ops(py::module_& m) {
     m.def("huber_weighted_accumulate", &huber_weighted_accumulate_dispatch, py::arg("weighted_sum"),
           py::arg("weight_total"), py::arg("fresh"), py::arg("ref_mean"), py::arg("ref_std"),
-          py::arg("huber_c"), py::arg("weight") = py::none(),
+          py::arg("huber_c"), py::arg("weight") = py::none(), py::arg("skip_zero_rgb") = false,
           "Update HuberMeanParam buffers in-place with one more frame.");
 }

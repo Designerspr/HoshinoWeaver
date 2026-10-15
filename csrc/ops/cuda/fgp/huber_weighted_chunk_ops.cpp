@@ -11,12 +11,14 @@
 void launch_huber_weighted_chunk_cuda_u8(const uint8_t* stack_host, const double* ref_mean_host,
                                          const double* ref_std_host, const double* weights_host,
                                          double* weighted_sum_host, double* weight_total_host,
-                                         int64_t n_frames, int64_t plane_size, double huber_c);
+                                         int64_t n_frames, int64_t plane_size, double huber_c,
+                                         bool skip_zero_rgb, int channels);
 
 void launch_huber_weighted_chunk_cuda_u16(const uint16_t* stack_host, const double* ref_mean_host,
                                           const double* ref_std_host, const double* weights_host,
                                           double* weighted_sum_host, double* weight_total_host,
-                                          int64_t n_frames, int64_t plane_size, double huber_c);
+                                          int64_t n_frames, int64_t plane_size, double huber_c,
+                                          bool skip_zero_rgb, int channels);
 
 namespace {
 
@@ -66,8 +68,13 @@ py::tuple huber_weighted_chunk_cuda_impl(
     const py::array_t<T, py::array::c_style | py::array::forcecast>& stack,
     const py::array_t<double, py::array::c_style | py::array::forcecast>& ref_mean,
     const py::array_t<double, py::array::c_style | py::array::forcecast>& ref_std,
-    const double huber_c, const py::object& weights_obj, Launcher launcher) {
+    const double huber_c, const py::object& weights_obj, const bool skip_zero_rgb,
+    const int channels, Launcher launcher) {
     validate_shape(stack, ref_mean, ref_std, weights_obj);
+    if (skip_zero_rgb && (channels < 3 || stack.shape(1) % channels != 0)) {
+        throw std::invalid_argument("huber_weighted_chunk_cuda: skip_zero_rgb requires channels "
+                                    ">= 3 and plane_size divisible by channels");
+    }
 
     const ssize_t n_frames = stack.shape(0);
     const ssize_t plane_size = stack.shape(1);
@@ -81,7 +88,7 @@ py::tuple huber_weighted_chunk_cuda_impl(
         py::gil_scoped_release release;
         launcher(stack.data(), ref_mean.data(), ref_std.data(), weights_ptr,
                  weighted_sum.mutable_data(), weight_total.mutable_data(), n_frames, plane_size,
-                 huber_c);
+                 huber_c, skip_zero_rgb, channels);
     }
     return py::make_tuple(weighted_sum, weight_total);
 }
@@ -90,17 +97,20 @@ py::tuple huber_weighted_chunk_cuda_dispatch(
     const py::array& stack,
     const py::array_t<double, py::array::c_style | py::array::forcecast>& ref_mean,
     const py::array_t<double, py::array::c_style | py::array::forcecast>& ref_std,
-    const double huber_c, const py::object& weights_obj) {
+    const double huber_c, const py::object& weights_obj, const bool skip_zero_rgb,
+    const int channels) {
     if (py::isinstance<py::array_t<uint8_t>>(stack)) {
         auto stack_arr =
             stack.cast<py::array_t<uint8_t, py::array::c_style | py::array::forcecast>>();
         return huber_weighted_chunk_cuda_impl(stack_arr, ref_mean, ref_std, huber_c, weights_obj,
+                                              skip_zero_rgb, channels,
                                               launch_huber_weighted_chunk_cuda_u8);
     }
     if (py::isinstance<py::array_t<uint16_t>>(stack)) {
         auto stack_arr =
             stack.cast<py::array_t<uint16_t, py::array::c_style | py::array::forcecast>>();
         return huber_weighted_chunk_cuda_impl(stack_arr, ref_mean, ref_std, huber_c, weights_obj,
+                                              skip_zero_rgb, channels,
                                               launch_huber_weighted_chunk_cuda_u16);
     }
     throw std::invalid_argument(
@@ -112,5 +122,6 @@ py::tuple huber_weighted_chunk_cuda_dispatch(
 void bind_huber_weighted_chunk_cuda_ops(py::module_& m) {
     m.def("huber_weighted_chunk_cuda", &huber_weighted_chunk_cuda_dispatch, py::arg("stack"),
           py::arg("ref_mean"), py::arg("ref_std"), py::arg("huber_c"),
-          py::arg("weights") = py::none(), "CUDA host-in/out Huber weighted chunk accumulation.");
+          py::arg("weights") = py::none(), py::arg("skip_zero_rgb") = false,
+          py::arg("channels") = 1, "CUDA host-in/out Huber weighted chunk accumulation.");
 }

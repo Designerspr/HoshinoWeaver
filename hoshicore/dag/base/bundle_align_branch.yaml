@@ -95,6 +95,7 @@ nodes:
       exifs: remap_exif_loader.result
     configs:
       alignment_plan: bundle_adjust.alignment_plan
+      mask: configs.mask
       remap_map_scale: configs.remap_map_scale
     outputs:
       result: { type: sequence }

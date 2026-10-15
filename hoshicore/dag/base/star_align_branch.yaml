@@ -61,6 +61,7 @@ nodes:
       exifs: exif_loader.result
     configs:
       reference: load_align_base.result
+      mask: configs.mask
       reference_exif: reference_exif_loader.result
       method: configs.align_method
       star_detection_mode: configs.star_detection_mode
